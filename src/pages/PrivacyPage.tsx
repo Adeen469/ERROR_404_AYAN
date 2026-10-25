@@ -54,7 +54,7 @@ export function PrivacyPage() {
           <p>
             <strong className="text-[#1E2320]">Events and activity.</strong>{' '}
             Events you publish, events you register for, events you save, and
-            preferences such as your home neighborhood and interests are
+            preferences such as your home location (city and state) and interests are
             stored so the service can work: listings, tickets, recommendations,
             and your dashboard all depend on them. Events you publish are
             visible to other Locora users by design.

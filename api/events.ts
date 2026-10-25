@@ -143,9 +143,6 @@ function applyFilters(events: any[], query: any): any[] {
   if (query.category && query.category !== "All" && query.category !== "All Categories") {
     out = out.filter((e: any) => e.category === query.category);
   }
-  if (query.neighborhood && query.neighborhood !== "All" && query.neighborhood !== "All Neighborhoods") {
-    out = out.filter((e: any) => e.neighborhood === query.neighborhood);
-  }
   // Worldwide location filter (Country -> State -> City). Same rule as the
   // frontend's local filter: a set filter matches only events that actually
   // carry that value, case-insensitively.
@@ -257,8 +254,10 @@ export default async function handler(req: any, res: any) {
         endDate: p.endDate || new Date(Date.now() + 86400000 * 7 + 7200000).toISOString(),
         venueName: p.venueName || "Community Hall",
         address: p.address || "100 Main Street",
-        // No fake default: the forms no longer ask for a neighborhood.
-        neighborhood: p.neighborhood || "",
+        // Location rule: no separate neighborhood is stored from a
+        // free-text field. The neighborhood is the city when a state is
+        // selected, otherwise none.
+        neighborhood: p.state ? (p.city || "") : "",
         city: p.city || "Metro City",
         // Worldwide location + ownership key. These were previously dropped
         // here even though the create form sends them, so an event created

@@ -74,7 +74,7 @@ export function Footer() {
               </li>
               <li>
                 <Link to="/profile" className="hover:text-[#1E3F35] transition-colors">
-                  Neighborhood Preferences
+                  Location Preferences
                 </Link>
               </li>
             </ul>

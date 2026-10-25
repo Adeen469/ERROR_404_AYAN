@@ -450,7 +450,9 @@ export default async function handler(req: any, res: any) {
     email: googleUser.email,
     avatar: googleUser.picture || FALLBACK_AVATAR,
     bio: "Active Locora community member.",
-    neighborhood: "Downtown Arts District",
+    // No home neighborhood by default: the location rule derives it
+    // from a saved state/city, and new accounts have none yet.
+    neighborhood: "",
     interests: ["Food & Community", "Live Music & Culture"],
     role:
       ADMIN_EMAILS.indexOf(String(googleUser.email).trim().toLowerCase()) !== -1
