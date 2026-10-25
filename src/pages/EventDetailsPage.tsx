@@ -21,6 +21,8 @@ import QRCode from 'qrcode';
 import { eventsService } from '../services/events-service';
 import { registrationsService } from '../services/registrations-service';
 import { savedEventsService } from '../services/saved-events-service';
+import { authService } from '../services/auth-service';
+import { AttendeeDetailsGate } from '../components/events/AttendeeDetailsGate';
 import { formatEventDate, formatEventTimeRange, formatPrice, getMapsSearchUrl, formatEventLocation, getEventNeighborhood } from '../utils/formatters';
 import { useToast } from '../components/ui/Toast';
 import { ConfirmDialog, Modal } from '../components/ui/Modal';
@@ -73,6 +75,10 @@ export function EventDetailsPage() {
   const [shareModalOpen, setShareModalOpen] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
+  // Attendee details gate state: which registration flow to continue
+  // once the user has provided/confirmed their details.
+  const [detailsGateOpen, setDetailsGateOpen] = useState(false);
+  const [detailsGateTarget, setDetailsGateTarget] = useState<'free' | 'paid' | null>(null);
   // Manual-approval payment dialog state (paid events only).
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [utr, setUtr] = useState('');
@@ -178,6 +184,21 @@ export function EventDetailsPage() {
     } catch {
       toast({ type: 'error', title: 'Failed to bookmark event' });
     }
+  };
+
+  // Attendee details gate: events require attendee details unless the
+  // organizer opted out (missing flag on older events means required).
+  // Guests skip the gate — registration itself requires sign-in, and
+  // the existing service error covers that path unchanged.
+  const detailsRequired = event ? event.requireAttendeeDetails !== false : false;
+  const openRegistration = (target: 'free' | 'paid') => {
+    if (!detailsRequired || !authService.getCurrentUser()) {
+      if (target === 'paid') setPaymentOpen(true);
+      else setConfirmRegisterOpen(true);
+      return;
+    }
+    setDetailsGateTarget(target);
+    setDetailsGateOpen(true);
   };
 
   const handleRegisterConfirm = async () => {
@@ -552,7 +573,7 @@ export function EventDetailsPage() {
                   <button
                     type="button"
                     disabled={isFull}
-                    onClick={() => setPaymentOpen(true)}
+                    onClick={() => openRegistration('paid')}
                     className={`w-full py-3 text-xs font-semibold text-white rounded-lg transition-colors shadow-xs ${
                       isFull
                         ? 'bg-slate-300 cursor-not-allowed'
@@ -568,7 +589,7 @@ export function EventDetailsPage() {
                 <button
                   type="button"
                   disabled={isFull}
-                  onClick={() => (isPaidEvent ? setPaymentOpen(true) : setConfirmRegisterOpen(true))}
+                  onClick={() => openRegistration(isPaidEvent ? 'paid' : 'free')}
                   className={`w-full py-3 text-xs font-semibold text-white rounded-lg transition-colors shadow-xs ${
                     isFull
                       ? 'bg-slate-300 cursor-not-allowed'
@@ -635,6 +656,26 @@ export function EventDetailsPage() {
         )}? A digital entry ticket will be generated for your attendee profile.`}
         confirmLabel="Confirm & Get Pass"
       />
+
+      {/* Attendee details gate (events that require details) */}
+      {detailsGateOpen && event && (
+        <AttendeeDetailsGate
+          open={detailsGateOpen}
+          eventTitle={event.title}
+          organizerName={event.organizer?.name || 'the organizer'}
+          onClose={() => {
+            setDetailsGateOpen(false);
+            setDetailsGateTarget(null);
+          }}
+          onProceed={() => {
+            const target = detailsGateTarget;
+            setDetailsGateOpen(false);
+            setDetailsGateTarget(null);
+            if (target === 'paid') setPaymentOpen(true);
+            else if (target === 'free') setConfirmRegisterOpen(true);
+          }}
+        />
+      )}
 
       {/* Confirm Cancellation Dialog */}
       <ConfirmDialog

@@ -45,6 +45,10 @@ export function EditEventPage() {
 
   const [price, setPrice] = useState('0');
   const [upiId, setUpiId] = useState('');
+  // Attendee details gate (see CreateEventPage): on unless the
+  // organizer opted out. Older events predate this flag and behave as
+  // if it were on.
+  const [requireAttendeeDetails, setRequireAttendeeDetails] = useState(true);
   const [capacity, setCapacity] = useState('50');
   const [tagsInput, setTagsInput] = useState('');
 
@@ -75,6 +79,7 @@ export function EditEventPage() {
           setAddress(data.address);
           setPrice(String(data.price));
           setUpiId(data.upiId || '');
+          setRequireAttendeeDetails(data.requireAttendeeDetails ?? true);
           setCapacity(String(data.capacity));
           setTagsInput(data.tags.join(', '));
         }
@@ -137,6 +142,7 @@ export function EditEventPage() {
         neighborhood: event?.state ? (event?.city || '') : '',
         price: Number(price),
         upiId: upiId.trim() || undefined,
+        requireAttendeeDetails,
         capacity: Number(capacity),
         tags,
       }, { ...ownershipOpts, allowAdmin: false });
@@ -353,6 +359,21 @@ export function EditEventPage() {
               <span className="text-[11px] text-[#8C887E]">
                 Shown to attendees of paid events as a QR code and UPI link so they can pay you directly. Optional for free events.
               </span>
+            </div>
+
+            <div className="flex items-start gap-3 bg-[#FAF8F5] border border-[#E5E1D8] rounded-xl p-4">
+              <input
+                type="checkbox"
+                checked={requireAttendeeDetails}
+                onChange={(e) => setRequireAttendeeDetails(e.target.checked)}
+                className="mt-0.5 w-4 h-4 accent-[#1E3F35]"
+              />
+              <div>
+                <p className="text-xs font-semibold text-[#1E2320]">Require attendee details for registration</p>
+                <p className="text-[11px] text-[#8C887E] leading-relaxed mt-0.5">
+                  Attendees must provide their full name, mobile number and email, and confirm sharing them with you (the organizer) only, before they can register. Turn this off to let anyone register with no details.
+                </p>
+              </div>
             </div>
 
             <div>

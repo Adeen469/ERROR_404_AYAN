@@ -69,6 +69,10 @@ export function CreateEventPage() {
   // Shown to attendees at registration; blank means "pay the organizer
   // directly" with no specific ID.
   const [upiId, setUpiId] = useState('');
+  // Attendee details gate: on by default. When on, registering requires
+  // the attendee's name, mobile number and email, plus a confirmation
+  // that those details are shared with the organizer only.
+  const [requireAttendeeDetails, setRequireAttendeeDetails] = useState(true);
   const [capacity, setCapacity] = useState('50');
   const [tagsInput, setTagsInput] = useState('Community, Gathering');
 
@@ -155,6 +159,7 @@ export function CreateEventPage() {
         country: location.country.trim() || undefined,
         price: Number(price),
         upiId: upiId.trim() || undefined,
+        requireAttendeeDetails,
         capacity: Number(capacity),
         tags,
         organizer: {
@@ -509,6 +514,21 @@ export function CreateEventPage() {
               <span className="text-[11px] text-[#8C887E]">
                 Shown to attendees of paid events as a QR code and UPI link so they can pay you directly. Optional for free events.
               </span>
+            </div>
+
+            <div className="flex items-start gap-3 bg-[#FAF8F5] border border-[#E5E1D8] rounded-xl p-4">
+              <input
+                type="checkbox"
+                checked={requireAttendeeDetails}
+                onChange={(e) => setRequireAttendeeDetails(e.target.checked)}
+                className="mt-0.5 w-4 h-4 accent-[#1E3F35]"
+              />
+              <div>
+                <p className="text-xs font-semibold text-[#1E2320]">Require attendee details for registration</p>
+                <p className="text-[11px] text-[#8C887E] leading-relaxed mt-0.5">
+                  Attendees must provide their full name, mobile number and email, and confirm sharing them with you (the organizer) only, before they can register. Turn this off to let anyone register with no details.
+                </p>
+              </div>
             </div>
 
             <div>

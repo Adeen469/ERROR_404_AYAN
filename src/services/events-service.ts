@@ -416,6 +416,8 @@ export const eventsService = {
       createdByEmail: payload.createdByEmail,
       price: Number(payload.price) || 0,
       upiId: payload.upiId || undefined,
+      // Older events predate this flag and behave as if it were on.
+      requireAttendeeDetails: payload.requireAttendeeDetails ?? true,
       capacity: Number(payload.capacity) || 50,
       registeredCount: 0,
       status: 'published',

@@ -59,6 +59,12 @@ export interface EventItem {
   // (shown to attendees at registration). Optional: without it, attendees
   // are told to pay the organizer directly and submit their UTR.
   upiId?: string;
+  // Attendee details gate: when true (or absent — older events predate
+  // this flag), registering requires the attendee's name, mobile number
+  // and email, plus a per-registration confirmation that those details
+  // are shared with the organizer only. When false, registration needs
+  // no details at all. Set on the create/edit forms.
+  requireAttendeeDetails?: boolean;
   capacity: number;
   registeredCount: number;
   status: EventStatus;
@@ -83,12 +89,21 @@ export interface AttendeeRegistration {
   // submitted with a paid registration. Empty until approval, when the
   // ticket code is issued. Only present on paid registrations.
   utr?: string;
+  // Attendee contact details, shared with the organizer only, for
+  // events that require them (see EventItem.requireAttendeeDetails).
+  // Only present on registrations made after the details gate.
+  userPhone?: string;
 }
 
 export interface UserProfile {
   id: string;
   name: string;
   email: string;
+  // Mobile number, collected once via the attendee details gate before
+  // the first registration for an event that requires details, then
+  // reused (with a per-registration sharing confirmation). Never
+  // displayed publicly; shared with the event organizer only.
+  phone?: string;
   avatar: string;
   bio: string;
   // Legacy: the home-neighborhood field is retired. Home location is
