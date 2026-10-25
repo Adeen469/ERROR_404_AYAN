@@ -126,8 +126,10 @@ export function EditEventPage() {
         endDate: new Date(endDate).toISOString(),
         venueName: venueName.trim(),
         address: address.trim(),
-        // Neighborhood retired: state/city are the location now.
-        neighborhood: '',
+        // Location rule: the neighborhood is the city when a state is
+        // selected, otherwise none (state/city are carried from the
+        // stored event, since the edit form has no location picker).
+        neighborhood: event?.state ? (event?.city || '') : '',
         price: Number(price),
         upiId: upiId.trim() || undefined,
         capacity: Number(capacity),

@@ -21,9 +21,6 @@ export function ProfilePage() {
   const [name, setName] = useState(currentUser?.name || '');
   const [email] = useState(currentUser?.email || '');
   const [bio, setBio] = useState(currentUser?.bio || '');
-  const [neighborhood, setNeighborhood] = useState(
-    currentUser?.neighborhood || 'Silverlake Commons'
-  );
   // Home location (Country -> State -> City) for "Near me" on Discover.
   const [homeLocation, setHomeLocation] = useState({
     country: currentUser?.country || '',
@@ -97,7 +94,6 @@ export function ProfilePage() {
       await authService.updateProfile({
         name: name.trim(),
         bio: bio.trim(),
-        neighborhood,
         country: homeLocation.country,
         state: homeLocation.state,
         city: homeLocation.city,
@@ -128,7 +124,7 @@ export function ProfilePage() {
           Profile & Preferences
         </h1>
         <p className="text-sm text-[#5F635D] mt-1">
-          Manage your personal information, home neighborhood, and SmartMatch topic preferences.
+          Manage your personal information, home location, and SmartMatch topic preferences.
         </p>
       </div>
 
@@ -198,7 +194,7 @@ export function ProfilePage() {
           </div>
         </div>
 
-        {/* Neighborhood Preference */}
+        {/* Location Settings */}
         <div className="space-y-4 pt-4">
           <h2 className="font-editorial text-base font-bold text-[#1E2320] pb-2 border-b border-[#EBE7DF]">
             Location Settings
@@ -209,23 +205,11 @@ export function ProfilePage() {
             value={homeLocation}
             onChange={setHomeLocation}
           />
-          <div>
-            <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
-              Primary Home Neighborhood / Area
-            </label>
-            <input
-              type="text"
-              value={neighborhood}
-              onChange={(e) => setNeighborhood(e.target.value)}
-              placeholder="e.g. Downtown Arts District"
-              className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-2.5 text-[#1E2320] focus:border-[#1E3F35]"
-            />
-            <p className="text-[11px] text-[#5F635D] mt-1">
-              Your home city powers the "Near me" filter on Discover, and your
-              neighborhood is used to calculate proximity weighting for
-              SmartMatch recommendations.
-            </p>
-          </div>
+          <p className="text-[11px] text-[#5F635D]">
+            Your home city powers the "Near me" filter on Discover and
+            SmartMatch recommendations. When a state is selected, your city
+            is also your neighborhood for matching.
+          </p>
         </div>
 
         {/* Topic Interests */}

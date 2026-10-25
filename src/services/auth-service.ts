@@ -120,7 +120,9 @@ export const authService = {
       email,
       avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
       bio: 'Local resident and active event attendee.',
-      neighborhood: 'Downtown Arts District',
+      // No home neighborhood by default: the location rule derives it
+      // from a saved state/city, and new accounts have none yet.
+      neighborhood: '',
       interests: ['Food & Community', 'Live Music & Culture'],
       role: 'attendee',
       authProvider: 'local',

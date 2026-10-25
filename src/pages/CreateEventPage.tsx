@@ -143,8 +143,9 @@ export function CreateEventPage() {
         endDate: new Date(endDate).toISOString(),
         venueName: venueName.trim(),
         address: address.trim(),
-        // Neighborhood retired: state/city from the picker are the location now.
-        neighborhood: '',
+        // Location rule: the neighborhood is the city when a state is
+        // selected, otherwise none.
+        neighborhood: location.state.trim() ? (location.city.trim() || 'Metro City') : '',
         city: location.city.trim() || 'Metro City',
         state: location.state.trim() || undefined,
         country: location.country.trim() || undefined,
@@ -159,7 +160,7 @@ export function CreateEventPage() {
           avatar: currentUser.avatar,
           bio: currentUser.bio,
           email: currentUser.email,
-          location: currentUser.neighborhood,
+          location: [currentUser.state, currentUser.city].filter(Boolean).join(', '),
           eventsCount: 0,
           totalAttendeesServed: 0,
         },

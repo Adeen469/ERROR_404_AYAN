@@ -4,6 +4,7 @@ import { MapPin, Globe, Mail, Calendar, Users, ArrowLeft, ShieldCheck } from 'lu
 import { Organizer, EventItem } from '../types';
 import { organizersService } from '../services/organizers-service';
 import { EventCard } from '../components/events/EventCard';
+import { formatEventLocation } from '../utils/formatters';
 import { ProfileSkeleton } from '../components/ui/LoadingSkeleton';
 
 export function OrganizerProfilePage() {
@@ -44,6 +45,10 @@ export function OrganizerProfilePage() {
       </div>
     );
   }
+
+  // Organizer location follows the same rule as events: the state/city
+  // of their events, never a stored neighborhood string.
+  const organizerLocation = events.map((e) => formatEventLocation(e)).find(Boolean) || '';
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-10">
@@ -90,10 +95,10 @@ export function OrganizerProfilePage() {
             </p>
 
             <div className="flex flex-wrap items-center gap-4 text-xs text-[#5F635D] pt-1">
-              {organizer.location && (
+              {organizerLocation && (
                 <span className="flex items-center gap-1.5">
                   <MapPin className="w-3.5 h-3.5 text-[#8C887E]" />
-                  <span>{organizer.location}</span>
+                  <span>{organizerLocation}</span>
                 </span>
               )}
 

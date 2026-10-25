@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { Sparkles, Sliders, Check, MapPin, CheckCircle } from 'lucide-react';
+import { formatEventLocation } from '../utils/formatters';
 import { EventCategory, SmartMatchResult } from '../types';
-import { DEMO_CATEGORIES, DEMO_NEIGHBORHOODS } from '../mocks/demo-data';
+import { DEMO_CATEGORIES } from '../mocks/demo-data';
 import { smartMatchService } from '../services/smart-match-service';
 import { authService } from '../services/auth-service';
 import { EventCard } from '../components/events/EventCard';
@@ -13,9 +15,10 @@ export function SmartMatchPage() {
   const [selectedInterests, setSelectedInterests] = useState<EventCategory[]>(
     currentUser?.interests || ['Food & Community', 'Live Music & Culture']
   );
-  const [selectedNeighborhood, setSelectedNeighborhood] = useState<string>(
-    currentUser?.neighborhood || 'Silverlake Commons'
-  );
+  // Home city, derived from the saved location under the location rule:
+  // the city is the neighborhood when a state is selected, otherwise none.
+  // It comes from Profile's Location Settings, not a separate control here.
+  const homeCity = currentUser?.state ? (currentUser?.city || '') : '';
   const [preferFreeOnly, setPreferFreeOnly] = useState(false);
 
   const [results, setResults] = useState<SmartMatchResult[]>([]);
@@ -34,7 +37,7 @@ export function SmartMatchPage() {
       try {
         const matches = await smartMatchService.getRecommendations({
           userInterests: selectedInterests,
-          preferredNeighborhood: selectedNeighborhood,
+          preferredCity: homeCity,
           preferFreeOnly,
         });
         if (active) {
@@ -50,7 +53,7 @@ export function SmartMatchPage() {
     return () => {
       active = false;
     };
-  }, [selectedInterests, selectedNeighborhood, preferFreeOnly]);
+  }, [selectedInterests, homeCity, preferFreeOnly]);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-10">
@@ -66,7 +69,7 @@ export function SmartMatchPage() {
           Locora SmartMatch
         </h1>
         <p className="text-sm text-[#5F635D] max-w-2xl leading-relaxed">
-          SmartMatch scores events according to your interest categories, home neighborhood proximity, and schedule availability. Each card explains the exact reasons for its recommendation.
+          SmartMatch scores events according to your interest categories, home city proximity, and schedule availability. Each card explains the exact reasons for its recommendation.
         </p>
       </div>
 
@@ -106,23 +109,24 @@ export function SmartMatchPage() {
           </div>
         </div>
 
-        {/* Neighborhood & Free admission toggle */}
+        {/* Home city & Free admission toggle */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
           <div>
             <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
-              Target Neighborhood
+              Home City
             </label>
-            <select
-              value={selectedNeighborhood}
-              onChange={(e) => setSelectedNeighborhood(e.target.value)}
-              className="w-full text-xs font-medium bg-white border border-[#E2DFD8] rounded-lg p-2.5 text-[#1E2320] focus:border-[#1E3F35]"
-            >
-              {DEMO_NEIGHBORHOODS.filter((n) => n !== 'All Neighborhoods').map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
+            <p className="text-xs text-[#5F635D] bg-white border border-[#E2DFD8] rounded-lg p-2.5">
+              {homeCity ? (
+                <>{homeCity} — events here rank higher</>
+              ) : (
+                <>
+                  Not set —{' '}
+                  <Link to="/profile" className="text-[#1E3F35] font-semibold underline">
+                    set your home location in Profile
+                  </Link>
+                </>
+              )}
+            </p>
           </div>
 
           <div className="flex items-center gap-3 pt-6">
@@ -157,7 +161,7 @@ export function SmartMatchPage() {
           <EmptyState
             icon="sparkles"
             title="No matching events found"
-            description="Try selecting at least one interest category or pick another neighborhood."
+            description="Try selecting at least one interest category or updating your home city in your profile."
           />
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -170,9 +174,11 @@ export function SmartMatchPage() {
                       <Sparkles className="w-3.5 h-3.5" />
                       <span>{score}% Match Score</span>
                     </span>
-                    <span className="text-[11px] text-[#8C887E] tabular-nums">
-                      {event.neighborhood}
-                    </span>
+                    {formatEventLocation(event) && (
+                      <span className="text-[11px] text-[#8C887E] tabular-nums">
+                        {formatEventLocation(event)}
+                      </span>
+                    )}
                   </div>
                   <ul className="space-y-0.5 text-[11px] text-[#5F635D] list-disc list-inside">
                     {matchReasons.map((reason, i) => (
