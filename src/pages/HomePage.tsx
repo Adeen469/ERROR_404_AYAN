@@ -8,6 +8,12 @@ import { EventCard } from '../components/events/EventCard';
 import { EventListSkeleton } from '../components/ui/LoadingSkeleton';
 import { useToast } from '../components/ui/Toast';
 
+// Cover images live in src/assets/images. They must be imported so Vite
+// bundles them into dist/ for production. A plain src/ URL
+// string only works in Vite dev (via vite.middlewares) and 404s in a
+// production build, which is why the cards showed broken images.
+import heroGatheringImg from '../assets/images/hero_neighborhood_gathering_1792850960020.jpg';
+
 export function HomePage() {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -165,7 +171,7 @@ export function HomePage() {
             <div className="lg:col-span-5 relative">
               <div className="relative rounded-2xl overflow-hidden shadow-xl aspect-[16/10] bg-slate-100 border border-slate-200/80">
                 <img
-                  src="/src/assets/images/hero_neighborhood_gathering_1792850960020.jpg"
+                  src={heroGatheringImg}
                   alt="Vibrant neighborhood gathering under warm evening string lights"
                   referrerPolicy="no-referrer"
                   className="w-full h-full object-cover"

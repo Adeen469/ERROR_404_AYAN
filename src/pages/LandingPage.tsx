@@ -1,6 +1,12 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
+
+// Cover images live in src/assets/images. They must be imported so Vite
+// bundles them into dist/ for production. A plain src/ URL
+// string only works in Vite dev (via vite.middlewares) and 404s in a
+// production build, which is why the cards showed broken images.
+import heroGatheringImg from '../assets/images/hero_neighborhood_gathering_1792850960020.jpg';
   ArrowRight,
   MapPin,
   Calendar,
@@ -126,7 +132,7 @@ export function LandingPage() {
             <div className="lg:col-span-5 relative">
               <div className="relative rounded-2xl overflow-hidden shadow-2xl aspect-[4/3] bg-stone-200 border border-[#E2DFD8]">
                 <img
-                  src="/src/assets/images/hero_neighborhood_gathering_1792850960020.jpg"
+                  src={heroGatheringImg}
                   alt="Evening neighborhood dinner and music gathering in community courtyard"
                   referrerPolicy="no-referrer"
                   className="w-full h-full object-cover"

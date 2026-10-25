@@ -11,6 +11,10 @@ const PORT = Number(process.env.PORT) || 3000;
 const IS_PROD = process.env.NODE_ENV === 'production';
 
 app.use(express.json());
+// Serve the local cover images at /assets/images/... in both dev and
+// production (node server.ts). On Vercel this server does not run, so
+// the frontend instead imports these images via Vite (see demo-data.ts).
+app.use('/assets/images', express.static(path.join(process.cwd(), 'src/assets/images')));
 
 // Ensure data directory exists
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -62,7 +66,7 @@ const INITIAL_SEED_EVENTS = [
     summary: 'A 24-hour community hackathon designing open-source tools for pedestrian safety and bus reliability.',
     description: 'Join developers, civic designers, and transit advocates for an intensive collaborative weekend building public tools for our city transit system. Mentors will be on-site to assist with geospatial APIs, accessibility standards, and rapid prototyping.',
     category: 'Technology & Hackathons',
-    coverImage: '/src/assets/images/event_tech_hackathon_1792850960780.jpg',
+    coverImage: '/assets/images/event_tech_hackathon_1792850960780.jpg',
     startDate: '2026-11-14T09:00:00Z',
     endDate: '2026-11-15T17:00:00Z',
     venueName: 'Urban Innovation Lab — Floor 4',
@@ -95,7 +99,7 @@ const INITIAL_SEED_EVENTS = [
     summary: 'Fresh regional produce, sourdough breads, heirloom flowers, and local preserves at the open-air square.',
     description: 'Celebrate our regional agricultural bounty at the Silverlake Commons outdoor pavilion. Meet over 30 family farms, micro-bakers, and organic honey producers.',
     category: 'Food & Community',
-    coverImage: '/src/assets/images/event_farmers_market_1792850961672.jpg',
+    coverImage: '/assets/images/event_farmers_market_1792850961672.jpg',
     startDate: '2026-11-08T08:30:00Z',
     endDate: '2026-11-08T14:00:00Z',
     venueName: 'Silverlake Commons Central Plaza',
@@ -128,7 +132,7 @@ const INITIAL_SEED_EVENTS = [
     summary: 'An intimate evening of live acoustic folk and storytelling in the historic brick courtyard under lantern lights.',
     description: 'Experience the sound of four emerging independent songwriters performing unplugged in our ivy-covered courtyard garden. Seating on rustic benches.',
     category: 'Live Music & Culture',
-    coverImage: '/src/assets/images/event_acoustic_music_1792850962324.jpg',
+    coverImage: '/assets/images/event_acoustic_music_1792850962324.jpg',
     startDate: '2026-11-12T19:00:00Z',
     endDate: '2026-11-12T21:30:00Z',
     venueName: 'The Old Mill Courtyard Garden',
@@ -161,7 +165,7 @@ const INITIAL_SEED_EVENTS = [
     summary: 'An energizing 75-minute outdoor yoga flow with panoramic river views, open to all levels.',
     description: 'Greet the sunrise over the harbor with a mindful, grounding Vinyasa flow led by certified instructor Maya Lin. Alignment, breath awareness, and gentle mobility.',
     category: 'Fitness & Outdoors',
-    coverImage: '/src/assets/images/event_morning_yoga_1792850962615.jpg',
+    coverImage: '/assets/images/event_morning_yoga_1792850962615.jpg',
     startDate: '2026-11-07T07:15:00Z',
     endDate: '2026-11-07T08:30:00Z',
     venueName: 'Harbor Green Riverfront Lawn',
@@ -194,7 +198,7 @@ const INITIAL_SEED_EVENTS = [
     summary: 'A vibrant evening block party featuring 15 culinary trucks, craft market stalls, and light installations.',
     description: 'A neighborhood evening celebration bringing together our culinary favorites, artisan jewelers, printmakers, and live DJ sets in the historic cobblestone square.',
     category: 'Food & Community',
-    coverImage: '/src/assets/images/hero_neighborhood_gathering_1792850960020.jpg',
+    coverImage: '/assets/images/hero_neighborhood_gathering_1792850960020.jpg',
     startDate: '2026-11-20T17:30:00Z',
     endDate: '2026-11-20T22:30:00Z',
     venueName: 'The Historic Cobblestone Market Square',
@@ -264,7 +268,7 @@ app.post('/api/events/search-live', async (req: Request, res: Response) => {
             summary: e.info?.slice(0, 140) || `${e.name} in ${city}`,
             description: e.info || e.pleaseNote || `Official live event in ${city}. Hosted at ${e._embedded?.venues?.[0]?.name || 'Local Venue'}.`,
             category: 'Live Music & Culture',
-            coverImage: e.images?.[0]?.url || '/src/assets/images/hero_neighborhood_gathering_1792850960020.jpg',
+            coverImage: e.images?.[0]?.url || '/assets/images/hero_neighborhood_gathering_1792850960020.jpg',
             startDate: e.dates?.start?.dateTime || new Date().toISOString(),
             endDate: new Date(Date.now() + 10800000).toISOString(),
             venueName: e._embedded?.venues?.[0]?.name || 'Local Venue',
@@ -325,7 +329,7 @@ app.post('/api/events/search-live', async (req: Request, res: Response) => {
         "summary": "1 sentence summary",
         "description": "2-3 sentences about the event",
         "category": "Technology & Hackathons" | "Workshops & Learning" | "Live Music & Culture" | "Fitness & Outdoors" | "Food & Community" | "Art & Creative" | "Volunteering & Impact",
-        "coverImage": "/src/assets/images/hero_neighborhood_gathering_1792850960020.jpg",
+        "coverImage": "/assets/images/hero_neighborhood_gathering_1792850960020.jpg",
         "startDate": "YYYY-MM-DDTHH:mm:ssZ",
         "endDate": "YYYY-MM-DDTHH:mm:ssZ",
         "venueName": "Real Venue Name",
@@ -516,7 +520,7 @@ app.post('/api/events', (req: Request, res: Response) => {
     summary: payload.summary || payload.description?.slice(0, 140) || 'Local gathering.',
     description: payload.description || '',
     category: payload.category || 'Food & Community',
-    coverImage: payload.coverImage || '/src/assets/images/hero_neighborhood_gathering_1792850960020.jpg',
+    coverImage: payload.coverImage || '/assets/images/hero_neighborhood_gathering_1792850960020.jpg',
     startDate: payload.startDate || new Date().toISOString(),
     endDate: payload.endDate || new Date().toISOString(),
     venueName: payload.venueName || 'Community Hall',

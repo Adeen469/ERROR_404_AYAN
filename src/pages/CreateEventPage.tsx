@@ -7,26 +7,36 @@ import { eventsService } from '../services/events-service';
 import { authService } from '../services/auth-service';
 import { useToast } from '../components/ui/Toast';
 
+// Cover images live in src/assets/images. They must be imported so Vite
+// bundles them into dist/ for production. A plain src/ URL
+// string only works in Vite dev (via vite.middlewares) and 404s in a
+// production build, which is why the cards showed broken images.
+import heroGatheringImg from '../assets/images/hero_neighborhood_gathering_1792850960020.jpg';
+import techHackathonImg from '../assets/images/event_tech_hackathon_1792850960780.jpg';
+import farmersMarketImg from '../assets/images/event_farmers_market_1792850961672.jpg';
+import acousticMusicImg from '../assets/images/event_acoustic_music_1792850962324.jpg';
+import morningYogaImg from '../assets/images/event_morning_yoga_1792850962615.jpg';
+
 export const PRESET_COVER_IMAGES = [
   {
     name: 'Evening Gathering',
-    url: '/src/assets/images/hero_neighborhood_gathering_1792850960020.jpg',
+    url: heroGatheringImg,
   },
   {
     name: 'Tech & Hackathon',
-    url: '/src/assets/images/event_tech_hackathon_1792850960780.jpg',
+    url: techHackathonImg,
   },
   {
     name: 'Farmers & Food Market',
-    url: '/src/assets/images/event_farmers_market_1792850961672.jpg',
+    url: farmersMarketImg,
   },
   {
     name: 'Acoustic Concert',
-    url: '/src/assets/images/event_acoustic_music_1792850962324.jpg',
+    url: acousticMusicImg,
   },
   {
     name: 'Morning Wellness & Yoga',
-    url: '/src/assets/images/event_morning_yoga_1792850962615.jpg',
+    url: morningYogaImg,
   },
 ];
 

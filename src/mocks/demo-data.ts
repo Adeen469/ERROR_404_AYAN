@@ -1,5 +1,15 @@
 import { EventItem, Organizer, UserProfile, EventCategory } from '../types';
 
+// Cover images live in src/assets/images. They must be imported so Vite
+// bundles them into dist/ for production. A plain src/ URL
+// string only works in Vite dev (via vite.middlewares) and 404s in a
+// production build, which is why the cards showed broken images.
+import heroGatheringImg from '../assets/images/hero_neighborhood_gathering_1792850960020.jpg';
+import techHackathonImg from '../assets/images/event_tech_hackathon_1792850960780.jpg';
+import farmersMarketImg from '../assets/images/event_farmers_market_1792850961672.jpg';
+import acousticMusicImg from '../assets/images/event_acoustic_music_1792850962324.jpg';
+import morningYogaImg from '../assets/images/event_morning_yoga_1792850962615.jpg';
+
 export const DEMO_ORGANIZERS: Organizer[] = [
   {
     id: 'org-1',
@@ -75,7 +85,7 @@ Whether you are a seasoned software engineer, data scientist, or urban planning 
 
 Food, high-speed fiber internet, and hardware access will be provided throughout the weekend. Final prototypes will be reviewed by a panel of transit directors and neighborhood mobility advocates with pilot trial opportunities.`,
     category: 'Technology & Hackathons',
-    coverImage: '/src/assets/images/event_tech_hackathon_1792850960780.jpg',
+    coverImage: techHackathonImg,
     startDate: '2026-11-14T09:00:00Z',
     endDate: '2026-11-15T17:00:00Z',
     venueName: 'Urban Innovation Lab — Floor 4',
@@ -102,7 +112,7 @@ Highlights include live acoustic bluegrass at the bandstand, coffee tastings fro
 
 Bring your reusable canvas totes. Pet-friendly outdoor grounds with water stations provided.`,
     category: 'Food & Community',
-    coverImage: '/src/assets/images/event_farmers_market_1792850961672.jpg',
+    coverImage: farmersMarketImg,
     startDate: '2026-11-08T08:30:00Z',
     endDate: '2026-11-08T14:00:00Z',
     venueName: 'Silverlake Commons Central Plaza',
@@ -129,7 +139,7 @@ Seating is arranged on rustic benches and garden rugs. Local herbal tea and cide
 
 Doors open at 6:30 PM. Music begins promptly at 7:00 PM. Due to acoustic preservation and limited courtyard capacity, advance registration is mandatory.`,
     category: 'Live Music & Culture',
-    coverImage: '/src/assets/images/event_acoustic_music_1792850962324.jpg',
+    coverImage: acousticMusicImg,
     startDate: '2026-11-12T19:00:00Z',
     endDate: '2026-11-12T21:30:00Z',
     venueName: 'The Old Mill Courtyard Garden',
@@ -156,7 +166,7 @@ We focus on alignment, breath awareness, and gentle mobility suited for both new
 
 Complimentary citrus-infused hydration and mindful journaling prompts provided afterwards.`,
     category: 'Fitness & Outdoors',
-    coverImage: '/src/assets/images/event_morning_yoga_1792850962615.jpg',
+    coverImage: morningYogaImg,
     startDate: '2026-11-07T07:15:00Z',
     endDate: '2026-11-07T08:30:00Z',
     venueName: 'Harbor Green Riverfront Lawn',
@@ -181,7 +191,7 @@ Complimentary citrus-infused hydration and mindful journaling prompts provided a
 
 Browse handmade goods, enjoy wood-fired pizza and street tacos, and participate in the community twilight lantern lighting at 8:15 PM. Free entry; food and craft items purchased directly from vendors.`,
     category: 'Food & Community',
-    coverImage: '/src/assets/images/hero_neighborhood_gathering_1792850960020.jpg',
+    coverImage: heroGatheringImg,
     startDate: '2026-11-20T17:30:00Z',
     endDate: '2026-11-20T22:30:00Z',
     venueName: 'The Historic Cobblestone Market Square',
@@ -208,7 +218,7 @@ Participants will learn stencil preparation, ink mixing, squeegee pressure, and 
 
 All non-toxic waterbased inks, screens, and archival papers included in registration.`,
     category: 'Art & Creative',
-    coverImage: '/src/assets/images/event_tech_hackathon_1792850960780.jpg',
+    coverImage: techHackathonImg,
     startDate: '2026-11-18T14:00:00Z',
     endDate: '2026-11-18T17:00:00Z',
     venueName: 'Makers Guild Print Studio',
@@ -233,7 +243,7 @@ All non-toxic waterbased inks, screens, and archival papers included in registra
 
 Tools, gloves, native seedlings, and light refreshments will be provided. Led by city botanists who will explain companion planting and local wildlife support. Wear sturdy closed-toe shoes and clothes you do not mind getting dirty.`,
     category: 'Volunteering & Impact',
-    coverImage: '/src/assets/images/event_farmers_market_1792850961672.jpg',
+    coverImage: farmersMarketImg,
     startDate: '2026-11-21T10:00:00Z',
     endDate: '2026-11-21T13:30:00Z',
     venueName: 'Corner Meadow Lot',
@@ -258,7 +268,7 @@ Tools, gloves, native seedlings, and light refreshments will be provided. Led by
 
 Attendees will dissect practical case studies and test local open-source language models. Accessible to technologists, civic advocates, and curious citizens alike. Bring your laptop if you wish to run the interactive exercises.`,
     category: 'Workshops & Learning',
-    coverImage: '/src/assets/images/event_tech_hackathon_1792850960780.jpg',
+    coverImage: techHackathonImg,
     startDate: '2026-11-25T18:00:00Z',
     endDate: '2026-11-25T20:30:00Z',
     venueName: 'Metro Central Public Library — Room 3A',

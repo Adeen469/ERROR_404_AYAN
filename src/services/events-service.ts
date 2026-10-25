@@ -2,6 +2,12 @@ import { EventFilterOptions, EventItem, PaginatedResponse } from '../types';
 import { DEMO_EVENTS, DEMO_ORGANIZERS } from '../mocks/demo-data';
 import { apiClient, isDemoMode } from './api-client';
 
+// Cover images live in src/assets/images. They must be imported so Vite
+// bundles them into dist/ for production. A plain src/ URL
+// string only works in Vite dev (via vite.middlewares) and 404s in a
+// production build, which is why the cards showed broken images.
+import heroGatheringImg from '../assets/images/hero_neighborhood_gathering_1792850960020.jpg';
+
 const STORAGE_KEY = 'locora_events_db';
 
 function getStoredEvents(): EventItem[] {
@@ -174,7 +180,7 @@ export const eventsService = {
       summary: eventPayload.summary || eventPayload.description?.slice(0, 140) || 'Local community gathering.',
       description: eventPayload.description || '',
       category: eventPayload.category || 'Food & Community',
-      coverImage: eventPayload.coverImage || '/src/assets/images/hero_neighborhood_gathering_1792850960020.jpg',
+      coverImage: eventPayload.coverImage || heroGatheringImg,
       startDate: eventPayload.startDate || new Date(Date.now() + 86400000 * 7).toISOString(),
       endDate: eventPayload.endDate || new Date(Date.now() + 86400000 * 7 + 7200000).toISOString(),
       venueName: eventPayload.venueName || 'Community Hall',
