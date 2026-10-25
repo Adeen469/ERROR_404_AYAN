@@ -179,8 +179,14 @@ export const eventsService = {
     if (!isDemoMode()) {
       try {
         return await apiClient.get<EventItem>(`/events/${id}`);
-      } catch {
-        return null;
+      } catch (err) {
+        // The live site has no Express backend on Vercel, so /api/events/:id
+        // returns the SPA HTML page instead of JSON. getEvents() already
+        // falls back to the local store in that case, but getEventById()
+        // used to return null here, which made EVERY event details page
+        // show "Event Not Found" even though the same events listed fine
+        // on Discover. Fall back to the local store instead.
+        console.warn('Backend API /events/:id unavailable, falling back to local events store:', err);
       }
     }
 
