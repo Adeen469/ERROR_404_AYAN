@@ -2,11 +2,6 @@ import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
 
-// Cover images live in src/assets/images. They must be imported so Vite
-// bundles them into dist/ for production. A plain src/ URL
-// string only works in Vite dev (via vite.middlewares) and 404s in a
-// production build, which is why the cards showed broken images.
-import heroGatheringImg from '../assets/images/hero_neighborhood_gathering_1792850960020.jpg';
   ArrowRight,
   MapPin,
   Calendar,
@@ -16,6 +11,9 @@ import heroGatheringImg from '../assets/images/hero_neighborhood_gathering_17928
   ChevronUp,
   Radio
 } from 'lucide-react';
+
+// Cover image imported so Vite bundles it into dist/ for production.
+import heroGatheringImg from '../assets/images/hero_neighborhood_gathering_1792850960020.jpg';
 
 export function LandingPage() {
   const [activeFaq, setActiveFaq] = useState<number | null>(null);
