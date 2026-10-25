@@ -59,7 +59,7 @@ export const authService = {
   // Custom Google OAuth flow (server-side, using GOOGLE_CLIENT_ID /
   // GOOGLE_CLIENT_SECRET from Vercel environment variables).
   //
-  // This replaces the previous Firebase signInWithPopup flow. It redirects
+  // This replaces the previous popup-based sign-in flow. It redirects
   // the browser to /api/auth/google (a Vercel Serverless Function), which
   // redirects to Google, and Google redirects back to
   // /api/auth/google/callback, which stores the profile in localStorage
