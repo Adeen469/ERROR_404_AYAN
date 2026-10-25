@@ -22,6 +22,7 @@ import { OrganizerProfilePage } from './pages/OrganizerProfilePage';
 import { LoginPage } from './pages/LoginPage';
 import { SignupPage } from './pages/SignupPage';
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
+import { LogoutPage } from './pages/LogoutPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 import { PrivacyPage } from './pages/PrivacyPage';
 import { AdminPage } from './pages/AdminPage';
@@ -95,6 +96,7 @@ export default function App() {
               <Route path="/login" element={<LoginPage />} />
               <Route path="/signup" element={<SignupPage />} />
               <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+              <Route path="/logout" element={<LogoutPage />} />
               <Route path="/privacy" element={<PrivacyPage />} />
 
               {/* 404 Fallback */}

@@ -122,6 +122,7 @@ export function Navbar() {
     !currentUser &&
     (location.pathname === '/login' ||
       location.pathname === '/signup' ||
+      location.pathname === '/logout' ||
       location.pathname === '/forgot-password');
   const authOppositePath = location.pathname === '/login' ? '/signup' : '/login';
   const authOppositeLabel = location.pathname === '/login' ? 'Join Free' : 'Sign In';

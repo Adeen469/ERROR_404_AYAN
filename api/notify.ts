@@ -100,6 +100,10 @@ function primaryButton(label: string, href: string): string {
   return `<p style="margin:20px 0 0;"><a href="${href}" style="display:inline-block;background:#1E3F35;color:#ffffff;padding:12px 24px;border-radius:999px;text-decoration:none;font-weight:600;font-size:15px;">${label}</a></p>`;
 }
 
+function secondaryButton(label: string, href: string): string {
+  return `<a href="${href}" style="display:inline-block;background:#ffffff;color:#1E3F35;border:1px solid #1E3F35;padding:12px 24px;border-radius:999px;text-decoration:none;font-weight:600;font-size:15px;">${label}</a>`;
+}
+
 function supabaseHeaders(): Record<string, string> {
   const key = getEnv("SUPABASE_SERVICE_ROLE_KEY");
   return {
@@ -237,6 +241,10 @@ export function buildLoginEmail(email: string, device: string, location: string,
     `Location: ${loc}`,
     ip ? `IP address: ${ip}` : "",
     `If this wasn't you, change your password right away.`,
+    `Secure your account:`,
+    `Change your password: ${SITE_URL}/forgot-password`,
+    `Sign out: ${SITE_URL}/logout`,
+    `The sign-out link signs out the device that opens it.`,
   ].filter(Boolean);
   const text = lines.join("\n\n");
   const html = emailLayout(
@@ -246,7 +254,11 @@ export function buildLoginEmail(email: string, device: string, location: string,
       detailRow("Device", esc(device)) +
       detailRow("Location", esc(loc)) +
       (ip ? detailRow("IP address", esc(ip)) : "") +
-      `<div style="background:#FAF8F5;border:1px solid #E7E3DB;border-radius:12px;padding:14px 16px;margin-top:16px;font-size:15px;line-height:1.6;color:#1E2320;font-weight:600;">If this wasn't you, change your password right away.</div>`,
+      `<div style="background:#FAF8F5;border:1px solid #E7E3DB;border-radius:12px;padding:14px 16px;margin-top:16px;font-size:15px;line-height:1.6;color:#1E2320;font-weight:600;">If this wasn't you, change your password right away.</div>` +
+      `<h2 style="font-family:Georgia,'Times New Roman',serif;font-size:17px;line-height:1.3;color:#1E3F35;margin:24px 0 12px;">Secure your account</h2>` +
+      primaryButton("Change your password", `${SITE_URL}/forgot-password`) +
+      `<p style="margin:12px 0 0;">${secondaryButton("Sign out", `${SITE_URL}/logout`)}</p>` +
+      `<p style="margin:12px 0 0;font-size:13px;line-height:1.6;color:#5F635D;">The sign-out link signs out the device that opens it.</p>`,
   );
   return { to: email, subject: "New sign-in to your Locora account", text, html };
 }
