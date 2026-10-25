@@ -151,6 +151,29 @@ async function loadAllRegistrations(): Promise<any[]> {
   return Array.isArray(body) ? body.map((row: any) => row.data) : [];
 }
 
+// True when a Telegram-verified row matches this email + phone
+// (see api/telegram-verify.ts). Used to stamp phoneVerified on a
+// registration server-side; a client-sent value is never trusted.
+async function hasVerifiedPhone(email: string, phone: string): Promise<boolean> {
+  const digits = (s: string) => (s || "").replace(/\D/g, "");
+  const dp = digits(phone || "");
+  if (!email || !dp) return false;
+  const { ok, body } = await fetchJson(
+    `${supabaseBase()}/rest/v1/phone_verifications?select=data`,
+    { headers: supabaseHeaders() },
+  );
+  if (!ok || !Array.isArray(body)) return false;
+  return body.some((row: any) => {
+    const d = row.data || {};
+    if (d.status !== "verified" || d.email !== email) return false;
+    const rdp = digits(d.phone || "");
+    if (!rdp) return false;
+    if (rdp === dp) return true;
+    if (rdp.length >= 10 && dp.length >= 10) return rdp.slice(-10) === dp.slice(-10);
+    return false;
+  });
+}
+
 async function loadEvent(eventId: string): Promise<any | null> {
   const { ok, body } = await fetchJson(
     `${supabaseBase()}/rest/v1/events?id=eq.${encodeURIComponent(eventId)}&select=data`,
@@ -398,6 +421,18 @@ export default async function handler(req: any, res: any): Promise<void> {
       if (!reg || !reg.id || !reg.eventId || !reg.userId) {
         sendJson(res, 400, { message: "Registration needs id, eventId and userId" });
         return;
+      }
+      // Server-attested phone verification: a client-sent phoneVerified
+      // flag is never trusted. Stamp it only when a verified Telegram
+      // row matches this registration's email + phone. If the table is
+      // missing (setup not done), the badge is dropped but the
+      // registration still succeeds.
+      try {
+        reg.phoneVerified = (await hasVerifiedPhone(reg.userEmail, reg.userPhone))
+          ? true
+          : undefined;
+      } catch {
+        reg.phoneVerified = undefined;
       }
       const { ok, body } = await fetchJson(`${supabaseBase()}/rest/v1/registrations`, {
         method: "POST",
