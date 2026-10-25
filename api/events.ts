@@ -259,6 +259,14 @@ export default async function handler(req: any, res: any) {
         address: p.address || "100 Main Street",
         neighborhood: p.neighborhood || "Downtown Arts District",
         city: p.city || "Metro City",
+        // Worldwide location + ownership key. These were previously dropped
+        // here even though the create form sends them, so an event created
+        // in e.g. India/Maharashtra/Thane was stored with no state/country
+        // and could never match a location filter. JSON.stringify omits
+        // undefined, so unset values simply stay absent from the row.
+        state: p.state || undefined,
+        country: p.country || undefined,
+        createdByEmail: p.createdByEmail || undefined,
         price: Number(p.price) || 0,
         capacity: Number(p.capacity) || 50,
         registeredCount: Number(p.registeredCount) || 0,
