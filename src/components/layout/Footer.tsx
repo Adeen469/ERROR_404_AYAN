@@ -107,6 +107,10 @@ export function Footer() {
         <div className="pt-8 border-t border-[#E5E1D8] flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-[#5F635D]">
           <p>© {new Date().getFullYear()} Locora. Hyperlocal discovery and community engagement.</p>
           <div className="flex items-center gap-4 text-[11px] text-[#8C887E]">
+            <Link to="/privacy" className="hover:text-[#1E3F35] transition-colors">
+              Privacy Policy
+            </Link>
+            <span aria-hidden="true" className="text-[#C8C4BC]">·</span>
             <span>REST API Ready</span>
             <span aria-hidden="true" className="text-[#C8C4BC]">·</span>
             <span>WCAG 2.2 AA Accessible</span>
