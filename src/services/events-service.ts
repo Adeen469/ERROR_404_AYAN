@@ -7,8 +7,33 @@ import { apiClient, isDemoMode } from './api-client';
 // string only works in Vite dev (via vite.middlewares) and 404s in a
 // production build, which is why the cards showed broken images.
 import heroGatheringImg from '../assets/images/hero_neighborhood_gathering_1792850960020.jpg';
+import techHackathonImg from '../assets/images/event_tech_hackathon_1792850960780.jpg';
+import farmersMarketImg from '../assets/images/event_farmers_market_1792850961672.jpg';
+import acousticMusicImg from '../assets/images/event_acoustic_music_1792850962324.jpg';
+import morningYogaImg from '../assets/images/event_morning_yoga_1792850962615.jpg';
 
 const STORAGE_KEY = 'locora_events_db';
+
+// Map an old cover-image filename to its Vite-bundled URL.
+//
+// Browsers that visited the site before the image fix have events saved
+// in localStorage with the old '/src/assets/images/...' URLs, which 404
+// in production. Without this migration those saved events would keep
+// showing broken thumbnails forever, even though new code uses bundled
+// images. New events already use the bundled URLs, so they are untouched.
+const BUNDLED_COVER_BY_FILENAME: Record<string, string> = {
+  'hero_neighborhood_gathering_1792850960020.jpg': heroGatheringImg,
+  'event_tech_hackathon_1792850960780.jpg': techHackathonImg,
+  'event_farmers_market_1792850961672.jpg': farmersMarketImg,
+  'event_acoustic_music_1792850962324.jpg': acousticMusicImg,
+  'event_morning_yoga_1792850962615.jpg': morningYogaImg,
+};
+
+function migrateCoverImage(coverImage: string | undefined): string | undefined {
+  if (!coverImage || !coverImage.startsWith('/src/assets/')) return coverImage;
+  const filename = coverImage.split('/').pop() || '';
+  return BUNDLED_COVER_BY_FILENAME[filename] || coverImage;
+}
 
 function getStoredEvents(): EventItem[] {
   try {
@@ -17,7 +42,26 @@ function getStoredEvents(): EventItem[] {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(DEMO_EVENTS));
       return DEMO_EVENTS;
     }
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return DEMO_EVENTS;
+    let changed = false;
+    const migrated = parsed.map((event: EventItem) => {
+      const fixed = migrateCoverImage(event.coverImage);
+      if (fixed !== event.coverImage) {
+        changed = true;
+        return { ...event, coverImage: fixed };
+      }
+      return event;
+    });
+    // Persist the migration once, so the next load is already clean.
+    if (changed) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+      } catch {
+        // If storage is full/blocked, still return the migrated list.
+      }
+    }
+    return migrated;
   } catch {
     return DEMO_EVENTS;
   }
