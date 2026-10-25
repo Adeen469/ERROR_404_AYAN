@@ -452,7 +452,7 @@ export function CreateEventPage() {
 
             <div>
               <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
-                Ticket Price (USD) *
+                Ticket Price (₹) *
               </label>
               <input
                 type="number"

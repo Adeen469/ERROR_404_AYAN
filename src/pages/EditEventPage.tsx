@@ -328,7 +328,7 @@ export function EditEventPage() {
 
             <div>
               <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
-                Price (USD)
+                Price (₹)
               </label>
               <input
                 type="number"

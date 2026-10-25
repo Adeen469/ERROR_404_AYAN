@@ -23,7 +23,7 @@ export function LandingPage() {
 
   // Real platform stats, computed from the actual (shared) event list —
   // not hardcoded marketing numbers. While the list is loading the
-  // tiles show a dash, never a made-up figure. $0 platform fees is a
+  // tiles show a dash, never a made-up figure. ₹0 platform fees is a
   // policy fact, not a count, so it stays as-is.
   const [stats, setStats] = useState<{
     neighborhoods: number;
@@ -256,7 +256,7 @@ export function LandingPage() {
             </div>
             <div>
               <p className="font-editorial text-3xl sm:text-4xl font-bold text-[#1E3F35] tabular-nums">
-                $0
+                ₹0
               </p>
               <p className="text-xs sm:text-sm text-[#5F635D] mt-1 font-medium">
                 Platform Fees & Ads
