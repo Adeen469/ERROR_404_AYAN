@@ -27,7 +27,7 @@ Vercel environment variables, used server-side by `api/auth/*`.
    `/api/auth/google` (a Vercel Serverless Function in `api/auth/google.ts`).
 3. That function redirects to Google's consent screen, with a random
    `state` token stored in an HttpOnly cookie (CSRF protection).
-4. Google redirects back to `/api/auth/google/callback`
+4. Google redirects back to `/api/auth/callback/google`
    (`api/auth/google/callback.ts`), which:
    - verifies `state` against the cookie,
    - exchanges the code for tokens server-to-server using
@@ -50,10 +50,10 @@ deployment:
 | --- | --- |
 | `GOOGLE_CLIENT_ID` | Your Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | Your Google OAuth client secret |
-| `GOOGLE_REDIRECT_URI` *(optional)* | `https://locora-hyperlocal.vercel.app/api/auth/google/callback` |
+| `GOOGLE_REDIRECT_URI` *(optional)* | `https://locora-hyperlocal.vercel.app/api/auth/callback/google` |
 
 If `GOOGLE_REDIRECT_URI` is unset, the callback URL is derived from the
-request host, so it will be `https://locora-hyperlocal.vercel.app/api/auth/google/callback`
+request host, so it will be `https://locora-hyperlocal.vercel.app/api/auth/callback/google`
 in production. Never prefix these with `VITE_` — that would ship them to
 the browser. Never commit real values to the repo.
 
@@ -65,13 +65,13 @@ In Google Cloud Console > APIs & Services > Credentials, open your OAuth
 - **Authorized JavaScript origins:**
   - `https://locora-hyperlocal.vercel.app`
 - **Authorized redirect URIs:**
-  - `https://locora-hyperlocal.vercel.app/api/auth/google/callback`
+  - `https://locora-hyperlocal.vercel.app/api/auth/callback/google`
 
 Both must match exactly — no trailing slash, `https` (not `http`).
 If either is missing or different, Google will refuse the sign-in.
 
 For local testing, also add `http://localhost:5173` as an origin and
-`http://localhost:5173/api/auth/google/callback` as a redirect URI, and
+`http://localhost:5173/api/auth/callback/google` as a redirect URI, and
 run the project with `vercel dev` (the Express server in `server.ts` does
 not serve `/api/auth/*`; those routes only exist as Vercel functions).
 
