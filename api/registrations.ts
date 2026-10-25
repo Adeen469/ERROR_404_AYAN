@@ -43,6 +43,16 @@
 //
 // If the env vars are missing, this returns 503 JSON and the frontend
 // falls back to per-browser local registrations.
+//
+// Organizer email notification (see ORGANIZER_NOTIFICATIONS_SETUP.md):
+// when a PENDING registration is stored (a paid event's payment awaiting
+// approval), the organizer gets an email with the attendee, amount, UTR
+// and a link to the Attendees page. Sending is best-effort and gated on
+// GMAIL_USER / GMAIL_APP_PASSWORD: without them nothing is sent and the
+// registration still succeeds, and the in-app "N pending" badge remains
+// the fallback signal. The send is awaited before responding (serverless
+// work after a response is not guaranteed to run), but any mail failure
+// is swallowed so it can never fail a registration.
 
 function getEnv(name: string): string {
   try {
@@ -146,6 +156,52 @@ async function loadEvent(eventId: string): Promise<any | null> {
   return body[0].data;
 }
 
+// Email content for a pending payment. Exported so it can be unit-tested
+// without sending. The recipient is the STORED event's organizer email
+// (loaded server-side above), never an address the caller supplied, so
+// this cannot be used to relay mail to arbitrary addresses.
+export function buildApprovalEmail(reg: any, event: any): { to: string; subject: string; text: string; html: string } | null {
+  const to = event?.organizer?.email || event?.createdByEmail || '';
+  if (!to) return null;
+  const title = event?.title || 'your event';
+  const amount = typeof event?.price === 'number' ? `₹${event.price}` : 'the ticket price';
+  const link = `https://locora-hyperlocal.vercel.app/organizer/events/${reg.eventId}/attendees`;
+  const subject = `New payment approval needed: ${title}`;
+  const text = [
+    `${reg.userName || 'An attendee'} (${reg.userEmail || ''}) paid ${amount} for "${title}" and submitted a payment for approval.`,
+    `UTR: ${reg.utr || '—'}`,
+    `Submitted: ${reg.registeredAt || ''}`,
+    `Verify the payment in your UPI app, then approve to issue their pass (or reject to release the spot): ${link}`,
+  ].join('\n\n');
+  const html = [
+    `<p><strong>${reg.userName || 'An attendee'}</strong> (${reg.userEmail || ''}) paid <strong>${amount}</strong> for "${title}" and submitted a payment for approval.</p>`,
+    `<p>UTR: <strong>${reg.utr || '—'}</strong><br/>Submitted: ${reg.registeredAt || ''}</p>`,
+    `<p>Verify the payment in your UPI app, then <a href="${link}">approve to issue their pass</a> (or reject to release the spot).</p>`,
+  ].join('\n');
+  return { to, subject, text, html };
+}
+
+async function sendApprovalEmail(reg: any, event: any): Promise<boolean> {
+  const user = getEnv('GMAIL_USER');
+  const pass = getEnv('GMAIL_APP_PASSWORD');
+  const mail = buildApprovalEmail(reg, event);
+  if (!user || !pass || !mail) return false;
+  try {
+    // Dynamic import: nodemailer loads only when an email is actually
+    // sent, so plain registration reads never pay its load cost.
+    const nodemailer = (await import('nodemailer')).default;
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user, pass: pass.replace(/\s+/g, '') },
+    });
+    await transporter.sendMail({ from: user, ...mail });
+    return true;
+  } catch (err) {
+    console.warn('Approval email failed (registration still stored):', err);
+    return false;
+  }
+}
+
 function mayManageEvent(event: any, approverEmail: string): boolean {
   if (!event) return false;
   if (isAdmin(approverEmail)) return true;
@@ -215,6 +271,18 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       const stored = Array.isArray(body) && body.length > 0 ? body[0].data : reg;
+      // Pending payment? Notify the organizer. Awaited for reliability
+      // (see header), but any failure is swallowed: email must never
+      // fail a registration, and free/instant registrations need no
+      // approval email at all.
+      if (stored && stored.status === 'pending') {
+        try {
+          const event = await loadEvent(stored.eventId);
+          if (event) await sendApprovalEmail(stored, event);
+        } catch {
+          // Best-effort only.
+        }
+      }
       sendJson(res, 200, stored);
       return;
     }

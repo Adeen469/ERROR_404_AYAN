@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { LayoutGrid, List } from 'lucide-react';
 import { EventItem, EventFilterOptions } from '../types';
@@ -67,13 +67,27 @@ export function DiscoverPage() {
     [setSearchParams]
   );
 
+  // Debounce the search text for fetching: typing currently refetches
+  // (a ~2s call plus a skeleton flash) on every keystroke. The search
+  // box and the URL still update immediately; only the fetch waits for
+  // a pause in typing. Other filters fetch at once, as before.
+  const [debouncedQuery, setDebouncedQuery] = useState(filters.query);
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(filters.query), 350);
+    return () => clearTimeout(t);
+  }, [filters.query]);
+  const effectiveFilters = useMemo(
+    () => ({ ...filters, query: debouncedQuery }),
+    [filters, debouncedQuery],
+  );
+
   // Fetch events on filter or page change
   useEffect(() => {
     let active = true;
     async function fetchEvents() {
       setLoading(true);
       try {
-        const response = await eventsService.getEvents(filters, page, 9);
+        const response = await eventsService.getEvents(effectiveFilters, page, 9);
         if (active) {
           setEvents(response.data);
           setTotalResults(response.total);
@@ -89,7 +103,7 @@ export function DiscoverPage() {
     return () => {
       active = false;
     };
-  }, [filters, page]);
+  }, [effectiveFilters, page]);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">

@@ -112,14 +112,18 @@ export function EventDetailsPage() {
       if (!eventId) return;
       setLoading(true);
       try {
-        const data = await eventsService.getEventById(eventId);
+        // These three do not depend on each other, so run them together
+        // instead of stacking three ~2s calls (the shared event cache
+        // also dedupes the event fetch inside getRelatedEvents).
+        const [data, reg, related] = await Promise.all([
+          eventsService.getEventById(eventId),
+          registrationsService.getRegistrationForEvent(eventId),
+          eventsService.getRelatedEvents(eventId),
+        ]);
         setEvent(data);
         if (data) {
           setIsSaved(savedEventsService.isSaved(data.id));
-          const reg = await registrationsService.getRegistrationForEvent(data.id);
           setRegistration(reg);
-
-          const related = await eventsService.getRelatedEvents(data.id);
           setRelatedEvents(related);
         }
       } catch (err) {

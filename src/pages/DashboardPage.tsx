@@ -31,11 +31,13 @@ export function DashboardPage() {
     async function loadData() {
       setLoading(true);
       try {
-        const regs = await registrationsService.getMyRegistrations();
+        // Independent loads: run together instead of one after another.
+        const [regs, saved] = await Promise.all([
+          registrationsService.getMyRegistrations(),
+          savedEventsService.getSavedEvents(),
+        ]);
         const activeRegs = regs.filter((r) => r.status === 'confirmed');
         setRegistrations(activeRegs);
-
-        const saved = await savedEventsService.getSavedEvents();
         setSavedEvents(saved);
       } finally {
         setLoading(false);

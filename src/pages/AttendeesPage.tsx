@@ -30,7 +30,12 @@ export function AttendeesPage() {
       if (!eventId) return;
       setLoading(true);
       try {
-        const evt = await eventsService.getEventById(eventId);
+        // The event and its attendee list do not depend on each other,
+        // so fetch both at once instead of stacking two ~2s calls.
+        const [evt, list] = await Promise.all([
+          eventsService.getEventById(eventId),
+          registrationsService.getEventAttendees(eventId),
+        ]);
         setEvent(evt);
         if (!evt) return;
         const currentUser = authService.getCurrentUser();
@@ -42,7 +47,6 @@ export function AttendeesPage() {
           setNotOwner(true);
           return;
         }
-        const list = await registrationsService.getEventAttendees(eventId);
         setAttendees(list);
       } finally {
         setLoading(false);

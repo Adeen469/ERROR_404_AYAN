@@ -4,6 +4,42 @@ import { apiClient, isDemoMode } from './api-client';
 import { authService } from './auth-service';
 import { getEventNeighborhood } from '../utils/formatters';
 
+// Short-lived in-memory cache for shared event reads. Measured 2026-10-25:
+// every shared API call costs ~2s (five rapid calls to a tiny endpoint all
+// took ~2s, so this is per-call latency, not cold starts). Without a cache,
+// every navigation (Discover -> details -> back) and every page that
+// fetches the same event twice pays that cost again as skeleton time.
+// Entries live 60s; in-flight requests are shared, so parallel callers
+// for the same data make one request, not several stacked 2s calls.
+// Mutations clear the cache (see create/update/delete/adjust below).
+const EVENTS_CACHE_TTL_MS = 60_000;
+const eventsCache = new Map<string, { at: number; promise: Promise<unknown> }>();
+
+function cacheKey(parts: Record<string, unknown>): string {
+  const cleaned: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(parts)) {
+    if (v !== undefined && v !== null && v !== '') cleaned[k] = v;
+  }
+  return JSON.stringify(cleaned);
+}
+
+function cachedFetch<T>(key: string, fetchFn: () => Promise<T>): Promise<T> {
+  const hit = eventsCache.get(key);
+  if (hit && Date.now() - hit.at < EVENTS_CACHE_TTL_MS) return hit.promise as Promise<T>;
+  const promise = fetchFn();
+  eventsCache.set(key, { at: Date.now(), promise });
+  // Failures must not stick: drop the entry so the next call retries.
+  // Callers already fall back to the local store on failure.
+  promise.catch(() => {
+    if (eventsCache.get(key)?.promise === promise) eventsCache.delete(key);
+  });
+  return promise;
+}
+
+function clearEventsCache(): void {
+  eventsCache.clear();
+}
+
 // Ownership rules for event management — the permission matrix:
 // - Edit event details: the event's OWNER only. Admins explicitly cannot
 //   edit another organizer's event details.
@@ -129,11 +165,14 @@ export const eventsService = {
   async getEvents(filters: EventFilterOptions = {}, page = 1, pageSize = 12): Promise<PaginatedResponse<EventItem>> {
     if (!isDemoMode()) {
       try {
-        return await apiClient.get<PaginatedResponse<EventItem>>('/events', {
-          ...filters,
-          page,
-          pageSize,
-        });
+        return await cachedFetch(
+          `list:${cacheKey({ ...filters, page, pageSize })}`,
+          () => apiClient.get<PaginatedResponse<EventItem>>('/events', {
+            ...filters,
+            page,
+            pageSize,
+          }),
+        );
       } catch (err) {
         console.warn('Backend API /events unavailable, falling back to local events store:', err);
       }
@@ -247,7 +286,10 @@ export const eventsService = {
         // HTML 404 page), which made every details page show
         // "Event Not Found" even though the event listed fine on
         // Discover. Fall back to the local store only if that fails too.
-        return await apiClient.get<EventItem>('/events', { id });
+        return await cachedFetch(
+          `one:${id}`,
+          () => apiClient.get<EventItem>('/events', { id }),
+        );
       } catch (err) {
         console.warn('Backend API /events?id unavailable, falling back to local events store:', err);
       }
@@ -259,18 +301,19 @@ export const eventsService = {
   },
 
   async getRelatedEvents(eventId: string, limit = 3): Promise<EventItem[]> {
-    const current = await this.getEventById(eventId);
+    // The event and the list do not depend on each other, so fetch both
+    // at once instead of stacking two ~2s calls. The shared cache also
+    // dedupes the event fetch if the caller already requested it.
+    const [current, listData] = await Promise.all([
+      this.getEventById(eventId),
+      this.getEvents({}, 1, 100).then((r) => r.data).catch(() => null),
+    ]);
     if (!current) return [];
 
     // Use the shared list when it is available (getEvents already falls
     // back to local storage if the shared API is not configured), so
     // related events are not limited to this browser's local copy.
-    let all: EventItem[];
-    try {
-      all = (await this.getEvents({}, 1, 100)).data;
-    } catch {
-      all = getStoredEvents();
-    }
+    const all: EventItem[] = listData ?? getStoredEvents();
     // Related = same category, or same derived neighborhood (the city
     // when a state is selected; no derived neighborhood matches nothing).
     const currentNeighborhood = getEventNeighborhood(current);
@@ -280,6 +323,8 @@ export const eventsService = {
   },
 
   async createEvent(eventPayload: Partial<EventItem>): Promise<EventItem> {
+    // A mutation must not leave stale cached reads behind.
+    clearEventsCache();
     // Stamp the creator before either path, so the shared event and the
     // local copy both carry the ownership key. The Create page already
     // passes createdByEmail; this is the fallback for any other caller.
@@ -340,6 +385,8 @@ export const eventsService = {
   },
 
   async updateEvent(id: string, updates: Partial<EventItem>, opts?: OwnershipOptions): Promise<EventItem> {
+    // A mutation must not leave stale cached reads behind.
+    clearEventsCache();
     // Ownership is MANDATORY: every caller must prove who is acting, or
     // the update is refused. There is no unchecked path anymore — a
     // caller that forgets opts used to silently skip the check entirely.
@@ -385,6 +432,8 @@ export const eventsService = {
   },
 
   async deleteEvent(id: string, opts?: OwnershipOptions): Promise<boolean> {
+    // A mutation must not leave stale cached reads behind.
+    clearEventsCache();
     // Delete is an owner-or-admin operation, and the check is mandatory:
     // a caller without ownership proof is refused, never silently allowed.
     if (!opts?.ownerEmail) {
@@ -415,6 +464,8 @@ export const eventsService = {
   // as an edit/delete affordance. It exists so updateEvent can require
   // ownership proof from every caller without breaking registrations.
   async adjustRegisteredCount(id: string, registeredCount: number): Promise<void> {
+    // The count shown on cards/details must not lag behind a registration.
+    clearEventsCache();
     if (!isDemoMode()) {
       try {
         await apiClient.patch('/events', { registeredCount }, { id });
