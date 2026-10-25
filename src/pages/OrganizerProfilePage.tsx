@@ -58,12 +58,21 @@ export function OrganizerProfilePage() {
       {/* Organizer Header Card */}
       <div className="bg-white rounded-2xl border border-[#E5E1D8] p-6 sm:p-8 space-y-6 shadow-xs">
         <div className="flex flex-col sm:flex-row items-start sm:items-center gap-6">
-          <img
-            src={organizer.avatar}
-            alt={organizer.name}
-            referrerPolicy="no-referrer"
-            className="w-20 h-20 rounded-2xl object-cover border border-[#E2DFD8] shrink-0 shadow-xs"
-          />
+          {organizer.avatar ? (
+            <img
+              src={organizer.avatar}
+              alt={organizer.name}
+              referrerPolicy="no-referrer"
+              className="w-20 h-20 rounded-2xl object-cover border border-[#E2DFD8] shrink-0 shadow-xs"
+            />
+          ) : (
+            <div
+              aria-hidden="true"
+              className="w-20 h-20 rounded-2xl shrink-0 border border-[#E2DFD8] shadow-xs bg-[#1E3F35] text-white flex items-center justify-center font-editorial text-3xl font-bold"
+            >
+              {(organizer.name || '?').charAt(0).toUpperCase()}
+            </div>
+          )}
 
           <div className="flex-1 space-y-2">
             <div className="flex items-center gap-2">
@@ -81,10 +90,12 @@ export function OrganizerProfilePage() {
             </p>
 
             <div className="flex flex-wrap items-center gap-4 text-xs text-[#5F635D] pt-1">
-              <span className="flex items-center gap-1.5">
-                <MapPin className="w-3.5 h-3.5 text-[#8C887E]" />
-                <span>{organizer.location}</span>
-              </span>
+              {organizer.location && (
+                <span className="flex items-center gap-1.5">
+                  <MapPin className="w-3.5 h-3.5 text-[#8C887E]" />
+                  <span>{organizer.location}</span>
+                </span>
+              )}
 
               {organizer.website && (
                 <a
