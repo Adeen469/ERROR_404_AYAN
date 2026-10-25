@@ -325,7 +325,7 @@ export function EventDetailsPage() {
           <div className="p-6 bg-white rounded-xl border border-[#E5E1D8] space-y-4">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-[#8C887E] uppercase tracking-wider">
-                Event Organizer
+                Posted by
               </span>
               <Link
                 to={`/organizers/${event.organizer.slug || event.organizer.id}`}
@@ -336,12 +336,21 @@ export function EventDetailsPage() {
             </div>
 
             <div className="flex items-center gap-4">
-              <img
-                src={event.organizer.avatar}
-                alt={event.organizer.name}
-                referrerPolicy="no-referrer"
-                className="w-12 h-12 rounded-full object-cover shrink-0 border border-[#E5E1D8]"
-              />
+              {event.organizer.avatar ? (
+                <img
+                  src={event.organizer.avatar}
+                  alt={event.organizer.name}
+                  referrerPolicy="no-referrer"
+                  className="w-12 h-12 rounded-full object-cover shrink-0 border border-[#E5E1D8]"
+                />
+              ) : (
+                <div
+                  aria-hidden="true"
+                  className="w-12 h-12 rounded-full shrink-0 border border-[#E5E1D8] bg-[#1E3F35] text-white flex items-center justify-center font-editorial text-lg font-bold"
+                >
+                  {(event.organizer.name || '?').charAt(0).toUpperCase()}
+                </div>
+              )}
               <div className="flex-1 min-w-0">
                 <h3 className="font-editorial text-base font-bold text-[#1E2320] truncate">
                   {event.organizer.name}
