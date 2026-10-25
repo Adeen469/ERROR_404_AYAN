@@ -15,6 +15,13 @@
 //
 // If anything fails, this returns a plain HTML page explaining the most
 // likely cause instead of a blank screen or a raw JSON error.
+//
+// Calendar connect branch: /api/auth/google-calendar starts a flow with
+// the same redirect URI but state.purpose === "calendar". After the same
+// code exchange and ID-token verification as sign-in, this callback does
+// NOT sign anyone in: it stores the (encrypted) refresh token in Supabase
+// under the Locora user id from state, then sends the user back to
+// state.returnTo. See CALENDAR_SETUP.md for the table + console steps.
 
 // Self-contained: no imports from api/_lib, no Node-only modules.
 // The callback path must match an Authorized redirect URI registered in
@@ -46,6 +53,50 @@ function decodeState(value: string): Record<string, string> | null {
   } catch {
     return null;
   }
+}
+
+// --- Google Calendar storage helpers (used only by the calendar branch) ---
+// The refresh token is encrypted with AES-GCM before it is stored. The
+// key is derived from GOOGLE_CLIENT_SECRET, which never leaves the
+// server, so a database read alone never yields a usable token. Only the
+// refresh token is stored long-term; access tokens are minted on demand
+// from it and never persisted.
+function base64EncodeBytes(bytes: Uint8Array): string {
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+async function encryptRefreshToken(refreshToken: string): Promise<string> {
+  const subtle = (globalThis as any).crypto?.subtle;
+  if (!subtle) throw new Error("Web Crypto is unavailable in this runtime");
+  const secret = getEnv("GOOGLE_CLIENT_SECRET");
+  const keyMaterial = await subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode("locora-calendar-v1:" + secret),
+  );
+  const key = await subtle.importKey("raw", keyMaterial, "AES-GCM", false, ["encrypt"]);
+  const iv = new Uint8Array(12);
+  (globalThis as any).crypto.getRandomValues(iv);
+  const ciphertext = await subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    new TextEncoder().encode(refreshToken),
+  );
+  const combined = new Uint8Array(iv.length + ciphertext.byteLength);
+  combined.set(iv, 0);
+  combined.set(new Uint8Array(ciphertext), iv.length);
+  return base64EncodeBytes(combined);
+}
+
+function calendarSupabaseHeaders(): Record<string, string> {
+  const key = getEnv("SUPABASE_SERVICE_ROLE_KEY");
+  return {
+    apikey: key,
+    Authorization: "Bearer " + key,
+    "Content-Type": "application/json",
+    Prefer: "return=representation,resolution=merge-duplicates",
+  };
 }
 
 function parseCookies(req: any): Record<string, string> {
@@ -220,6 +271,132 @@ export default async function handler(req: any, res: any) {
       502,
       "Could not verify the Google sign-in",
       "Token verification failed due to a network error. Please try again.",
+    );
+  }
+
+  // Calendar connect branch: same exchange + ID-token verification as
+  // sign-in above, but no sign-in happens here. Store the refresh token
+  // and send the user back to where they started.
+  if (state.purpose === "calendar") {
+    const calendarUserId =
+      typeof state.userId === "string" ? state.userId : "";
+    if (!calendarUserId || calendarUserId.length > 128) {
+      return errorPage(
+        res,
+        400,
+        "Google Calendar connection failed",
+        "The connection request did not carry a valid user. Please connect again from your profile page while signed in.",
+      );
+    }
+    if (!tokenData.refresh_token) {
+      return errorPage(
+        res,
+        400,
+        "Google Calendar connection incomplete",
+        "Google did not return a long-term connection token. This can happen " +
+          "if access was already granted without offline access. Remove Locora " +
+          "from your Google Account permissions (myaccount.google.com/permissions) " +
+          "and connect again from your profile page.",
+      );
+    }
+    // The Google account that consented — shown back in the profile page.
+    let calendarEmail = "";
+    try {
+      const userRes = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
+        headers: { Authorization: `Bearer ${tokenData.access_token}` },
+      });
+      if (userRes.ok) {
+        const info = await userRes.json();
+        calendarEmail = typeof info.email === "string" ? info.email : "";
+      }
+    } catch {
+      calendarEmail = "";
+    }
+    if (!calendarEmail) {
+      try {
+        calendarEmail = JSON.parse(base64urlDecode(tokenData.id_token.split(".")[1])).email || "";
+      } catch {
+        calendarEmail = "";
+      }
+    }
+    const supabaseUrl = getEnv("SUPABASE_URL");
+    const serviceKey = getEnv("SUPABASE_SERVICE_ROLE_KEY");
+    if (!supabaseUrl || !serviceKey) {
+      return errorPage(
+        res,
+        500,
+        "Google Calendar storage is not configured",
+        "SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing on the server, " +
+          "or the calendar_connections table has not been created yet. " +
+          "See CALENDAR_SETUP.md, then try connecting again.",
+      );
+    }
+    let encrypted: string;
+    try {
+      encrypted = await encryptRefreshToken(tokenData.refresh_token);
+    } catch {
+      return errorPage(
+        res,
+        502,
+        "Google Calendar connection failed",
+        "The connection token could not be secured for storage. Please try again.",
+      );
+    }
+    try {
+      const upsertRes = await fetch(
+        supabaseUrl.replace(/\/$/, "") + "/rest/v1/calendar_connections",
+        {
+          method: "POST",
+          headers: calendarSupabaseHeaders(),
+          body: JSON.stringify([
+            {
+              user_id: calendarUserId,
+              data: {
+                refresh_token_enc: encrypted,
+                google_email: calendarEmail,
+                scope: "calendar.events",
+                connected_at: new Date().toISOString(),
+              },
+            },
+          ]),
+        },
+      );
+      if (!upsertRes.ok) {
+        const detail = await upsertRes.text().catch(() => "");
+        return errorPage(
+          res,
+          502,
+          "Google Calendar connection could not be saved",
+          "The connection token could not be stored. " +
+            "Make sure the calendar_connections table exists in Supabase (see CALENDAR_SETUP.md). " +
+            (detail ? `Server said: ${detail.slice(0, 200)}` : ""),
+        );
+      }
+    } catch {
+      return errorPage(
+        res,
+        502,
+        "Google Calendar connection could not be saved",
+        "The connection token could not be stored due to a network error. Please try again.",
+      );
+    }
+    const secureCal = redirectUri.startsWith("https://") ? "; Secure" : "";
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Set-Cookie": `locora_oauth_state=; Path=/api/auth; HttpOnly; SameSite=Lax; Max-Age=0${secureCal}`,
+    });
+    return res.end(
+      htmlPage(
+        "Google Calendar connected",
+        `<p id="status">Google Calendar connected${calendarEmail ? ` as ${calendarEmail}` : ""} — taking you back…</p>
+        <p>Events you register for will now be added to your Google Calendar automatically.</p>
+        <script>
+          setTimeout(function () {
+            window.location.replace(${escapeForScript(JSON.stringify(returnTo))});
+          }, 900);
+        </script>
+        <noscript><p><a href="${returnTo}">Continue</a></p></noscript>`,
+      ),
     );
   }
 

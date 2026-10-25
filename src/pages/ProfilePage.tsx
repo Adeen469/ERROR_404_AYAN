@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { User, Check, AlertCircle, MapPin, Sparkles, LogOut } from 'lucide-react';
+import { User, Check, AlertCircle, MapPin, Sparkles, LogOut, Calendar } from 'lucide-react';
 import { authService } from '../services/auth-service';
+import { calendarService, CalendarStatus } from '../services/calendar-service';
 import { UserProfile, EventCategory } from '../types';
 import { DEMO_CATEGORIES, DEMO_NEIGHBORHOODS } from '../mocks/demo-data';
 import { useToast } from '../components/ui/Toast';
@@ -23,6 +24,13 @@ export function ProfilePage() {
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [calendarStatus, setCalendarStatus] = useState<CalendarStatus | null>(null);
+  const [calendarBusy, setCalendarBusy] = useState(false);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    calendarService.getStatus(currentUser.id).then(setCalendarStatus).catch(() => {});
+  }, []);
 
   const toggleInterest = (category: EventCategory) => {
     setInterests((prev) =>
@@ -228,6 +236,56 @@ export function ProfilePage() {
           </button>
         </div>
       </form>
+
+      {/* Google Calendar connection */}
+      <div className="bg-white p-6 sm:p-8 rounded-2xl border border-[#E5E1D8] shadow-xs space-y-4">
+        <h2 className="font-editorial text-base font-bold text-[#1E2320] pb-2 border-b border-[#EBE7DF] flex items-center gap-2">
+          <Calendar className="w-4 h-4 text-[#1E3F35]" />
+          Google Calendar
+        </h2>
+        <p className="text-xs text-[#5F635D] leading-relaxed">
+          Connect your Google Calendar and every event you register for will be added
+          to it automatically. Locora only adds events you register for — it never
+          reads your other calendar events.
+        </p>
+        {calendarStatus?.connected ? (
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <p className="text-xs text-[#1E3F35] font-medium">
+              Connected{calendarStatus.google_email ? ` as ${calendarStatus.google_email}` : ''}
+            </p>
+            <button
+              type="button"
+              disabled={calendarBusy}
+              onClick={async () => {
+                if (!currentUser) return;
+                setCalendarBusy(true);
+                try {
+                  await calendarService.disconnectCalendar(currentUser.id);
+                  setCalendarStatus({ connected: false, google_email: null });
+                  toast({ type: 'info', title: 'Google Calendar disconnected' });
+                } finally {
+                  setCalendarBusy(false);
+                }
+              }}
+              className="px-4 py-2.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-lg transition-colors cursor-pointer"
+            >
+              Disconnect
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            disabled={!currentUser}
+            onClick={() => {
+              if (!currentUser) return;
+              calendarService.connectCalendar(currentUser.id, '/profile');
+            }}
+            className="px-5 py-2.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors shadow-xs cursor-pointer"
+          >
+            Connect Google Calendar
+          </button>
+        )}
+      </div>
     </div>
   );
 }
