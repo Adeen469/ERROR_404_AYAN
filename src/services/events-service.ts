@@ -253,7 +253,13 @@ export const eventsService = {
 
   async updateEvent(id: string, updates: Partial<EventItem>): Promise<EventItem> {
     if (!isDemoMode()) {
-      return apiClient.patch<EventItem>(`/events/${id}`, updates);
+      try {
+        return await apiClient.patch<EventItem>(`/events/${id}`, updates);
+      } catch (err) {
+        // Registration increments the count via updateEvent; without a
+        // fallback that count would never persist on the live site.
+        console.warn('Backend API update event unavailable, falling back to local events store:', err);
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, 200));

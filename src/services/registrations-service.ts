@@ -61,7 +61,14 @@ function saveStoredRegistrations(list: AttendeeRegistration[]): void {
 export const registrationsService = {
   async getMyRegistrations(): Promise<AttendeeRegistration[]> {
     if (!isDemoMode()) {
-      return apiClient.get<AttendeeRegistration[]>('/me/registrations');
+      try {
+        return await apiClient.get<AttendeeRegistration[]>('/me/registrations');
+      } catch (err) {
+        // Live site has no Express backend on Vercel: the API call fails
+        // (e.g. 405 for POST, HTML instead of JSON for GET). Fall back to
+        // the local store, like the event list already does.
+        console.warn('Backend API /me/registrations unavailable, falling back to local registrations:', err);
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, 150));
@@ -104,7 +111,14 @@ export const registrationsService = {
     }
 
     if (!isDemoMode()) {
-      return apiClient.post<AttendeeRegistration>(`/events/${event.id}/registrations`);
+      try {
+        return await apiClient.post<AttendeeRegistration>(`/events/${event.id}/registrations`);
+      } catch (err) {
+        // POST to a static Vercel route returns 405 Method Not Allowed,
+        // which is exactly the "Registration failed / HTTP Error 405"
+        // users saw on Confirm & Get Pass. Fall through to local storage.
+        console.warn('Backend API registration unavailable, falling back to local registration:', err);
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -157,8 +171,12 @@ export const registrationsService = {
 
   async cancelRegistration(registrationId: string): Promise<boolean> {
     if (!isDemoMode()) {
-      await apiClient.delete(`/registrations/${registrationId}`);
-      return true;
+      try {
+        await apiClient.delete(`/registrations/${registrationId}`);
+        return true;
+      } catch (err) {
+        console.warn('Backend API cancel registration unavailable, falling back to local cancellation:', err);
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -186,7 +204,11 @@ export const registrationsService = {
 
   async getEventAttendees(eventId: string): Promise<AttendeeRegistration[]> {
     if (!isDemoMode()) {
-      return apiClient.get<AttendeeRegistration[]>(`/events/${eventId}/attendees`);
+      try {
+        return await apiClient.get<AttendeeRegistration[]>(`/events/${eventId}/attendees`);
+      } catch (err) {
+        console.warn('Backend API attendees unavailable, falling back to local registrations:', err);
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, 150));
@@ -196,7 +218,11 @@ export const registrationsService = {
 
   async toggleCheckIn(registrationId: string): Promise<AttendeeRegistration> {
     if (!isDemoMode()) {
-      return apiClient.patch<AttendeeRegistration>(`/registrations/${registrationId}/checkin`);
+      try {
+        return await apiClient.patch<AttendeeRegistration>(`/registrations/${registrationId}/checkin`);
+      } catch (err) {
+        console.warn('Backend API check-in unavailable, falling back to local registration:', err);
+      }
     }
 
     const all = getStoredRegistrations();

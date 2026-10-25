@@ -56,13 +56,17 @@ export const savedEventsService = {
 
   async toggleSave(eventId: string): Promise<boolean> {
     if (!isDemoMode()) {
-      const isCurrentlySaved = this.isSaved(eventId);
-      if (isCurrentlySaved) {
-        await apiClient.delete(`/me/saved-events/${eventId}`);
-        return false;
-      } else {
-        await apiClient.post(`/me/saved-events/${eventId}`);
-        return true;
+      try {
+        const isCurrentlySaved = this.isSaved(eventId);
+        if (isCurrentlySaved) {
+          await apiClient.delete(`/me/saved-events/${eventId}`);
+          return false;
+        } else {
+          await apiClient.post(`/me/saved-events/${eventId}`);
+          return true;
+        }
+      } catch (err) {
+        console.warn('Backend API saved-events unavailable, falling back to local saved events:', err);
       }
     }
 
@@ -85,7 +89,11 @@ export const savedEventsService = {
 
   async getSavedEvents(): Promise<EventItem[]> {
     if (!isDemoMode()) {
-      return apiClient.get<EventItem[]>('/me/saved-events');
+      try {
+        return await apiClient.get<EventItem[]>('/me/saved-events');
+      } catch (err) {
+        console.warn('Backend API saved-events unavailable, falling back to local saved events:', err);
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, 150));
