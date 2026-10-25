@@ -5,6 +5,7 @@ import { EventItem } from '../types';
 import { eventsService } from '../services/events-service';
 import { DEMO_CATEGORIES, DEMO_NEIGHBORHOODS } from '../mocks/demo-data';
 import { EventCard } from '../components/events/EventCard';
+import { formatEventDate } from '../utils/formatters';
 import { EventListSkeleton } from '../components/ui/LoadingSkeleton';
 import { useToast } from '../components/ui/Toast';
 
@@ -21,6 +22,20 @@ export function HomePage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [featuredEvents, setFeaturedEvents] = useState<EventItem[]>([]);
   const [upcomingEvents, setUpcomingEvents] = useState<EventItem[]>([]);
+
+  // Community Spotlight: the next real upcoming event from the shared
+  // list — not the hardcoded "Lantern Night Festival · 380 Registered"
+  // that used to sit here. Hidden when there is no upcoming event.
+  const spotlightEvent = (() => {
+    const now = Date.now();
+    const upcoming = upcomingEvents
+      .filter((e) => new Date(e.startDate).getTime() >= now)
+      .sort(
+        (a, b) =>
+          new Date(a.startDate).getTime() - new Date(b.startDate).getTime(),
+      );
+    return upcoming[0] || null;
+  })();
   const [loading, setLoading] = useState(true);
   const [locating, setLocating] = useState(false);
 
@@ -177,15 +192,23 @@ export function HomePage() {
                   className="w-full h-full object-cover"
                 />
                 <div className="absolute inset-0 bg-gradient-to-t from-slate-950/70 via-slate-950/20 to-transparent" />
-                <div className="absolute bottom-4 left-4 right-4 text-white">
-                  <p className="text-xs font-medium text-indigo-200 uppercase tracking-wider">
-                    Community Spotlight
-                  </p>
-                  <p className="text-base font-semibold leading-tight mt-0.5">
-                    Lantern Night Festival & Artisan Market
-                  </p>
-                  <p className="text-xs text-slate-300 mt-1">Historic Old Town · 380 Registered</p>
-                </div>
+                {spotlightEvent && (
+                  <div className="absolute bottom-4 left-4 right-4 text-white">
+                    <p className="text-xs font-medium text-indigo-200 uppercase tracking-wider">
+                      Community Spotlight
+                    </p>
+                    <Link to={`/events/${spotlightEvent.id}`}>
+                      <p className="text-base font-semibold leading-tight mt-0.5 hover:underline">
+                        {spotlightEvent.title}
+                      </p>
+                    </Link>
+                    <p className="text-xs text-slate-300 mt-1">
+                      {spotlightEvent.neighborhood} ·{' '}
+                      {formatEventDate(spotlightEvent.startDate)} ·{' '}
+                      {spotlightEvent.registeredCount} Registered
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           </div>
