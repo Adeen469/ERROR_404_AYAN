@@ -4,16 +4,52 @@ import { apiClient, isDemoMode } from './api-client';
 import { authService } from './auth-service';
 import { getEventNeighborhood } from '../utils/formatters';
 
-// Short-lived in-memory cache for shared event reads. Measured 2026-10-25:
+// Short-lived cache for shared event reads. Measured 2026-10-25:
 // every shared API call costs ~2s (five rapid calls to a tiny endpoint all
 // took ~2s, so this is per-call latency, not cold starts). Without a cache,
 // every navigation (Discover -> details -> back) and every page that
 // fetches the same event twice pays that cost again as skeleton time.
 // Entries live 60s; in-flight requests are shared, so parallel callers
 // for the same data make one request, not several stacked 2s calls.
+// The cache is mirrored to sessionStorage so a full reload (which wipes
+// in-memory state) still comes back instantly within the TTL.
 // Mutations clear the cache (see create/update/delete/adjust below).
 const EVENTS_CACHE_TTL_MS = 60_000;
 const eventsCache = new Map<string, { at: number; promise: Promise<unknown> }>();
+const SS_PREFIX = 'locora-events-cache:';
+
+function ssGet(key: string): { at: number; value: unknown } | null {
+  try {
+    const raw = sessionStorage.getItem(SS_PREFIX + key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.at === 'number' && 'value' in parsed) return parsed;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function ssSet(key: string, value: unknown): void {
+  try {
+    sessionStorage.setItem(SS_PREFIX + key, JSON.stringify({ at: Date.now(), value }));
+  } catch {
+    // Private mode or quota: the in-memory cache still works.
+  }
+}
+
+function ssClear(): void {
+  try {
+    const keys: string[] = [];
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const k = sessionStorage.key(i);
+      if (k && k.startsWith(SS_PREFIX)) keys.push(k);
+    }
+    keys.forEach((k) => sessionStorage.removeItem(k));
+  } catch {
+    // Ignore.
+  }
+}
 
 function cacheKey(parts: Record<string, unknown>): string {
   const cleaned: Record<string, unknown> = {};
@@ -26,11 +62,19 @@ function cacheKey(parts: Record<string, unknown>): string {
 function cachedFetch<T>(key: string, fetchFn: () => Promise<T>): Promise<T> {
   const hit = eventsCache.get(key);
   if (hit && Date.now() - hit.at < EVENTS_CACHE_TTL_MS) return hit.promise as Promise<T>;
+  // A previous visit in this tab may have persisted the value.
+  const ss = ssGet(key);
+  if (ss && Date.now() - ss.at < EVENTS_CACHE_TTL_MS) {
+    const resolved = Promise.resolve(ss.value as T);
+    eventsCache.set(key, { at: ss.at, promise: resolved });
+    return resolved;
+  }
   const promise = fetchFn();
   eventsCache.set(key, { at: Date.now(), promise });
-  // Failures must not stick: drop the entry so the next call retries.
-  // Callers already fall back to the local store on failure.
-  promise.catch(() => {
+  // Failures must not stick as rejected promises: drop the memory entry
+  // so the next call retries. Callers already fall back to the local
+  // store on failure. Persisted values simply age out via the TTL.
+  promise.then((v) => ssSet(key, v)).catch(() => {
     if (eventsCache.get(key)?.promise === promise) eventsCache.delete(key);
   });
   return promise;
@@ -38,6 +82,7 @@ function cachedFetch<T>(key: string, fetchFn: () => Promise<T>): Promise<T> {
 
 function clearEventsCache(): void {
   eventsCache.clear();
+  ssClear();
 }
 
 // Ownership rules for event management — the permission matrix:
