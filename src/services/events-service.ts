@@ -2,6 +2,7 @@ import { EventFilterOptions, EventItem, PaginatedResponse } from '../types';
 import { DEMO_EVENTS, DEMO_ORGANIZERS } from '../mocks/demo-data';
 import { apiClient, isDemoMode } from './api-client';
 import { authService } from './auth-service';
+import { getEventNeighborhood } from '../utils/formatters';
 
 // Ownership rules for event management — the permission matrix:
 // - Edit event details: the event's OWNER only. Admins explicitly cannot
@@ -161,11 +162,6 @@ export const eventsService = {
       events = events.filter((e) => e.category === filters.category);
     }
 
-    // Neighborhood filter
-    if (filters.neighborhood && filters.neighborhood !== 'All' && filters.neighborhood !== 'All Neighborhoods') {
-      events = events.filter((e) => e.neighborhood === filters.neighborhood);
-    }
-
     // Worldwide location filter (Country -> State -> City). A set filter
     // matches only events that actually carry that value (case-insensitive);
     // older events without a country/state do not match a filtered region,
@@ -275,8 +271,11 @@ export const eventsService = {
     } catch {
       all = getStoredEvents();
     }
+    // Related = same category, or same derived neighborhood (the city
+    // when a state is selected; no derived neighborhood matches nothing).
+    const currentNeighborhood = getEventNeighborhood(current);
     return all
-      .filter((e) => e.id !== eventId && (e.category === current.category || e.neighborhood === current.neighborhood))
+      .filter((e) => e.id !== eventId && (e.category === current.category || (currentNeighborhood !== '' && getEventNeighborhood(e) === currentNeighborhood)))
       .slice(0, limit);
   },
 
@@ -318,7 +317,9 @@ export const eventsService = {
       endDate: payload.endDate || new Date(Date.now() + 86400000 * 7 + 7200000).toISOString(),
       venueName: payload.venueName || 'Community Hall',
       address: payload.address || '100 Main Street',
-      neighborhood: payload.neighborhood || '',
+      // Location rule: the neighborhood is the city when a state is
+      // selected, otherwise none — never a stored free-text value.
+      neighborhood: payload.state ? (payload.city || '') : '',
       city: payload.city || 'Metro City',
       state: payload.state,
       country: payload.country,

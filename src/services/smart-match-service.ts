@@ -2,10 +2,14 @@ import { EventCategory, EventItem, SmartMatchResult } from '../types';
 import { eventsService } from './events-service';
 import { authService } from './auth-service';
 import { isDemoMode, apiClient } from './api-client';
+import { formatEventLocation, getEventNeighborhood } from '../utils/formatters';
 
 export interface SmartMatchOptions {
   userInterests?: EventCategory[];
-  preferredNeighborhood?: string;
+  // The user's home city (which, under the location rule, is their
+  // neighborhood when a state is selected). No separate neighborhood
+  // preference exists anymore.
+  preferredCity?: string;
   preferFreeOnly?: boolean;
 }
 
@@ -14,7 +18,7 @@ export const smartMatchService = {
     if (!isDemoMode()) {
       return apiClient.get<SmartMatchResult[]>('/smart-match/recommendations', {
         interests: options?.userInterests?.join(','),
-        neighborhood: options?.preferredNeighborhood,
+        city: options?.preferredCity,
         freeOnly: options?.preferFreeOnly,
       });
     }
@@ -23,7 +27,9 @@ export const smartMatchService = {
 
     const user = authService.getCurrentUser();
     const interests = options?.userInterests || user?.interests || ['Food & Community', 'Live Music & Culture'];
-    const neighborhood = options?.preferredNeighborhood || user?.neighborhood || 'Silverlake Commons';
+    // Home city from the saved location: the city is the neighborhood
+    // only when a state is selected, otherwise there is no target city.
+    const homeCity = options?.preferredCity || (user?.state ? (user?.city || '') : '');
     const preferFree = options?.preferFreeOnly ?? false;
 
     const { data: events } = await eventsService.getEvents({}, 1, 50);
@@ -47,13 +53,16 @@ export const smartMatchService = {
         matchReasons.push(`Aligned tags: ${matchingTags.slice(0, 2).join(', ')}`);
       }
 
-      // Neighborhood Match (+20)
-      if (neighborhood && event.neighborhood === neighborhood) {
+      // City Match (+20): the event's derived neighborhood (its city,
+      // when it has a state) equals the user's home city.
+      const eventNeighborhood = getEventNeighborhood(event);
+      if (homeCity && eventNeighborhood && eventNeighborhood === homeCity) {
         score += 20;
-        matchReasons.push(`Located directly in your home neighborhood (${neighborhood})`);
+        matchReasons.push(`In your city (${homeCity})`);
       } else {
         score += 5;
-        matchReasons.push(`Within 15 min transit in ${event.neighborhood}`);
+        const location = formatEventLocation(event);
+        if (location) matchReasons.push(`Taking place in ${location}`);
       }
 
       // Price preference (+10)

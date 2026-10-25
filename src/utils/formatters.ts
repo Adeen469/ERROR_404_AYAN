@@ -55,6 +55,19 @@ export function formatPrice(price: number): string {
   return `₹${price.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 }
 
+// Location rule: there is no separate neighborhood anymore. When a state
+// is selected, the city IS the neighborhood; otherwise there is none.
+// Every place that used to read a stored neighborhood must use this.
+export function getEventNeighborhood(event: { state?: string; city?: string }): string {
+  return event.state ? (event.city || '') : '';
+}
+
+// Display location for an event line: state and city only, never a
+// stored neighborhood value.
+export function formatEventLocation(event: { state?: string; city?: string }): string {
+  return [event.state, event.city].filter(Boolean).join(', ');
+}
+
 export function getMapsSearchUrl(address: string, city: string = 'Metro City'): string {
   const query = encodeURIComponent(`${address}, ${city}`);
   return `https://www.google.com/maps/search/?api=1&query=${query}`;

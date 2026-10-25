@@ -41,6 +41,9 @@ export interface EventItem {
   endDate: string;   // ISO String
   venueName: string;
   address: string;
+  // Legacy stored value, kept for old records. Never displayed or
+  // filtered on: the neighborhood is derived — the city when a state is
+  // selected, otherwise none (see getEventNeighborhood in formatters).
   neighborhood: string;
   city: string;
   // Worldwide location, set by the Country -> State -> City picker on the
@@ -88,6 +91,9 @@ export interface UserProfile {
   email: string;
   avatar: string;
   bio: string;
+  // Legacy: the home-neighborhood field is retired. Home location is
+  // country/state/city; the neighborhood, where needed, is the city
+  // when a state is selected, otherwise none.
   neighborhood: string;
   // Home location from the Country -> State -> City picker on Profile.
   country?: string;
@@ -111,7 +117,6 @@ export interface SmartMatchResult {
 export interface EventFilterOptions {
   query?: string;
   category?: string;
-  neighborhood?: string;
   // Worldwide location filter (Country -> State -> City, from Discover).
   country?: string;
   state?: string;

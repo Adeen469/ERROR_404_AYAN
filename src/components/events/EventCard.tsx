@@ -110,8 +110,7 @@ export function EventCard({ event, isRegistered = false, onBookmarkChange }: Eve
           <div className="flex items-center gap-1.5 truncate max-w-[65%]">
             <MapPin className="w-3.5 h-3.5 shrink-0 text-[#8C887E]" />
             <span className="truncate">
-              {[event.state, event.city].filter(Boolean).join(', ') ||
-                event.neighborhood}
+              {[event.state, event.city].filter(Boolean).join(', ')}
             </span>
           </div>
 

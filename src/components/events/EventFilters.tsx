@@ -50,7 +50,6 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
   const hasActiveFilters =
     Boolean(filters.query) ||
     Boolean(filters.category && filters.category !== 'All') ||
-    Boolean(filters.neighborhood && filters.neighborhood !== 'All' && filters.neighborhood !== 'All Neighborhoods') ||
     Boolean(filters.country) ||
     Boolean(filters.state) ||
     Boolean(filters.city) ||
@@ -61,7 +60,6 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
     onChange({
       query: '',
       category: 'All',
-      neighborhood: 'All',
       country: '',
       state: '',
       city: '',
