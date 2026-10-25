@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Menu, X, PlusCircle, User, LogOut, Sparkles, ChevronDown } from 'lucide-react';
 import { authService } from '../../services/auth-service';
@@ -16,6 +16,28 @@ export function Navbar() {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => authService.getCurrentUser());
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
+  // Ref for the profile button + dropdown, used to close the dropdown on
+  // an outside click (previously it only closed on a route change, so
+  // clicking anywhere else on the page left it open).
+  const profileMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!profileDropdownOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (profileMenuRef.current && !profileMenuRef.current.contains(e.target as Node)) {
+        setProfileDropdownOpen(false);
+      }
+    };
+    const onEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setProfileDropdownOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onEscape);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onEscape);
+    };
+  }, [profileDropdownOpen]);
   // Organizer/admin access, fetched from the shared record (Supabase via
   // /api/organizer-access). Until it answers, organizer links stay hidden,
   // except for a Google-signed-in admin account (see OrganizerGuard).
@@ -33,7 +55,10 @@ export function Navbar() {
     return () => {
       cancelled = true;
     };
-  }, [currentUser?.email]);
+    // Re-checked on every route change too, so an organizer whose access
+    // an admin just revoked loses the organizer links on their next
+    // navigation instead of keeping them until they sign out and back in.
+  }, [currentUser?.email, location.pathname]);
 
   const canPost =
     accessRole === 'admin' ||
@@ -205,7 +230,7 @@ export function Navbar() {
         {/* Zone 3: 1 primary action */}
         <div className="hidden md:flex items-center gap-3 shrink-0">
           {currentUser ? (
-            <div className="relative">
+            <div className="relative" ref={profileMenuRef}>
               <button
                 type="button"
                 onClick={() => setProfileDropdownOpen(!profileDropdownOpen)}

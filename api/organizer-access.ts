@@ -8,8 +8,15 @@
 // POST /api/organizer-access { action: 'approve' | 'reject',
 //                               adminEmail, targetEmail }
 //   -> admin-only. Sets the target's status to approved/rejected.
+// POST /api/organizer-access { action: 'revoke',
+//                               adminEmail, targetEmail }
+//   -> admin-only. Removes an approved organizer: the target's status
+//     becomes 'revoked' and they go back to being an attendee. They may
+//     request access again afterwards.
 // GET  /api/organizer-access?pending=1&adminEmail=x
 //   -> admin-only. Lists pending requests.
+// GET  /api/organizer-access?organizers=1&adminEmail=x
+//   -> admin-only. Lists approved organizers (for the remove list).
 //
 // This is a Vercel Serverless Function, self-contained (no imports).
 // Access rows live in Supabase, not in any one browser's localStorage, so
@@ -170,7 +177,11 @@ export default async function handler(req: any, res: any): Promise<void> {
     const url = new URL(req.url || "/api/organizer-access", "http://localhost");
     const email = norm(url.searchParams.get("email") || "");
 
-    if (req.method === "GET" && url.searchParams.get("pending") === "1") {
+    if (
+      req.method === "GET" &&
+      (url.searchParams.get("pending") === "1" ||
+        url.searchParams.get("organizers") === "1")
+    ) {
       const adminEmail = norm(url.searchParams.get("adminEmail") || "");
       if (!isAdmin(adminEmail)) {
         sendJson(res, 403, { message: "Only admins can list organizer requests." });
@@ -192,6 +203,17 @@ export default async function handler(req: any, res: any): Promise<void> {
         throw new Error("Supabase list failed: " + listRes.status);
       }
       const rows = await listRes.json();
+      if (url.searchParams.get("organizers") === "1") {
+        const organizers = (Array.isArray(rows) ? rows : [])
+          .filter((r: any) => r.data && r.data.status === "approved")
+          .map((r: any) => ({
+            email: r.email,
+            name: r.data.name || "",
+            approvedAt: r.data.decidedAt || r.created_at || "",
+          }));
+        sendJson(res, 200, { organizers: organizers });
+        return;
+      }
       const pending = (Array.isArray(rows) ? rows : [])
         .filter((r: any) => r.data && r.data.status === "pending")
         .map((r: any) => ({
@@ -269,12 +291,12 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
 
-      if (action === "approve" || action === "reject") {
+      if (action === "approve" || action === "reject" || action === "revoke") {
         const adminEmail = norm(body.adminEmail || "");
         const targetEmail = norm(body.targetEmail || "");
         if (!isAdmin(adminEmail)) {
           sendJson(res, 403, {
-            message: "Only admins can approve or reject organizer requests.",
+            message: "Only admins can approve, reject, or remove organizers.",
           });
           return;
         }
@@ -282,15 +304,21 @@ export default async function handler(req: any, res: any): Promise<void> {
           sendJson(res, 400, { message: "Invalid target email." });
           return;
         }
+        const status =
+          action === "approve"
+            ? "approved"
+            : action === "revoke"
+              ? "revoked"
+              : "rejected";
         await upsertRow(targetEmail, {
-          status: action === "approve" ? "approved" : "rejected",
+          status: status,
           decidedBy: adminEmail,
           decidedAt: new Date().toISOString(),
         });
         sendJson(res, 200, {
           email: targetEmail,
           role: action === "approve" ? "organizer" : "attendee",
-          status: action === "approve" ? "approved" : "rejected",
+          status: status,
         });
         return;
       }

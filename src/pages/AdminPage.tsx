@@ -5,8 +5,11 @@ import { authService } from '../services/auth-service';
 import {
   fetchAccess,
   listPendingRequests,
+  listApprovedOrganizers,
   decideRequest,
+  revokeOrganizer,
   PendingRequest,
+  ApprovedOrganizer,
 } from '../services/roles-service';
 import { useToast } from '../components/ui/Toast';
 
@@ -17,8 +20,27 @@ export function AdminPage() {
   const currentUser = authService.getCurrentUser();
   const [state, setState] = useState<'loading' | 'allowed' | 'denied' | 'guest'>('loading');
   const [pending, setPending] = useState<PendingRequest[]>([]);
+  const [organizers, setOrganizers] = useState<ApprovedOrganizer[]>([]);
   const [busyEmail, setBusyEmail] = useState<string | null>(null);
+  // Email armed for removal confirmation: first click arms, second confirms.
+  const [confirmRevokeEmail, setConfirmRevokeEmail] = useState<string | null>(null);
   const [error, setError] = useState('');
+
+  const loadLists = async (adminEmail: string) => {
+    let errMsg = '';
+    try {
+      setPending(await listPendingRequests(adminEmail));
+    } catch (err: unknown) {
+      errMsg = err instanceof Error ? err.message : 'Could not load requests.';
+    }
+    try {
+      setOrganizers(await listApprovedOrganizers(adminEmail));
+    } catch (err: unknown) {
+      errMsg =
+        errMsg || (err instanceof Error ? err.message : 'Could not load organizers.');
+    }
+    setError(errMsg);
+  };
 
   const load = async () => {
     if (!currentUser) {
@@ -28,11 +50,7 @@ export function AdminPage() {
     const access = await fetchAccess(currentUser.email);
     if (access?.role === 'admin') {
       setState('allowed');
-      try {
-        setPending(await listPendingRequests(currentUser.email));
-      } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : 'Could not load requests.');
-      }
+      await loadLists(currentUser.email);
       return;
     }
     if (!access && currentUser.role === 'admin') {
@@ -56,7 +74,7 @@ export function AdminPage() {
     setBusyEmail(email);
     try {
       await decideRequest(currentUser.email, email, approve);
-      setPending((prev) => prev.filter((p) => p.email !== email));
+      await loadLists(currentUser.email);
       toast({
         type: 'success',
         title: approve ? 'Organizer approved' : 'Request rejected',
@@ -68,6 +86,38 @@ export function AdminPage() {
       toast({
         type: 'error',
         title: 'Could not update the request',
+        description: err instanceof Error ? err.message : 'Please try again.',
+      });
+    } finally {
+      setBusyEmail(null);
+    }
+  };
+
+  // Removes an approved organizer at any time. First click arms the
+  // confirmation, second click confirms, so a stray tap cannot remove
+  // someone by accident. The removed user becomes an attendee immediately
+  // (their organizer pages and links stop working on their next navigation)
+  // and may request access again afterwards.
+  const handleRevoke = async (email: string) => {
+    if (!currentUser) return;
+    if (confirmRevokeEmail !== email) {
+      setConfirmRevokeEmail(email);
+      return;
+    }
+    setConfirmRevokeEmail(null);
+    setBusyEmail(email);
+    try {
+      await revokeOrganizer(currentUser.email, email);
+      setOrganizers((prev) => prev.filter((o) => o.email !== email));
+      toast({
+        type: 'success',
+        title: 'Organizer removed',
+        description: `${email} is now an attendee and can no longer post events.`,
+      });
+    } catch (err: unknown) {
+      toast({
+        type: 'error',
+        title: 'Could not remove the organizer',
         description: err instanceof Error ? err.message : 'Please try again.',
       });
     } finally {
@@ -124,7 +174,11 @@ export function AdminPage() {
         </div>
       )}
 
-      <div className="bg-white rounded-2xl border border-[#E5E1D8] shadow-xs divide-y divide-[#EBE7DF]">
+      <div>
+        <h2 className="font-editorial text-xl font-bold text-[#1E2320] mb-2">
+          Pending Requests
+        </h2>
+        <div className="bg-white rounded-2xl border border-[#E5E1D8] shadow-xs divide-y divide-[#EBE7DF]">
         {pending.length === 0 ? (
           <p className="p-6 text-sm text-[#5F635D]">
             No pending organizer requests right now.
@@ -169,6 +223,75 @@ export function AdminPage() {
             </div>
           ))
         )}
+        </div>
+      </div>
+
+      <div>
+        <h2 className="font-editorial text-xl font-bold text-[#1E2320] mb-2">
+          Approved Organizers
+        </h2>
+        <p className="text-xs text-[#5F635D] mb-2">
+          Remove an organizer at any time. They immediately go back to being
+          an attendee and can no longer post events, and they may request
+          access again afterwards.
+        </p>
+        <div className="bg-white rounded-2xl border border-[#E5E1D8] shadow-xs divide-y divide-[#EBE7DF]">
+          {organizers.length === 0 ? (
+            <p className="p-6 text-sm text-[#5F635D]">
+              No approved organizers yet. Approvals from the pending list
+              above will appear here.
+            </p>
+          ) : (
+            organizers.map((org) => (
+              <div
+                key={org.email}
+                className="p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+              >
+                <div>
+                  <p className="text-sm font-semibold text-[#1E2320]">
+                    {org.name || org.email}
+                  </p>
+                  <p className="text-xs text-[#5F635D]">{org.email}</p>
+                  {org.approvedAt && (
+                    <p className="text-[11px] text-[#8C887E] mt-0.5">
+                      Approved {new Date(org.approvedAt).toLocaleString()}
+                    </p>
+                  )}
+                </div>
+                <div className="flex gap-2 shrink-0">
+                  {confirmRevokeEmail === org.email ? (
+                    <>
+                      <button
+                        type="button"
+                        disabled={busyEmail === org.email}
+                        onClick={() => handleRevoke(org.email)}
+                        className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                      >
+                        Remove for sure?
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmRevokeEmail(null)}
+                        className="px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 border border-slate-200 rounded-lg transition-colors cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={busyEmail === org.email}
+                      onClick={() => handleRevoke(org.email)}
+                      className="px-4 py-2 text-xs font-semibold text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-lg transition-colors cursor-pointer"
+                    >
+                      Remove Organizer
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
       </div>
     </div>
   );

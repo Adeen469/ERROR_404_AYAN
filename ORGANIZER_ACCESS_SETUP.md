@@ -16,6 +16,12 @@ Posting events is no longer something a visitor can choose for themselves:
   the app, in this document, or in chat** — passwords are not how admin
   status works here, and anything written into the app's code is visible
   to anyone who views the site source.
+- **Admins can remove organizers at any time.** The `/admin` page has an
+  "Approved Organizers" list with a Remove button (click once to arm,
+  click again to confirm). A removed organizer immediately becomes an
+  attendee again — their organizer pages and links stop working on their
+  next navigation — and they may request access again afterwards. Admins
+  themselves cannot be removed this way.
 - **Organizer pages are guarded.** `/organizer/dashboard`, `/organizer/events`,
   `/organizer/events/new`, `/organizer/events/:id/edit`, and
   `/organizer/events/:id/attendees` render only for approved organizers and

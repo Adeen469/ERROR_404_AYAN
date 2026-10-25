@@ -109,3 +109,47 @@ export async function decideRequest(
     throw new Error(data.message || 'Could not update the request.');
   }
 }
+
+export interface ApprovedOrganizer {
+  email: string;
+  name: string;
+  approvedAt: string;
+}
+
+export async function listApprovedOrganizers(
+  adminEmail: string,
+): Promise<ApprovedOrganizer[]> {
+  const res = await fetch(
+    `/api/organizer-access?organizers=1&adminEmail=${encodeURIComponent(
+      adminEmail.trim().toLowerCase(),
+    )}`,
+  );
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.message || 'Could not load organizers.');
+  }
+  const data = await res.json();
+  return (data.organizers || []) as ApprovedOrganizer[];
+}
+
+// Removes an approved organizer at any time. The target goes back to being
+// an attendee and can request access again afterwards. Admins cannot be
+// removed this way (the server refuses admin targets).
+export async function revokeOrganizer(
+  adminEmail: string,
+  targetEmail: string,
+): Promise<void> {
+  const res = await fetch('/api/organizer-access', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: 'revoke',
+      adminEmail: adminEmail.trim().toLowerCase(),
+      targetEmail: targetEmail.trim().toLowerCase(),
+    }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.message || 'Could not remove the organizer.');
+  }
+}
