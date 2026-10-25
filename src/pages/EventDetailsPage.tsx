@@ -78,6 +78,17 @@ export function EventDetailsPage() {
   // Attendee details gate state: which registration flow to continue
   // once the user has provided/confirmed their details.
   const [detailsGateOpen, setDetailsGateOpen] = useState(false);
+  // Aggregate pending-approval count for the capacity block
+  // (pending / approved / total). No attendee details, and a failure
+  // here never blocks the event itself.
+  const [pendingCount, setPendingCount] = useState(0);
+
+  useEffect(() => {
+    if (!eventId) return;
+    registrationsService.getPendingCounts()
+      .then((counts) => setPendingCount(counts[eventId] || 0))
+      .catch(() => {});
+  }, [eventId]);
   const [detailsGateTarget, setDetailsGateTarget] = useState<'free' | 'paid' | null>(null);
   // Manual-approval payment dialog state (paid events only).
   const [paymentOpen, setPaymentOpen] = useState(false);
@@ -235,7 +246,8 @@ export function EventDetailsPage() {
     try {
       const reg = await registrationsService.registerWithPayment(event, cleanUtr);
       setRegistration(reg);
-      setEvent((prev) => (prev ? { ...prev, registeredCount: prev.registeredCount + 1 } : null));
+      // No count change: a pending payment holds no spot. The count
+      // rises only if the organizer approves.
       setPaymentOpen(false);
       setUtr('');
       toast({
@@ -259,13 +271,22 @@ export function EventDetailsPage() {
     setActionLoading(true);
     try {
       await registrationsService.cancelRegistration(registration.id);
+      // Only a held slot frees a count: confirmed passes always hold
+      // one; pending payments hold one only if they predate holdsSpot.
+      const heldSpot =
+        registration.status === 'confirmed' ||
+        (registration.status === 'pending' && registration.holdsSpot !== false);
       setRegistration(null);
-      setEvent((prev) => (prev ? { ...prev, registeredCount: Math.max(0, prev.registeredCount - 1) } : null));
+      if (heldSpot) {
+        setEvent((prev) => (prev ? { ...prev, registeredCount: Math.max(0, prev.registeredCount - 1) } : null));
+      }
       setConfirmCancelOpen(false);
       toast({
         type: 'info',
         title: 'Registration Cancelled',
-        description: 'Your spot has been freed up for other community members.',
+        description: heldSpot
+          ? 'Your spot has been freed up for other community members.'
+          : 'Your pending payment request has been withdrawn.',
       });
     } catch {
       toast({
@@ -497,6 +518,11 @@ export function EventDetailsPage() {
                   <span>{spotsLeft} open spots remaining</span>
                 )}
               </p>
+              {pendingCount > 0 && (
+                <p className="text-[11px] text-[#8C887E]">
+                  {pendingCount} pending approval — these do not hold a spot
+                </p>
+              )}
             </div>
 
             {/* Action State: Registered vs Not Registered */}
@@ -687,7 +713,7 @@ export function EventDetailsPage() {
         title={isPaymentPending ? 'Withdraw Payment Request' : 'Cancel Registration'}
         message={
           isPaymentPending
-            ? 'Withdraw your pending payment request? Your held spot will be released for other attendees.'
+            ? 'Withdraw your pending payment request? Any held spot will be released for other attendees.'
             : 'Are you sure you want to cancel your RSVP? This will free your spot for other attendees.'
         }
         confirmLabel={isPaymentPending ? 'Yes, Withdraw Request' : 'Yes, Cancel RSVP'}

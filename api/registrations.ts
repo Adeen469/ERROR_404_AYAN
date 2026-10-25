@@ -452,6 +452,21 @@ export default async function handler(req: any, res: any): Promise<void> {
           sendJson(res, 403, { message: "Only the event owner or an admin can do this" });
           return;
         }
+        // Capacity guard (server backstop for the client check): a
+        // pending -> confirmed approval takes a slot only when the
+        // registration holds none (holdsSpot: false, i.e. new ones).
+        // Legacy pending rows already hold their slot, so they are
+        // exempt. Without a free slot the approval is refused.
+        if (
+          nextStatus === "confirmed" &&
+          existing.status === "pending" &&
+          existing.holdsSpot === false &&
+          event &&
+          event.registeredCount >= event.capacity
+        ) {
+          sendJson(res, 409, { message: "This event is at full capacity. Free a spot before approving." });
+          return;
+        }
       } else if (nextStatus === "cancelled") {
         // Attendee cancelling their own registration.
         if (!updates.userId || updates.userId !== existing.userId) {

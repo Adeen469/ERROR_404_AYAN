@@ -287,7 +287,7 @@ export function RegistrationsPage() {
         title={cancelTarget?.status === 'pending' ? 'Withdraw Payment Request' : 'Cancel Event RSVP'}
         message={
           cancelTarget?.status === 'pending'
-            ? `Withdraw your pending payment request for "${cancelTarget?.event.title}"? Your held spot will be released.`
+            ? `Withdraw your pending payment request for "${cancelTarget?.event.title}"? Any held spot will be released.`
             : `Are you sure you want to cancel your RSVP for "${cancelTarget?.event.title}"? Your spot will be made available to other attendees immediately.`
         }
         confirmLabel={cancelTarget?.status === 'pending' ? 'Yes, Withdraw Request' : 'Yes, Cancel RSVP'}

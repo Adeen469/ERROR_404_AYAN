@@ -67,8 +67,12 @@ export function AttendeesPage() {
         title: 'Payment approved',
         description: `${reg.userName}'s pass ${updated.ticketCode} is now active.`,
       });
-    } catch {
-      toast({ type: 'error', title: 'Could not approve payment' });
+    } catch (err: unknown) {
+      toast({
+        type: 'error',
+        title: 'Could not approve payment',
+        description: err instanceof Error ? err.message : undefined,
+      });
     } finally {
       setBusyId(null);
     }
@@ -84,7 +88,7 @@ export function AttendeesPage() {
       toast({
         type: 'info',
         title: 'Payment rejected',
-        description: `${reg.userName}'s held spot has been released.`,
+        description: `${reg.userName}'s payment request was rejected.`,
       });
     } catch {
       toast({ type: 'error', title: 'Could not reject payment' });
@@ -111,6 +115,10 @@ export function AttendeesPage() {
   // (and its export) covers confirmed and rejected registrations only.
   const pendingRegs = attendees.filter((a) => a.status === 'pending');
   const tableAttendees = attendees.filter((a) => a.status !== 'pending');
+  // Pending / approved / total split for the summary line. Approved
+  // here is the true confirmed count from the roster, not the stored
+  // event count (legacy pending rows were counted in that number).
+  const approvedCount = attendees.filter((a) => a.status === 'confirmed').length;
 
   const handleExportCSV = () => {
     if (tableAttendees.length === 0) {
@@ -254,8 +262,16 @@ export function AttendeesPage() {
         </div>
       </div>
 
+      {/* Pending / approved / total split. */}
+      {evt && (
+        <p className="text-xs text-[#5F635D]">
+          {approvedCount} approved · {pendingRegs.length} pending · {evt.capacity} total spots
+        </p>
+      )}
+
       {/* Pending payment approvals — manual-approval flow for paid events.
-          Approve issues the pass; reject releases the held spot. */}
+          Approve issues the pass and takes a spot; reject frees a held
+          spot (new pending requests hold none). */}
       {pendingRegs.length > 0 && (
         <div className="bg-amber-50/60 rounded-2xl border border-amber-200 p-5 space-y-3 shadow-xs">
           <h2 className="font-editorial text-base font-bold text-[#1E2320]">
@@ -287,7 +303,15 @@ export function AttendeesPage() {
                 <div className="flex items-center gap-2 shrink-0">
                   <button
                     type="button"
-                    disabled={busyId === reg.id}
+                    disabled={
+                      busyId === reg.id ||
+                      (!!evt && evt.registeredCount >= evt.capacity && reg.holdsSpot === false)
+                    }
+                    title={
+                      !!evt && evt.registeredCount >= evt.capacity && reg.holdsSpot === false
+                        ? 'Event is at full capacity — free a spot before approving'
+                        : undefined
+                    }
                     onClick={() => handleApprove(reg)}
                     className="px-3.5 py-2 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors disabled:opacity-60"
                   >

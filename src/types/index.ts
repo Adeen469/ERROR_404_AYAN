@@ -93,6 +93,14 @@ export interface AttendeeRegistration {
   // events that require them (see EventItem.requireAttendeeDetails).
   // Only present on registrations made after the details gate.
   userPhone?: string;
+  // Slot accounting: pending registrations created BEFORE this flag
+  // existed held a spot (registeredCount +1 at payment time). Those
+  // rows predate the flag and are treated as holding one. New pending
+  // registrations set holdsSpot: false: they hold NO slot while the
+  // organizer decides, so a rejected request never blocked a spot.
+  // Approval of a holdsSpot: false registration takes a slot (+1),
+  // guarded by capacity; approval of a legacy one does not.
+  holdsSpot?: boolean;
 }
 
 export interface UserProfile {

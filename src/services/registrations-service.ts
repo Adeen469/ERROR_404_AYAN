@@ -2,7 +2,7 @@ import { AttendeeRegistration, EventItem } from '../types';
 import { DEMO_EVENTS } from '../mocks/demo-data';
 import { eventsService } from './events-service';
 import { authService } from './auth-service';
-import { apiClient, isDemoMode } from './api-client';
+import { apiClient, ApiError, isDemoMode } from './api-client';
 
 const REG_STORAGE_KEY = 'locora_registrations';
 
@@ -185,8 +185,11 @@ export const registrationsService = {
 
   // Paid events: the attendee pays the organizer directly (UPI) and
   // submits the 12-digit UTR. This creates a PENDING registration that
-  // holds a spot (count +1) but issues NO pass until the organizer
-  // approves it (approveRegistration).
+  // holds NO spot while the organizer decides — a request that ends in
+  // rejection must never have blocked a seat. The slot is taken only
+  // on approval (approveRegistration, capacity-guarded). Pending rows
+  // created before this change predate holdsSpot and are treated as
+  // holding a spot (see AttendeeRegistration.holdsSpot).
   async registerWithPayment(event: EventItem, utr: string): Promise<AttendeeRegistration> {
     const user = authService.getCurrentUser();
     if (!user) {
@@ -216,6 +219,8 @@ export const registrationsService = {
       // Saved by the details gate before registration; shared with the
       // organizer only, for events that require attendee details.
       userPhone: user.phone || undefined,
+      // No slot held while the organizer decides (see holdsSpot).
+      holdsSpot: false,
       status: 'pending',
       registeredAt: new Date().toISOString(),
       ticketCode: '',
@@ -234,15 +239,8 @@ export const registrationsService = {
       }
     }
 
-    // A pending payment holds a spot until it is approved or rejected.
-    try {
-      await eventsService.adjustRegisteredCount(
-        event.id,
-        Math.min(event.capacity, event.registeredCount + 1),
-      );
-    } catch (e) {
-      console.warn('Could not increment event registered count:', e);
-    }
+    // No count change: a pending payment holds no spot. The slot is
+    // taken only if the organizer approves (approveRegistration).
 
     return newReg;
   },
@@ -264,9 +262,13 @@ export const registrationsService = {
     if (!record) return false;
     if (record.status === 'cancelled') return true;
 
-    // Confirmed passes and pending payments both hold a spot; releasing
-    // it is part of cancelling either.
-    const heldSpot = record.status === 'confirmed' || record.status === 'pending';
+    // Only a held slot is released: confirmed passes always hold one;
+    // pending payments hold one only if they predate the holdsSpot flag
+    // (legacy rows). New pending payments hold nothing, so cancelling
+    // one changes no count.
+    const heldSpot =
+      record.status === 'confirmed' ||
+      (record.status === 'pending' && record.holdsSpot !== false);
     const user = authService.getCurrentUser();
 
     if (!isDemoMode()) {
@@ -343,10 +345,39 @@ export const registrationsService = {
   },
 
   // Organizer approves a pending payment: the pass is issued now (the
-  // ticket code is generated here, not at payment time). No count change:
-  // the pending payment already held a spot.
+  // ticket code is generated here, not at payment time). Slot rule: a
+  // pending payment that holds no spot (holdsSpot: false, i.e. all new
+  // ones) takes a slot on approval, so approval is refused when the
+  // event is already full. A legacy pending payment already holds its
+  // slot, so approving it changes no count.
   async approveRegistration(registrationId: string, approverEmail: string): Promise<AttendeeRegistration> {
     const ticketCode = newTicketCode();
+    // Load the record first: approval needs to know whether this
+    // registration holds a spot before it can check capacity.
+    let record: AttendeeRegistration | undefined;
+    if (!isDemoMode()) {
+      try {
+        record = await apiClient.get<AttendeeRegistration>('/registrations', { id: registrationId });
+      } catch {
+        record = undefined;
+      }
+    }
+    if (!record) {
+      const all = getStoredRegistrations();
+      record = all.find((r) => r.id === registrationId);
+    }
+    const needsSpot = record?.holdsSpot === false;
+    let event: EventItem | null = null;
+    if (needsSpot && record) {
+      try {
+        event = await eventsService.getEventById(record.eventId);
+      } catch {
+        event = null;
+      }
+      if (event && event.registeredCount >= event.capacity) {
+        throw new Error('This event is at full capacity. Free a spot (a cancellation or rejection) before approving.');
+      }
+    }
     if (!isDemoMode()) {
       try {
         const updated = await apiClient.patch<AttendeeRegistration>(
@@ -361,8 +392,24 @@ export const registrationsService = {
           localTarget.ticketCode = ticketCode;
           saveStoredRegistrations(all);
         }
+        if (needsSpot && event) {
+          try {
+            await eventsService.adjustRegisteredCount(
+              event.id,
+              Math.min(event.capacity, event.registeredCount + 1),
+            );
+          } catch (e) {
+            console.warn('Could not increment event registered count:', e);
+          }
+        }
         return updated;
       } catch (err) {
+        // A deliberate refusal (full event, or not the event's owner)
+        // is a decision, not an outage: surface it instead of falling
+        // back to a local approval that would bypass it.
+        if (err instanceof ApiError && (err.status === 409 || err.status === 403)) {
+          throw err;
+        }
         console.warn('Shared approval unavailable, approving locally:', err);
       }
     }
@@ -372,10 +419,22 @@ export const registrationsService = {
     target.status = 'confirmed';
     target.ticketCode = ticketCode;
     saveStoredRegistrations(all);
+    if (target.holdsSpot === false) {
+      try {
+        const ev = await eventsService.getEventById(target.eventId);
+        if (ev && ev.registeredCount < ev.capacity) {
+          await eventsService.adjustRegisteredCount(ev.id, ev.registeredCount + 1);
+        }
+      } catch (e) {
+        console.warn('Could not increment event registered count:', e);
+      }
+    }
     return target;
   },
 
-  // Organizer rejects a pending payment: the held spot is released.
+  // Organizer rejects a pending payment: a legacy held spot is
+  // released; new pending payments held none, so rejecting one changes
+  // no count.
   async rejectRegistration(registrationId: string, approverEmail: string): Promise<AttendeeRegistration> {
     if (!isDemoMode()) {
       try {
@@ -390,9 +449,14 @@ export const registrationsService = {
           localTarget.status = 'rejected';
           saveStoredRegistrations(all);
         }
-        await this.releaseSpot(updated.eventId);
+        if (updated.holdsSpot !== false) await this.releaseSpot(updated.eventId);
         return updated;
       } catch (err) {
+        // A deliberate refusal (not the event's owner) is a decision,
+        // not an outage: surface it instead of rejecting locally.
+        if (err instanceof ApiError && err.status === 403) {
+          throw err;
+        }
         console.warn('Shared rejection unavailable, rejecting locally:', err);
       }
     }
@@ -401,11 +465,12 @@ export const registrationsService = {
     if (!target) throw new Error('Registration record not found');
     target.status = 'rejected';
     saveStoredRegistrations(all);
-    await this.releaseSpot(target.eventId);
+    if (target.holdsSpot !== false) await this.releaseSpot(target.eventId);
     return target;
   },
 
-  // Release one held spot (used when a pending payment is rejected).
+  // Release one held spot (legacy pending payments only; new pending
+  // payments never held one).
   async releaseSpot(eventId: string): Promise<void> {
     try {
       const event = await eventsService.getEventById(eventId);
