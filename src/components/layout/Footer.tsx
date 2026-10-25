@@ -9,8 +9,15 @@ export function Footer() {
         <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-12">
           {/* Brand & Purpose */}
           <div className="md:col-span-1 space-y-3">
-            <Link to="/" className="font-editorial text-2xl font-black tracking-tight text-[#1E2320] hover:text-[#1E3F35] transition-colors">
-              Locora
+            <Link to="/" className="flex items-center gap-2 hover:text-[#1E3F35] transition-colors">
+              <img
+                src="/locora-logo.png"
+                alt="Locora logo"
+                className="h-8 w-8 rounded-lg object-cover shrink-0"
+              />
+              <span className="font-editorial text-2xl font-black tracking-tight text-[#1E2320]">
+                Locora
+              </span>
             </Link>
             <p className="text-xs text-[#5F635D] leading-relaxed">
               Discover nearby. Connect locally. Unifying community events, local gatherings, and neighborhood organizers.

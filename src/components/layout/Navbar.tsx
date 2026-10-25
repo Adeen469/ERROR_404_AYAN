@@ -4,6 +4,11 @@ import { Menu, X, PlusCircle, User, LogOut, Sparkles, ChevronDown } from 'lucide
 import { authService } from '../../services/auth-service';
 import { UserProfile } from '../../types';
 import { isDemoMode } from '../../services/api-client';
+import {
+  fetchAccess,
+  isAdminEmail,
+  AccessRole,
+} from '../../services/roles-service';
 
 export function Navbar() {
   const location = useLocation();
@@ -11,6 +16,38 @@ export function Navbar() {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => authService.getCurrentUser());
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
+  // Organizer/admin access, fetched from the shared record (Supabase via
+  // /api/organizer-access). Until it answers, organizer links stay hidden,
+  // except for a Google-signed-in admin account (see OrganizerGuard).
+  const [accessRole, setAccessRole] = useState<AccessRole | null>(null);
+
+  useEffect(() => {
+    if (!currentUser) {
+      setAccessRole(null);
+      return;
+    }
+    let cancelled = false;
+    fetchAccess(currentUser.email).then((access) => {
+      if (!cancelled) setAccessRole(access ? access.role : null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser?.email]);
+
+  const canPost =
+    accessRole === 'admin' ||
+    accessRole === 'organizer' ||
+    (accessRole === null &&
+      currentUser?.role === 'admin' &&
+      currentUser?.email !== undefined &&
+      isAdminEmail(currentUser.email));
+  const isAdmin =
+    accessRole === 'admin' ||
+    (accessRole === null &&
+      currentUser?.role === 'admin' &&
+      currentUser?.email !== undefined &&
+      isAdminEmail(currentUser.email));
 
   useEffect(() => {
     const unsubscribe = authService.subscribe((user) => {
@@ -48,18 +85,6 @@ export function Navbar() {
     navigate('/');
   };
 
-  const handleQuickSwitch = (role: 'attendee' | 'organizer' | 'guest') => {
-    authService.quickSwitchUser(role);
-    setProfileDropdownOpen(false);
-    if (role === 'organizer') {
-      navigate('/organizer/dashboard');
-    } else if (role === 'attendee') {
-      navigate('/dashboard');
-    } else {
-      navigate('/');
-    }
-  };
-
   const isLandingPage = !currentUser && (location.pathname === '/' || location.pathname === '/landing');
 
   // Auth pages for a guest must not show the logged-in navigation
@@ -85,13 +110,20 @@ export function Navbar() {
     <header className="sticky top-0 z-40 bg-[#FAF8F5]/95 backdrop-blur-md border-b border-[#E7E3DB]">
       {/* Top Bar Contract: 3 zones, gap-8 */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-8">
-        {/* Zone 1: Single text element wordmark in Editorial Serif */}
+        {/* Zone 1: Logo mark + wordmark */}
         <div className="flex items-center gap-3 shrink-0">
           <Link
             to="/"
-            className="font-editorial text-2xl font-bold tracking-tight text-[#1E2320] whitespace-nowrap shrink-0 hover:text-[#1E3F35] transition-colors"
+            className="flex items-center gap-2 shrink-0 hover:text-[#1E3F35] transition-colors"
           >
-            Locora
+            <img
+              src="/locora-logo.png"
+              alt="Locora logo"
+              className="h-9 w-9 rounded-lg object-cover shrink-0"
+            />
+            <span className="font-editorial text-2xl font-bold tracking-tight text-[#1E2320] whitespace-nowrap">
+              Locora
+            </span>
           </Link>
         </div>
 
@@ -154,16 +186,18 @@ export function Navbar() {
                 </Link>
               )}
 
-              <Link
-                to="/organizer/dashboard"
-                className={`transition-colors whitespace-nowrap shrink-0 pb-1 ${
-                  isCurrent('/organizer')
-                    ? 'text-[#1E2320] border-b-2 border-[#1E3F35] font-semibold'
-                    : 'hover:text-[#1E2320]'
-                }`}
-              >
-                Organizer Hub
-              </Link>
+              {canPost && (
+                <Link
+                  to="/organizer/dashboard"
+                  className={`transition-colors whitespace-nowrap shrink-0 pb-1 ${
+                    isCurrent('/organizer')
+                      ? 'text-[#1E2320] border-b-2 border-[#1E3F35] font-semibold'
+                      : 'hover:text-[#1E2320]'
+                  }`}
+                >
+                  Organizer Hub
+                </Link>
+              )}
             </>
           )}
         </nav>
@@ -224,39 +258,38 @@ export function Navbar() {
                     Profile Settings
                   </Link>
 
-                  <div className="border-t border-slate-100 my-1" />
+                  {canPost && (
+                    <>
+                      <div className="border-t border-slate-100 my-1" />
 
-                  <Link
-                    to="/organizer/dashboard"
-                    className="block px-4 py-2 text-xs text-slate-700 hover:bg-slate-50"
-                  >
-                    Organizer Console
-                  </Link>
-                  <Link
-                    to="/organizer/events/new"
-                    className="flex items-center gap-1.5 px-4 py-2 text-xs text-indigo-600 font-medium hover:bg-indigo-50"
-                  >
-                    <PlusCircle className="w-3.5 h-3.5" />
-                    <span>Create New Event</span>
-                  </Link>
+                      <Link
+                        to="/organizer/dashboard"
+                        className="block px-4 py-2 text-xs text-slate-700 hover:bg-slate-50"
+                      >
+                        Organizer Console
+                      </Link>
+                      <Link
+                        to="/organizer/events/new"
+                        className="flex items-center gap-1.5 px-4 py-2 text-xs text-indigo-600 font-medium hover:bg-indigo-50"
+                      >
+                        <PlusCircle className="w-3.5 h-3.5" />
+                        <span>Create New Event</span>
+                      </Link>
+                    </>
+                  )}
 
-                  <div className="border-t border-slate-100 my-1" />
+                  {isAdmin && (
+                    <>
+                      <div className="border-t border-slate-100 my-1" />
 
-                  <div className="px-4 py-1.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
-                    Quick Role Switch
-                  </div>
-                  <button
-                    onClick={() => handleQuickSwitch('attendee')}
-                    className="w-full text-left px-4 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
-                  >
-                    Switch to Attendee (Sarah)
-                  </button>
-                  <button
-                    onClick={() => handleQuickSwitch('organizer')}
-                    className="w-full text-left px-4 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
-                  >
-                    Switch to Organizer (Marcus)
-                  </button>
+                      <Link
+                        to="/admin"
+                        className="block px-4 py-2 text-xs text-slate-700 hover:bg-slate-50"
+                      >
+                        Admin — Organizer Requests
+                      </Link>
+                    </>
+                  )}
 
                   <div className="border-t border-slate-100 my-1" />
 
@@ -302,20 +335,22 @@ export function Navbar() {
               >
                 Sign In
               </Link>
-              <Link
-                to="/organizer/events/new"
-                className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-2xs"
-              >
-                <PlusCircle className="w-3.5 h-3.5" />
-                <span>Post Event</span>
-              </Link>
+              {canPost && (
+                <Link
+                  to="/organizer/events/new"
+                  className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-2xs"
+                >
+                  <PlusCircle className="w-3.5 h-3.5" />
+                  <span>Post Event</span>
+                </Link>
+              )}
             </div>
           )}
         </div>
 
         {/* Mobile Hamburger Toggle */}
         <div className="flex md:hidden items-center gap-2">
-          {!isLandingPage && !isAuthPage && (
+          {!isLandingPage && !isAuthPage && canPost && (
             <Link
               to="/organizer/events/new"
               className="p-2 text-[#1E3F35] hover:bg-[#EAF1ED] rounded-lg"
@@ -431,12 +466,22 @@ export function Navbar() {
                   </Link>
                 </>
               )}
-              <Link
-                to="/organizer/dashboard"
-                className="block px-3 py-2.5 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50"
-              >
-                Organizer Dashboard
-              </Link>
+              {canPost && (
+                <Link
+                  to="/organizer/dashboard"
+                  className="block px-3 py-2.5 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  Organizer Dashboard
+                </Link>
+              )}
+              {isAdmin && (
+                <Link
+                  to="/admin"
+                  className="block px-3 py-2.5 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  Admin — Organizer Requests
+                </Link>
+              )}
             </div>
           )}
 
@@ -493,12 +538,6 @@ export function Navbar() {
                   className="w-full text-center py-2.5 text-xs font-medium text-white bg-[#1E3F35] rounded-lg"
                 >
                   Sign In
-                </Link>
-                <Link
-                  to="/organizer/events/new"
-                  className="w-full text-center py-2.5 text-xs font-medium text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg"
-                >
-                  Create New Event
                 </Link>
               </div>
             )}

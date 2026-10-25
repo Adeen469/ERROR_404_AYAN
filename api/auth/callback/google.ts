@@ -206,7 +206,12 @@ export default async function handler(req: any, res: any) {
     );
   }
 
-  const role = state.role === "organizer" ? "organizer" : "attendee";
+  // Roles are NOT taken from the sign-in request anymore. A role chosen by
+  // the visitor at sign-in used to let anyone become an organizer. Now the
+  // role is assigned below, from the Google-verified email, after the
+  // profile is fetched: admin emails become admins, everyone else becomes
+  // an attendee. Organizer status comes only from an admin approval
+  // (see api/organizer-access.ts), never from sign-in.
   const returnTo =
     state.returnTo && state.returnTo.startsWith("/") && !state.returnTo.startsWith("//")
       ? state.returnTo
@@ -435,6 +440,10 @@ export default async function handler(req: any, res: any) {
     );
   }
 
+  // Admin emails are identifiers, not secrets. This email comes from
+  // Google's own userinfo response for the just-exchanged token, so it is
+  // verified by Google, not self-asserted by the visitor.
+  const ADMIN_EMAILS = ["mr.adeen946@gmail.com", "ayan.work937@gmail.com"];
   const profile = {
     id: googleUser.sub,
     name: googleUser.name || "Community Member",
@@ -443,7 +452,11 @@ export default async function handler(req: any, res: any) {
     bio: "Active Locora community member.",
     neighborhood: "Downtown Arts District",
     interests: ["Food & Community", "Live Music & Culture"],
-    role,
+    role:
+      ADMIN_EMAILS.indexOf(String(googleUser.email).trim().toLowerCase()) !== -1
+        ? "admin"
+        : "attendee",
+    authProvider: "google",
     createdAt: new Date().toISOString(),
   };
 

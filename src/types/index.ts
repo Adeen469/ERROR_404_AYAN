@@ -75,6 +75,10 @@ export interface UserProfile {
   neighborhood: string;
   interests: EventCategory[];
   role: 'attendee' | 'organizer' | 'admin';
+  // How this account's email was verified: 'google' for Google sign-in
+  // (email verified by Google), 'local' for the local password fallback.
+  // Admin status is only trusted for Google-signed-in accounts.
+  authProvider?: 'google' | 'local';
   createdAt: string;
 }
 

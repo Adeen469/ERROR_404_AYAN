@@ -1,9 +1,8 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Eye, EyeOff, Lock, Mail, ArrowRight, UserCheck, ShieldAlert } from 'lucide-react';
+import { Eye, EyeOff, Lock, Mail } from 'lucide-react';
 import { authService } from '../services/auth-service';
 import { useToast } from '../components/ui/Toast';
-import { isDemoMode } from '../services/api-client';
 import { GoogleAuthButton } from '../components/auth/GoogleAuthButton';
 
 export function LoginPage() {
@@ -32,33 +31,15 @@ export function LoginPage() {
         title: `Signed in as ${user.name}`,
         description: `Welcome back to Locora (${user.role} role).`,
       });
-      if (user.role === 'organizer') {
+      if (user.role === 'admin') {
+        navigate('/admin');
+      } else if (user.role === 'organizer') {
         navigate('/organizer/dashboard');
       } else {
         navigate('/dashboard');
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Invalid credentials');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleQuickDemoLogin = async (role: 'attendee' | 'organizer') => {
-    setLoading(true);
-    try {
-      authService.quickSwitchUser(role);
-      const user = authService.getCurrentUser()!;
-      toast({
-        type: 'success',
-        title: `Demo Login: ${user.name}`,
-        description: `Active as ${role}. Simulated in local browser storage.`,
-      });
-      if (role === 'organizer') {
-        navigate('/organizer/dashboard');
-      } else {
-        navigate('/dashboard');
-      }
     } finally {
       setLoading(false);
     }
@@ -73,40 +54,9 @@ export function LoginPage() {
         </Link>
         <h1 className="font-editorial text-2xl font-bold text-[#1E2320]">Sign in to your account</h1>
         <p className="text-xs text-[#5F635D]">
-          Access your event tickets, saved gatherings, or organizer console.
+          Access your event tickets and saved gatherings.
         </p>
       </div>
-
-      {/* Demo Quick Logins */}
-      {isDemoMode() && (
-        <div className="bg-[#EAF1ED] border border-[#D0E2D9] rounded-2xl p-4 space-y-2.5 text-xs">
-          <p className="font-semibold text-[#1E3F35] flex items-center gap-1.5">
-            <UserCheck className="w-4 h-4 text-[#1E3F35]" />
-            <span>Instant Demo Profile Selection:</span>
-          </p>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => handleQuickDemoLogin('attendee')}
-              className="p-2.5 bg-white border border-[#D0E2D9] rounded-xl text-left hover:border-[#1E3F35] transition-colors cursor-pointer"
-            >
-              <div className="font-bold text-[#1E2320]">Attendee</div>
-              <div className="text-[11px] text-[#5F635D] truncate">Sarah Chen</div>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleQuickDemoLogin('organizer')}
-              className="p-2.5 bg-white border border-[#D0E2D9] rounded-xl text-left hover:border-[#1E3F35] transition-colors cursor-pointer"
-            >
-              <div className="font-bold text-[#1E2320]">Organizer</div>
-              <div className="text-[11px] text-[#5F635D] truncate">Marcus Vance</div>
-            </button>
-          </div>
-          <p className="text-[10px] text-[#1E3F35]/80 leading-tight">
-            Independent backend connects via REST endpoints configured in .env.
-          </p>
-        </div>
-      )}
 
       {/* Login Form */}
       <form
@@ -193,7 +143,9 @@ export function LoginPage() {
               title: `Signed in as ${user.name}`,
               description: 'Welcome back to Locora!',
             });
-            if (user.role === 'organizer') {
+            if (user.role === 'admin') {
+              navigate('/admin');
+            } else if (user.role === 'organizer') {
               navigate('/organizer/dashboard');
             } else {
               navigate('/dashboard');

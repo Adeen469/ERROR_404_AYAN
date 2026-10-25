@@ -1,11 +1,16 @@
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
 import { User, Check, AlertCircle, MapPin, Sparkles, LogOut } from 'lucide-react';
 import { authService } from '../services/auth-service';
 import { UserProfile, EventCategory } from '../types';
 import { DEMO_CATEGORIES, DEMO_NEIGHBORHOODS } from '../mocks/demo-data';
 import { useToast } from '../components/ui/Toast';
 import { isDemoMode } from '../services/api-client';
+import {
+  fetchAccess,
+  requestOrganizerAccess,
+  AccessRole,
+} from '../services/roles-service';
 
 export function ProfilePage() {
   const navigate = useNavigate();
@@ -23,6 +28,44 @@ export function ProfilePage() {
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  // Organizer access for this account, from the shared record. Admins and
+  // approved organizers see their status; attendees can request access.
+  const [accessRole, setAccessRole] = useState<AccessRole | null>(null);
+  const [requestingAccess, setRequestingAccess] = useState(false);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    let cancelled = false;
+    fetchAccess(currentUser.email).then((access) => {
+      if (!cancelled) setAccessRole(access ? access.role : null);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleRequestAccess = async () => {
+    if (!currentUser) return;
+    setRequestingAccess(true);
+    try {
+      await requestOrganizerAccess(currentUser.email, currentUser.name);
+      setAccessRole('pending');
+      toast({
+        type: 'success',
+        title: 'Organizer request sent',
+        description: 'An admin will review it. You will be able to post events once approved.',
+      });
+    } catch (err: unknown) {
+      toast({
+        type: 'error',
+        title: 'Could not send the request',
+        description: err instanceof Error ? err.message : 'Please try again.',
+      });
+    } finally {
+      setRequestingAccess(false);
+    }
+  };
 
   const toggleInterest = (category: EventCategory) => {
     setInterests((prev) =>
@@ -228,6 +271,54 @@ export function ProfilePage() {
           </button>
         </div>
       </form>
+
+      {/* Organizer access */}
+      <div className="bg-white p-6 sm:p-8 rounded-2xl border border-[#E5E1D8] shadow-xs space-y-4">
+        <h2 className="font-editorial text-base font-bold text-[#1E2320] pb-2 border-b border-[#EBE7DF]">
+          Organizer Access
+        </h2>
+        <p className="text-xs text-[#5F635D] leading-relaxed">
+          Only approved organizers can post events. Attendee accounts cannot
+          post, and organizer access cannot be chosen at sign-up — it is
+          granted by an admin after you request it.
+        </p>
+        {accessRole === 'admin' ? (
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <p className="text-xs text-[#1E3F35] font-medium">
+              You are an admin. You can post events and review organizer requests.
+            </p>
+            <Link
+              to="/admin"
+              className="px-4 py-2.5 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors"
+            >
+              Open Admin Page
+            </Link>
+          </div>
+        ) : accessRole === 'organizer' ? (
+          <p className="text-xs text-[#1E3F35] font-medium">
+            You are an approved organizer. You can post events from Organizer Hub.
+          </p>
+        ) : accessRole === 'pending' ? (
+          <p className="text-xs text-[#1E3F35] font-medium">
+            Your organizer request is pending. An admin will review it, and you
+            will be able to post events once it is approved.
+          </p>
+        ) : (
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <p className="text-xs text-[#5F635D]">
+              You are currently an attendee.
+            </p>
+            <button
+              type="button"
+              disabled={requestingAccess || !currentUser}
+              onClick={handleRequestAccess}
+              className="px-5 py-2.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors shadow-xs cursor-pointer"
+            >
+              {requestingAccess ? 'Sending…' : 'Request Organizer Access'}
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

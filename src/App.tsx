@@ -24,6 +24,8 @@ import { SignupPage } from './pages/SignupPage';
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 import { PrivacyPage } from './pages/PrivacyPage';
+import { AdminPage } from './pages/AdminPage';
+import { OrganizerGuard } from './components/OrganizerGuard';
 
 import { LandingPage } from './pages/LandingPage';
 import { authService } from './services/auth-service';
@@ -77,12 +79,17 @@ export default function App() {
               <Route path="/saved" element={<SavedEventsPage />} />
               <Route path="/profile" element={<ProfilePage />} />
 
-              {/* Organizer Hub */}
-              <Route path="/organizer/dashboard" element={<OrganizerDashboardPage />} />
-              <Route path="/organizer/events" element={<OrganizerEventsPage />} />
-              <Route path="/organizer/events/new" element={<CreateEventPage />} />
-              <Route path="/organizer/events/:eventId/edit" element={<EditEventPage />} />
-              <Route path="/organizer/events/:eventId/attendees" element={<AttendeesPage />} />
+              {/* Organizer Hub — guarded: only approved organizers and
+                  admins may open these pages. Attendees get a page that
+                  explains the rule and lets them request access. */}
+              <Route path="/organizer/dashboard" element={<OrganizerGuard><OrganizerDashboardPage /></OrganizerGuard>} />
+              <Route path="/organizer/events" element={<OrganizerGuard><OrganizerEventsPage /></OrganizerGuard>} />
+              <Route path="/organizer/events/new" element={<OrganizerGuard><CreateEventPage /></OrganizerGuard>} />
+              <Route path="/organizer/events/:eventId/edit" element={<OrganizerGuard><EditEventPage /></OrganizerGuard>} />
+              <Route path="/organizer/events/:eventId/attendees" element={<OrganizerGuard><AttendeesPage /></OrganizerGuard>} />
+
+              {/* Admin — organizer request approvals (AdminPage guards itself) */}
+              <Route path="/admin" element={<AdminPage />} />
 
               {/* Authentication */}
               <Route path="/login" element={<LoginPage />} />

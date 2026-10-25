@@ -4,7 +4,10 @@ import { UserProfile } from '../../types';
 import { Loader2 } from 'lucide-react';
 
 interface GoogleAuthButtonProps {
-  role?: 'attendee' | 'organizer';
+  // No role prop anymore: Google sign-in always starts as an attendee;
+  // admin status comes from the admin email list in the callback, and
+  // organizer status only from an admin approval. Nobody chooses a role
+  // at sign-in.
   buttonText?: string;
   // Kept for compatibility with LoginPage/SignupPage. With the server-side
   // OAuth flow these callbacks are not called, because clicking the button
@@ -24,7 +27,6 @@ interface GoogleAuthButtonProps {
 // environment variables only. Google then redirects back to
 // /api/auth/google/callback, which signs the user in.
 export function GoogleAuthButton({
-  role = 'attendee',
   buttonText = 'Continue with Google',
   onSuccess: _onSuccess,
   onError: _onError,
@@ -36,7 +38,7 @@ export function GoogleAuthButton({
     setLoading(true);
     // loginWithGoogle redirects the browser; it never resolves, because
     // the sign-in completes via the OAuth callback page.
-    void authService.loginWithGoogle(role);
+    void authService.loginWithGoogle();
   };
 
   return (

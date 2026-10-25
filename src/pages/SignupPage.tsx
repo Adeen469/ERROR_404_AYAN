@@ -12,7 +12,6 @@ export function SignupPage() {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [role, setRole] = useState<'attendee' | 'organizer'>('attendee');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -31,17 +30,15 @@ export function SignupPage() {
     setLoading(true);
 
     try {
-      const user = await authService.signup(name.trim(), email.trim(), role);
+      // Every new account starts as an attendee. Organizer access is
+      // requested from the profile page and granted by an admin.
+      const user = await authService.signup(name.trim(), email.trim());
       toast({
         type: 'success',
         title: 'Account Created',
         description: `Welcome to Locora, ${user.name}!`,
       });
-      if (role === 'organizer') {
-        navigate('/organizer/dashboard');
-      } else {
-        navigate('/dashboard');
-      }
+      navigate('/dashboard');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Registration failed');
     } finally {
@@ -130,35 +127,11 @@ export function SignupPage() {
           </div>
         </div>
 
-        <div>
-          <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
-            I am joining primarily as:
-          </label>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => setRole('attendee')}
-              className={`p-2.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer ${
-                role === 'attendee'
-                  ? 'border-[#1E3F35] bg-[#EAF1ED] text-[#1E3F35] font-semibold'
-                  : 'border-[#E2DFD8] bg-[#F4F1EA] text-[#5F635D] hover:bg-[#EBE7DF]'
-              }`}
-            >
-              Attendee
-            </button>
-            <button
-              type="button"
-              onClick={() => setRole('organizer')}
-              className={`p-2.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer ${
-                role === 'organizer'
-                  ? 'border-[#1E3F35] bg-[#EAF1ED] text-[#1E3F35] font-semibold'
-                  : 'border-[#E2DFD8] bg-[#F4F1EA] text-[#5F635D] hover:bg-[#EBE7DF]'
-              }`}
-            >
-              Organizer
-            </button>
-          </div>
-        </div>
+        <p className="text-[11px] text-[#5F635D] leading-relaxed">
+          Every new account starts as an attendee. If you run community
+          events, you can request organizer access from your profile after
+          signing up, and an admin will approve it.
+        </p>
 
         <button
           type="submit"
@@ -178,7 +151,6 @@ export function SignupPage() {
         </div>
 
         <GoogleAuthButton
-          role={role}
           buttonText="Continue with Google"
           disabled={loading}
           onSuccess={(user) => {
@@ -187,7 +159,9 @@ export function SignupPage() {
               title: `Account Ready`,
               description: `Welcome to Locora, ${user.name}!`,
             });
-            if (user.role === 'organizer') {
+            if (user.role === 'admin') {
+              navigate('/admin');
+            } else if (user.role === 'organizer') {
               navigate('/organizer/dashboard');
             } else {
               navigate('/dashboard');
