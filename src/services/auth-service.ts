@@ -24,6 +24,27 @@ function notify(user: UserProfile | null) {
   listeners.forEach((cb) => cb(user));
 }
 
+// Account emails for local sign-in / sign-up (Google sign-ins are
+// covered by the callback page instead, so this never runs for them).
+// Fire-and-forget with keepalive: the /api/notify endpoint caps sends
+// and ignores failures, and nothing here may ever block or fail auth.
+// Callers pass the email the user actually typed, never a fallback:
+// an empty typed email means "demo profile", which gets no mail.
+function sendAccountEmail(action: 'welcome' | 'login', user: UserProfile, typedEmail: string): void {
+  try {
+    const email = (typedEmail || '').trim();
+    if (!email) return;
+    fetch('/api/notify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, email, name: user.name || '' }),
+      keepalive: true,
+    }).catch(() => {});
+  } catch {
+    // Never break sign-in / sign-up.
+  }
+}
+
 export const authService = {
   subscribe(listener: AuthListener): () => void {
     listeners.add(listener);
@@ -91,6 +112,7 @@ export const authService = {
     localStorage.setItem(TOKEN_STORAGE_KEY, 'demo_jwt_token_locora_preview');
     localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
     notify(user);
+    sendAccountEmail('login', user, email);
     return user;
   },
 
@@ -132,6 +154,7 @@ export const authService = {
     localStorage.setItem(TOKEN_STORAGE_KEY, 'demo_jwt_token_locora_preview');
     localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(newUser));
     notify(newUser);
+    sendAccountEmail('welcome', newUser, email);
     return newUser;
   },
 

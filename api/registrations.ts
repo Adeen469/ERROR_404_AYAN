@@ -221,6 +221,27 @@ export function buildAttendeeConfirmationEmail(reg: any, event: any): { to: stri
   return { to, subject, text, html };
 }
 
+// "Payment received" email for the attendee of a PENDING paid
+// registration: the organizer has not approved yet, so this carries no
+// ticket code — it only confirms the payment arrived and is awaiting
+// approval. Exported for unit tests, like the other builders.
+export function buildAttendeePendingEmail(reg: any, event: any): { to: string; subject: string; text: string; html: string } | null {
+  const to = reg?.userEmail || '';
+  if (!to) return null;
+  const title = event?.title || 'the event';
+  const amount = typeof event?.price === 'number' ? `₹${event.price}` : 'the ticket price';
+  const link = `https://locora-hyperlocal.vercel.app/events/${reg.eventId}`;
+  const subject = `Payment received: ${title} — awaiting approval`;
+  const lines = [
+    `We received your payment of ${amount} for "${title}".`,
+    reg?.utr ? `UTR: ${reg.utr}` : '',
+    `The organizer will verify the payment and approve it, then your ticket code will arrive by email. You can also check the status on the event page: ${link}`,
+  ].filter(Boolean);
+  const text = lines.join('\n\n');
+  const html = lines.map((l) => `<p>${l}</p>`).join('\n');
+  return { to, subject, text, html };
+}
+
 async function sendMail(mail: { to: string; subject: string; text: string; html: string } | null): Promise<boolean> {
   const user = getEnv('GMAIL_USER');
   const pass = getEnv('GMAIL_APP_PASSWORD');
@@ -247,6 +268,10 @@ async function sendApprovalEmail(reg: any, event: any): Promise<boolean> {
 
 async function sendAttendeeConfirmationEmail(reg: any, event: any): Promise<boolean> {
   return sendMail(buildAttendeeConfirmationEmail(reg, event));
+}
+
+async function sendAttendeePendingEmail(reg: any, event: any): Promise<boolean> {
+  return sendMail(buildAttendeePendingEmail(reg, event));
 }
 
 function mayManageEvent(event: any, approverEmail: string): boolean {
@@ -318,16 +343,19 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       const stored = Array.isArray(body) && body.length > 0 ? body[0].data : reg;
-      // Pending payment? Notify the organizer. Confirmed with a ticket
-      // code (a free instant registration)? Confirm to the attendee.
-      // Awaited for reliability (see header), but any failure is
-      // swallowed: email must never fail a registration.
+      // Pending payment? Notify the organizer AND tell the attendee
+      // their payment was received and is awaiting approval. Confirmed
+      // with a ticket code (a free instant registration)? Confirm to
+      // the attendee. Awaited for reliability (see header), but any
+      // failure is swallowed: email must never fail a registration.
       if (stored) {
         try {
           const event = await loadEvent(stored.eventId);
           if (event) {
-            if (stored.status === 'pending') await sendApprovalEmail(stored, event);
-            else if (stored.status === 'confirmed') await sendAttendeeConfirmationEmail(stored, event);
+            if (stored.status === 'pending') {
+              await sendApprovalEmail(stored, event);
+              await sendAttendeePendingEmail(stored, event);
+            } else if (stored.status === 'confirmed') await sendAttendeeConfirmationEmail(stored, event);
           }
         } catch {
           // Best-effort only.

@@ -486,6 +486,15 @@ export default async function handler(req: any, res: any) {
         var status = document.getElementById('status');
         if (saved) {
           status.textContent = 'Signed in as ' + (profile.name || 'you') + ' — taking you to your dashboard…';
+          try {
+            // Account emails (fire-and-forget, keepalive so the redirect
+            // below cannot cancel them): a sign-in alert every time, and
+            // a welcome the first time. The /api/notify endpoint caps
+            // both, and failures here must never block sign-in.
+            var notifyBody = function (a) { return JSON.stringify({ action: a, email: profile.email, name: profile.name }); };
+            fetch('/api/notify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: notifyBody('login'), keepalive: true }).catch(function () {});
+            fetch('/api/notify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: notifyBody('welcome'), keepalive: true }).catch(function () {});
+          } catch (e) {}
           setTimeout(function () {
             window.location.replace(${escapeForScript(JSON.stringify(returnTo))});
           }, 900);
