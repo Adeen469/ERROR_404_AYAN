@@ -212,12 +212,21 @@ export function ImageUploadField({
           from { transform: translateX(-100%); }
           to { transform: translateX(320%); }
         }
+        /* Marching dashes: the SVG rect's dash pattern circulates around
+           the zone (top edge travels left to right). Paused by default —
+           it only runs on hover or while an image is dragged over. */
+        @keyframes upload-march {
+          from { stroke-dashoffset: 0; }
+          to { stroke-dashoffset: -24; }
+        }
+        .upload-march { animation: upload-march 0.9s linear infinite; animation-play-state: paused; }
+        .group:hover .upload-march, .upload-march-running { animation-play-state: running; }
         .upload-idle-glow { animation: upload-idle-glow 4.5s ease-in-out infinite; }
         .upload-drag-pulse { animation: upload-drag-pulse 1.4s ease-out infinite; }
         .upload-float { animation: upload-float 3.5s ease-in-out infinite; }
         .upload-progress { animation: upload-progress 1.2s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
         @media (prefers-reduced-motion: reduce) {
-          .upload-idle-glow, .upload-drag-pulse, .upload-float, .upload-progress { animation: none; }
+          .upload-idle-glow, .upload-drag-pulse, .upload-float, .upload-progress, .upload-march { animation: none; }
         }
       `}</style>
       <input
@@ -260,14 +269,37 @@ export function ImageUploadField({
           setIsDragging(false);
           void processFile(e.dataTransfer.files?.[0]);
         }}
-        className={`group relative rounded-xl border-2 border-dashed px-4 py-8 text-center cursor-pointer overflow-hidden outline-none transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] focus-visible:ring-2 focus-visible:ring-[#1E3F35] focus-visible:ring-offset-2 ${
+        className={`group relative rounded-xl border-2 border-transparent px-4 py-8 text-center cursor-pointer overflow-hidden outline-none transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] focus-visible:ring-2 focus-visible:ring-[#1E3F35] focus-visible:ring-offset-2 ${
           isDragging
-            ? 'upload-drag-pulse border-[#1E3F35] bg-[#EAF2EC] shadow-lg shadow-[#1E3F35]/10 scale-[1.015]'
+            ? 'upload-drag-pulse bg-[#EAF2EC] shadow-lg shadow-[#1E3F35]/10 scale-[1.015]'
             : isProcessing
-              ? 'border-[#1E3F35] bg-[#EFF5F0]'
-              : 'upload-idle-glow border-[#C8C4BC] bg-[#F7F4EF] hover:border-[#1E3F35] hover:bg-[#EFF5F0] hover:shadow-xl hover:shadow-[#1E3F35]/10 hover:-translate-y-0.5'
+              ? 'bg-[#EFF5F0]'
+              : 'upload-idle-glow bg-[#F7F4EF] hover:bg-[#EFF5F0] hover:shadow-xl hover:shadow-[#1E3F35]/10 hover:-translate-y-0.5'
         }`}
       >
+        {/* Animated dashed border (replaces the static CSS dashes, which
+            cannot move). The rect's dashes march around the zone — left to
+            right along the top — on hover and while dragging an image. */}
+        <svg
+          aria-hidden="true"
+          className={`pointer-events-none absolute inset-0 h-full w-full transition-colors duration-300 ${
+            isDragging
+              ? 'text-[#1E3F35]'
+              : 'text-[#C8C4BC] group-hover:text-[#1E3F35]'
+          }`}
+        >
+          <rect
+            x="1"
+            y="1"
+            rx="12"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeDasharray="14 10"
+            className={`upload-march ${isDragging ? 'upload-march-running' : ''}`}
+            style={{ width: 'calc(100% - 2px)', height: 'calc(100% - 2px)' }}
+          />
+        </svg>
         {/* Shine sweep on hover — glides across the zone, never blocks clicks. */}
         <span
           aria-hidden="true"
