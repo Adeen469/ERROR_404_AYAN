@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Search, SlidersHorizontal, X, RotateCcw, MapPin } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { Search, SlidersHorizontal, X, RotateCcw, MapPin, ChevronDown } from 'lucide-react';
 import { EventFilterOptions } from '../../types';
 import { DEMO_CATEGORIES } from '../../mocks/demo-data';
 import { LocationPicker } from '../LocationPicker';
@@ -16,6 +16,35 @@ interface EventFiltersProps {
 
 export function EventFilters({ filters, onChange, totalResults, onSavedLocation, savedLocationLabel }: EventFiltersProps) {
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
+
+  // Location dropdown beside the search box: the full Country -> State ->
+  // City card lives inside this panel instead of sitting as a permanent
+  // block below the toolbar. It stays open while picking (country, then
+  // state, then city) and closes on outside click, Escape, or Done.
+  const [locationOpen, setLocationOpen] = useState(false);
+  const locationWrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!locationOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (locationWrapRef.current && !locationWrapRef.current.contains(e.target as Node)) {
+        setLocationOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setLocationOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [locationOpen]);
+
+  const activeLocationLabel = [filters.city, filters.state, filters.country]
+    .filter(Boolean)
+    .join(', ');
 
   const activeCategory = filters.category || 'All';
   const hasActiveFilters =
@@ -50,6 +79,7 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
 
   return (
     <div className="space-y-4 mb-8">
+      <div ref={locationWrapRef}>
       {/* Top Search & Mobile Filter Toggle */}
       <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center">
         {/* Search Bar */}
@@ -73,11 +103,29 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
           )}
         </div>
 
+        {/* Location dropdown trigger, beside the search box */}
+        <button
+          type="button"
+          onClick={() => setLocationOpen((open) => !open)}
+          aria-expanded={locationOpen}
+          className={`inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border text-xs font-medium shadow-2xs transition-colors cursor-pointer shrink-0 ${
+            activeLocationLabel
+              ? 'border-[#1E3F35]/20 bg-[#EAF1ED] text-[#1E3F35]'
+              : 'border-[#E2DFD8] bg-white text-[#1E2320] hover:bg-[#F4F1EA]'
+          }`}
+        >
+          <MapPin className="w-3.5 h-3.5 shrink-0" />
+          <span className="max-w-[160px] sm:max-w-[220px] truncate">
+            {activeLocationLabel || 'Location'}
+          </span>
+          <ChevronDown className={`w-3.5 h-3.5 shrink-0 transition-transform ${locationOpen ? 'rotate-180' : ''}`} />
+        </button>
+
         {/* Mobile Filters Trigger */}
         <div className="flex sm:hidden items-center justify-between gap-2">
           <button
             type="button"
-            onClick={() => setMobileDrawerOpen(true)}
+            onClick={() => { setMobileDrawerOpen(true); setLocationOpen(false); }}
             className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-[#E2DFD8] rounded-xl text-xs font-medium text-[#1E2320] shadow-2xs"
           >
             <SlidersHorizontal className="w-4 h-4" />
@@ -148,22 +196,33 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
         </div>
       </div>
 
-      {/* Worldwide Location: Country -> State -> City, plus nearby */}
-      <div className="bg-white border border-[#E2DFD8] rounded-xl p-3 sm:p-4 space-y-2 shadow-2xs">
+      {/* Location dropdown panel: the same Country -> State -> City card,
+          shown only while the dropdown beside the search box is open. */}
+      {locationOpen && (
+      <div className="bg-white border border-[#E2DFD8] rounded-xl p-3 sm:p-4 space-y-2 shadow-2xs mt-3">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <p className="text-xs font-semibold text-[#1E2320] flex items-center gap-1.5">
             <MapPin className="w-3.5 h-3.5 text-[#1E3F35]" />
             Location
           </p>
-          {onSavedLocation && savedLocationLabel && (
+          <div className="flex items-center gap-3 flex-wrap">
+            {onSavedLocation && savedLocationLabel && (
+              <button
+                type="button"
+                onClick={onSavedLocation}
+                className="text-[11px] font-semibold text-[#1E3F35] hover:underline"
+              >
+                Near me: {savedLocationLabel}
+              </button>
+            )}
             <button
               type="button"
-              onClick={onSavedLocation}
+              onClick={() => setLocationOpen(false)}
               className="text-[11px] font-semibold text-[#1E3F35] hover:underline"
             >
-              Near me: {savedLocationLabel}
+              Done
             </button>
-          )}
+          </div>
         </div>
         <LocationPicker
           mode="filter"
@@ -173,6 +232,8 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
             onChange({ ...filters, country: loc.country, state: loc.state, city: loc.city })
           }
         />
+      </div>
+      )}
       </div>
 
       {/* Interactive Category Segmented Strip */}
