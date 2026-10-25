@@ -10,6 +10,7 @@ import {
   ExternalLink,
   ArrowLeft,
   CheckCircle2,
+  XCircle,
   AlertCircle,
   Shield,
   Copy,
@@ -71,6 +72,11 @@ export function EventDetailsPage() {
   const [shareModalOpen, setShareModalOpen] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
+  // Manual-approval payment dialog state (paid events only).
+  const [paymentOpen, setPaymentOpen] = useState(false);
+  const [utr, setUtr] = useState('');
+  const [utrError, setUtrError] = useState('');
+  const [copiedUpi, setCopiedUpi] = useState(false);
 
   useEffect(() => {
     async function loadEventData() {
@@ -123,6 +129,9 @@ export function EventDetailsPage() {
 
   const isFull = event.registeredCount >= event.capacity;
   const isRegistered = Boolean(registration && registration.status === 'confirmed');
+  const isPaymentPending = Boolean(registration && registration.status === 'pending');
+  const isPaymentRejected = Boolean(registration && registration.status === 'rejected');
+  const isPaidEvent = event.price > 0;
   const spotsLeft = Math.max(0, event.capacity - event.registeredCount);
 
   const handleToggleBookmark = async () => {
@@ -154,6 +163,36 @@ export function EventDetailsPage() {
       toast({
         type: 'error',
         title: 'Registration failed',
+        description: err instanceof Error ? err.message : 'Please try again.',
+      });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handlePaymentSubmit = async () => {
+    const cleanUtr = utr.replace(/\s+/g, '');
+    if (!/^\d{12}$/.test(cleanUtr)) {
+      setUtrError('Enter the 12-digit UTR from your UPI payment.');
+      return;
+    }
+    setUtrError('');
+    setActionLoading(true);
+    try {
+      const reg = await registrationsService.registerWithPayment(event, cleanUtr);
+      setRegistration(reg);
+      setEvent((prev) => (prev ? { ...prev, registeredCount: prev.registeredCount + 1 } : null));
+      setPaymentOpen(false);
+      setUtr('');
+      toast({
+        type: 'success',
+        title: 'Payment submitted',
+        description: 'Your payment is awaiting organizer approval. Your pass will appear here once it is approved.',
+      });
+    } catch (err: unknown) {
+      toast({
+        type: 'error',
+        title: 'Payment submission failed',
         description: err instanceof Error ? err.message : 'Please try again.',
       });
     } finally {
@@ -432,19 +471,74 @@ export function EventDetailsPage() {
                 </div>
 
               </div>
+            ) : isPaymentPending ? (
+              <div className="space-y-3 pt-2">
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2.5">
+                  <Clock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                  <div className="text-xs text-amber-800">
+                    <p className="font-semibold">Payment pending approval</p>
+                    <p className="text-[11px] mt-0.5">
+                      UTR {registration?.utr} submitted. The organizer will verify your payment and approve your pass — it will appear here once approved.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  <Link
+                    to="/my-registrations"
+                    className="flex-1 text-center py-2.5 px-3 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors"
+                  >
+                    View Registration
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmCancelOpen(true)}
+                    className="py-2.5 px-3 text-xs font-medium text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-lg transition-colors"
+                  >
+                    Withdraw Request
+                  </button>
+                </div>
+              </div>
+            ) : isPaymentRejected ? (
+              <div className="space-y-3 pt-2">
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg flex items-start gap-2.5">
+                  <XCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <div className="text-xs text-rose-700">
+                    <p className="font-semibold">Payment not approved</p>
+                    <p className="text-[11px] mt-0.5">
+                      The organizer did not approve this payment. You can pay again and resubmit below.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    disabled={isFull}
+                    onClick={() => setPaymentOpen(true)}
+                    className={`w-full py-3 text-xs font-semibold text-white rounded-lg transition-colors shadow-xs ${
+                      isFull
+                        ? 'bg-slate-300 cursor-not-allowed'
+                        : 'bg-[#1E3F35] hover:bg-[#163028] cursor-pointer'
+                    }`}
+                  >
+                    {isFull ? 'Event Sold Out' : 'Pay & Register Again'}
+                  </button>
+                </div>
+              </div>
             ) : (
               <div className="pt-2">
                 <button
                   type="button"
                   disabled={isFull}
-                  onClick={() => setConfirmRegisterOpen(true)}
+                  onClick={() => (isPaidEvent ? setPaymentOpen(true) : setConfirmRegisterOpen(true))}
                   className={`w-full py-3 text-xs font-semibold text-white rounded-lg transition-colors shadow-xs ${
                     isFull
                       ? 'bg-slate-300 cursor-not-allowed'
                       : 'bg-[#1E3F35] hover:bg-[#163028] cursor-pointer'
                   }`}
                 >
-                  {isFull ? 'Event Sold Out' : 'Register for Event'}
+                  {isFull ? 'Event Sold Out' : isPaidEvent ? `Register · ${formatPrice(event.price)}` : 'Register for Event'}
                 </button>
               </div>
             )}
@@ -467,7 +561,9 @@ export function EventDetailsPage() {
 
             <div className="pt-2 text-center">
               <p className="text-[11px] text-[#8C887E]">
-                Instant confirmation · No booking fees · Digital entry
+                {isPaidEvent
+                  ? 'Payment verified by the organizer · Digital entry after approval'
+                  : 'Instant confirmation · No booking fees · Digital entry'}
               </p>
             </div>
           </div>
@@ -508,10 +604,90 @@ export function EventDetailsPage() {
         onConfirm={handleCancelConfirm}
         isLoading={actionLoading}
         isDestructive
-        title="Cancel Registration"
-        message="Are you sure you want to cancel your RSVP? This will free your spot for other neighborhood attendees."
-        confirmLabel="Yes, Cancel RSVP"
+        title={isPaymentPending ? 'Withdraw Payment Request' : 'Cancel Registration'}
+        message={
+          isPaymentPending
+            ? 'Withdraw your pending payment request? Your held spot will be released for other attendees.'
+            : 'Are you sure you want to cancel your RSVP? This will free your spot for other neighborhood attendees.'
+        }
+        confirmLabel={isPaymentPending ? 'Yes, Withdraw Request' : 'Yes, Cancel RSVP'}
       />
+
+      {/* Manual-approval payment dialog (paid events only) */}
+      <Modal
+        isOpen={paymentOpen}
+        onClose={() => {
+          setPaymentOpen(false);
+          setUtrError('');
+        }}
+        title="Pay & Register"
+        description={`This is a paid event. Pay ${formatPrice(event.price)} to the organizer via UPI, then enter your 12-digit UTR below. Your pass is issued once the organizer approves the payment.`}
+      >
+        <div className="space-y-4">
+          <div className="p-4 bg-[#F4F1EA] border border-[#E2DFD8] rounded-lg space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-[#5F635D]">Amount to pay</span>
+              <span className="font-editorial text-lg font-bold text-[#1E2320]">{formatPrice(event.price)}</span>
+            </div>
+            {event.upiId ? (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-[#5F635D]">Pay to UPI ID</span>
+                <span className="flex items-center gap-1.5">
+                  <span className="font-mono text-xs font-semibold text-[#1E2320] break-all">{event.upiId}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(event.upiId || '');
+                      setCopiedUpi(true);
+                      setTimeout(() => setCopiedUpi(false), 2000);
+                    }}
+                    className="px-2 py-1 bg-[#1E3F35] text-white rounded-md text-[11px] font-medium hover:bg-[#163028] flex items-center gap-1 shrink-0"
+                  >
+                    {copiedUpi ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                    <span>{copiedUpi ? 'Copied' : 'Copy'}</span>
+                  </button>
+                </span>
+              </div>
+            ) : (
+              <p className="text-xs text-[#5F635D]">
+                The organizer hasn't shared a UPI ID — pay them directly via UPI and enter your UTR below.
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+              UTR (12 digits) *
+            </label>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={utr}
+              onChange={(e) => {
+                setUtr(e.target.value.replace(/[^0-9\s]/g, ''));
+                setUtrError('');
+              }}
+              placeholder="e.g. 123456789012"
+              className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] ${
+                utrError ? 'border-rose-500' : 'border-[#E2DFD8]'
+              }`}
+            />
+            {utrError && <p className="text-[11px] text-rose-600 mt-1">{utrError}</p>}
+            <p className="text-[11px] text-[#8C887E] mt-1">
+              Find it in your UPI app under the payment's transaction details.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            disabled={actionLoading}
+            onClick={handlePaymentSubmit}
+            className="w-full py-3 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors disabled:opacity-60"
+          >
+            {actionLoading ? 'Submitting…' : 'Submit Payment for Approval'}
+          </button>
+        </div>
+      </Modal>
 
       {/* Share Modal */}
       <Modal

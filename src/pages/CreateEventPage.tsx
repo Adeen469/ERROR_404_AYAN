@@ -65,6 +65,10 @@ export function CreateEventPage() {
   // event was silently fixed to 'Metro City' with no way to change it.
   const [location, setLocation] = useState({ country: '', state: '', city: '' });
   const [price, setPrice] = useState('0');
+  // Organizer's UPI ID for manual-approval payments on paid events.
+  // Shown to attendees at registration; blank means "pay the organizer
+  // directly" with no specific ID.
+  const [upiId, setUpiId] = useState('');
   const [capacity, setCapacity] = useState('50');
   const [tagsInput, setTagsInput] = useState('Community, Gathering');
 
@@ -145,6 +149,7 @@ export function CreateEventPage() {
         state: location.state.trim() || undefined,
         country: location.country.trim() || undefined,
         price: Number(price),
+        upiId: upiId.trim() || undefined,
         capacity: Number(capacity),
         tags,
         organizer: {
@@ -480,6 +485,22 @@ export function CreateEventPage() {
                 }`}
               />
               <span className="text-[11px] text-[#8C887E]">Set 0 for free community RSVP</span>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+                Organizer UPI ID (for paid events)
+              </label>
+              <input
+                type="text"
+                value={upiId}
+                onChange={(e) => setUpiId(e.target.value)}
+                placeholder="e.g. yourname@okhdfcbank"
+                className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
+              />
+              <span className="text-[11px] text-[#8C887E]">
+                Shown to attendees of paid events so they can pay you directly. Leave blank if you don't take UPI.
+              </span>
             </div>
 
             <div>

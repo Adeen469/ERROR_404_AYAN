@@ -44,6 +44,7 @@ export function EditEventPage() {
   const [address, setAddress] = useState('');
 
   const [price, setPrice] = useState('0');
+  const [upiId, setUpiId] = useState('');
   const [capacity, setCapacity] = useState('50');
   const [tagsInput, setTagsInput] = useState('');
 
@@ -73,6 +74,7 @@ export function EditEventPage() {
           setVenueName(data.venueName);
           setAddress(data.address);
           setPrice(String(data.price));
+          setUpiId(data.upiId || '');
           setCapacity(String(data.capacity));
           setTagsInput(data.tags.join(', '));
         }
@@ -127,6 +129,7 @@ export function EditEventPage() {
         // Neighborhood retired: state/city are the location now.
         neighborhood: '',
         price: Number(price),
+        upiId: upiId.trim() || undefined,
         capacity: Number(capacity),
         tags,
       }, { ...ownershipOpts, allowAdmin: false });
@@ -324,6 +327,22 @@ export function EditEventPage() {
                 onChange={(e) => setPrice(e.target.value)}
                 className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
               />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+                Organizer UPI ID (for paid events)
+              </label>
+              <input
+                type="text"
+                value={upiId}
+                onChange={(e) => setUpiId(e.target.value)}
+                placeholder="e.g. yourname@okhdfcbank"
+                className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
+              />
+              <span className="text-[11px] text-[#8C887E]">
+                Shown to attendees of paid events so they can pay you directly. Leave blank if you don't take UPI.
+              </span>
             </div>
 
             <div>
