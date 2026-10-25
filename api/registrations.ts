@@ -71,8 +71,8 @@ function isAdmin(email: string): boolean {
 function supabaseHeaders(): Record<string, string> {
   const key = getEnv("SUPABASE_SERVICE_ROLE_KEY");
   return {
-    apikey: <redacted>
-Authorization: <redacted>
+    apikey: key,
+    Authorization: `Bearer ${key}`,
     "Content-Type": "application/json",
     Prefer: "return=representation",
   };
