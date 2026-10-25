@@ -16,7 +16,6 @@ export function DiscoverPage() {
   const [filters, setFilters] = useState<EventFilterOptions>({
     query: searchParams.get('q') || '',
     category: searchParams.get('category') || 'All',
-    neighborhood: searchParams.get('neighborhood') || 'All',
     country: searchParams.get('country') || '',
     state: searchParams.get('state') || '',
     city: searchParams.get('city') || '',
@@ -56,7 +55,6 @@ export function DiscoverPage() {
       const params = new URLSearchParams();
       if (newFilters.query) params.set('q', newFilters.query);
       if (newFilters.category && newFilters.category !== 'All') params.set('category', newFilters.category);
-      if (newFilters.neighborhood && newFilters.neighborhood !== 'All') params.set('neighborhood', newFilters.neighborhood);
       if (newFilters.country) params.set('country', newFilters.country);
       if (newFilters.state) params.set('state', newFilters.state);
       if (newFilters.city) params.set('city', newFilters.city);
@@ -156,7 +154,6 @@ export function DiscoverPage() {
             updateFilters({
               query: '',
               category: 'All',
-              neighborhood: 'All',
               country: '',
               state: '',
               city: '',

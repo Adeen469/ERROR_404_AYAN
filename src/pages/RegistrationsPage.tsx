@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { Ticket, Calendar, MapPin, Clock, QrCode, XCircle, ArrowLeft, CheckCircle2 } from 'lucide-react';
 import { AttendeeRegistration } from '../types';
 import { registrationsService } from '../services/registrations-service';
-import { formatEventDate, formatEventTimeRange } from '../utils/formatters';
+import { formatEventDate, formatEventTimeRange, formatEventLocation } from '../utils/formatters';
 import { useToast } from '../components/ui/Toast';
 import { Modal, ConfirmDialog } from '../components/ui/Modal';
 import { EmptyState, ListSkeleton } from '../components/ui/LoadingSkeleton';
@@ -117,7 +117,7 @@ export function RegistrationsPage() {
           title={filterTab === 'upcoming' ? 'No upcoming registrations' : 'No past or cancelled registrations'}
           description={
             filterTab === 'upcoming'
-              ? 'You have not registered for any upcoming events. Explore events in your neighborhood!'
+              ? 'You have not registered for any upcoming events. Explore events near you!'
               : 'No records to show here.'
           }
           actionLabel={filterTab === 'upcoming' ? 'Browse Events' : undefined}
@@ -143,8 +143,12 @@ export function RegistrationsPage() {
                 <div className="space-y-1">
                   <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-[#1E3F35]">
                     <span>{reg.event.category}</span>
-                    <span aria-hidden="true" className="text-[#C8C4BC]">·</span>
-                    <span className="text-[#5F635D] font-normal normal-case">{reg.event.neighborhood}</span>
+                    {formatEventLocation(reg.event) && (
+                      <>
+                        <span aria-hidden="true" className="text-[#C8C4BC]">·</span>
+                        <span className="text-[#5F635D] font-normal normal-case">{formatEventLocation(reg.event)}</span>
+                      </>
+                    )}
                   </div>
 
                   <h3 className="font-editorial text-lg font-bold text-[#1E2320] leading-snug">

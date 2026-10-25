@@ -20,7 +20,7 @@ import { EventItem, AttendeeRegistration } from '../types';
 import { eventsService } from '../services/events-service';
 import { registrationsService } from '../services/registrations-service';
 import { savedEventsService } from '../services/saved-events-service';
-import { formatEventDate, formatEventTimeRange, formatPrice, getMapsSearchUrl } from '../utils/formatters';
+import { formatEventDate, formatEventTimeRange, formatPrice, getMapsSearchUrl, formatEventLocation, getEventNeighborhood } from '../utils/formatters';
 import { useToast } from '../components/ui/Toast';
 import { ConfirmDialog, Modal } from '../components/ui/Modal';
 import { EventDetailsSkeleton } from '../components/ui/LoadingSkeleton';
@@ -274,8 +274,12 @@ export function EventDetailsPage() {
         <div className="absolute bottom-4 left-4 right-4 text-white">
           <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-[#A3D9C9] mb-1">
             <span>{event.category}</span>
-            <span aria-hidden="true">·</span>
-            <span>{event.neighborhood}</span>
+            {formatEventLocation(event) && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>{formatEventLocation(event)}</span>
+              </>
+            )}
           </div>
           <h1 className="font-editorial text-2xl sm:text-4xl font-bold tracking-tight text-white leading-tight">
             {event.title}
@@ -574,7 +578,9 @@ export function EventDetailsPage() {
       {relatedEvents.length > 0 && (
         <section className="pt-12 border-t border-[#E5E1D8] space-y-6">
           <h2 className="font-editorial text-2xl font-bold tracking-tight text-[#1E2320]">
-            More Events in {event.neighborhood} & {event.category}
+            {getEventNeighborhood(event)
+              ? `More Events in ${getEventNeighborhood(event)} & ${event.category}`
+              : `More Events in ${event.category}`}
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {relatedEvents.map((rel) => (
@@ -608,7 +614,7 @@ export function EventDetailsPage() {
         message={
           isPaymentPending
             ? 'Withdraw your pending payment request? Your held spot will be released for other attendees.'
-            : 'Are you sure you want to cancel your RSVP? This will free your spot for other neighborhood attendees.'
+            : 'Are you sure you want to cancel your RSVP? This will free your spot for other attendees.'
         }
         confirmLabel={isPaymentPending ? 'Yes, Withdraw Request' : 'Yes, Cancel RSVP'}
       />

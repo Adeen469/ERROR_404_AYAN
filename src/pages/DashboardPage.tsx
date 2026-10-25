@@ -5,7 +5,7 @@ import { AttendeeRegistration, EventItem, UserProfile } from '../types';
 import { authService } from '../services/auth-service';
 import { registrationsService } from '../services/registrations-service';
 import { savedEventsService } from '../services/saved-events-service';
-import { formatEventDate, formatEventTimeRange } from '../utils/formatters';
+import { formatEventDate, formatEventTimeRange, formatEventLocation } from '../utils/formatters';
 import { EventCard } from '../components/events/EventCard';
 import { EventListSkeleton } from '../components/ui/LoadingSkeleton';
 
@@ -81,9 +81,13 @@ export function DashboardPage() {
               Welcome back, {user.name}
             </h1>
             <p className="text-xs text-[#5F635D] mt-1 flex items-center gap-1.5">
-              <MapPin className="w-3.5 h-3.5 text-[#8C887E]" />
-              <span>{user.neighborhood}</span>
-              <span aria-hidden="true" className="text-[#C8C4BC]">·</span>
+              {formatEventLocation(user) && (
+                <>
+                  <MapPin className="w-3.5 h-3.5 text-[#8C887E]" />
+                  <span>{formatEventLocation(user)}</span>
+                  <span aria-hidden="true" className="text-[#C8C4BC]">·</span>
+                </>
+              )}
               <span>{user.interests.slice(0, 2).join(', ')}</span>
             </p>
           </div>

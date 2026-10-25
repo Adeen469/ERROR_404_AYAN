@@ -3,9 +3,9 @@ import { Link, useNavigate } from 'react-router-dom';
 import { Search, MapPin, Sparkles, ArrowRight, Calendar, Users, ShieldCheck, HeartHandshake, Navigation, Loader2 } from 'lucide-react';
 import { EventItem } from '../types';
 import { eventsService } from '../services/events-service';
-import { DEMO_CATEGORIES, DEMO_NEIGHBORHOODS } from '../mocks/demo-data';
+import { DEMO_CATEGORIES } from '../mocks/demo-data';
 import { EventCard } from '../components/events/EventCard';
-import { formatEventDate } from '../utils/formatters';
+import { formatEventDate, formatEventLocation } from '../utils/formatters';
 import { EventListSkeleton } from '../components/ui/LoadingSkeleton';
 import { useToast } from '../components/ui/Toast';
 
@@ -18,7 +18,7 @@ import heroGatheringImg from '../assets/images/hero_neighborhood_gathering_17928
 export function HomePage() {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const [selectedNeighborhood, setSelectedNeighborhood] = useState('All Neighborhoods');
+  const [selectedCity, setSelectedCity] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [featuredEvents, setFeaturedEvents] = useState<EventItem[]>([]);
   const [upcomingEvents, setUpcomingEvents] = useState<EventItem[]>([]);
@@ -63,11 +63,11 @@ export function HomePage() {
       async (pos) => {
         try {
           const loc = await eventsService.detectLocationFromCoords(pos.coords.latitude, pos.coords.longitude);
-          setSelectedNeighborhood(loc.neighborhood || loc.city);
+          setSelectedCity(loc.city);
           toast({
             type: 'success',
             title: `Location Detected: ${loc.city}`,
-            description: `Nearby neighborhood: ${loc.neighborhood}`,
+            description: `Showing events near ${loc.city}`,
           });
         } catch {
           toast({ type: 'error', title: 'Could not resolve address from coordinates' });
@@ -86,7 +86,7 @@ export function HomePage() {
     e.preventDefault();
     const params = new URLSearchParams();
     if (searchQuery.trim()) params.set('q', searchQuery.trim());
-    if (selectedNeighborhood !== 'All Neighborhoods') params.set('neighborhood', selectedNeighborhood);
+    if (selectedCity.trim()) params.set('city', selectedCity.trim());
     navigate(`/discover?${params.toString()}`);
   };
 
@@ -129,23 +129,16 @@ export function HomePage() {
                   />
                 </div>
 
-                {/* Neighborhood Dropdown & Detect Location Button */}
+                {/* City Input & Detect Location Button */}
                 <div className="flex items-center gap-1.5 px-3 py-2 bg-[#FAF8F5] rounded-lg border border-[#E2DFD8] shrink-0">
                   <MapPin className="w-3.5 h-3.5 text-[#5F635D] shrink-0" />
-                  <select
-                    value={selectedNeighborhood}
-                    onChange={(e) => setSelectedNeighborhood(e.target.value)}
-                    className="text-xs font-medium text-[#1E2320] bg-transparent border-0 cursor-pointer focus:outline-hidden max-w-[140px] truncate"
-                  >
-                    {DEMO_NEIGHBORHOODS.map((n) => (
-                      <option key={n} value={n}>
-                        {n}
-                      </option>
-                    ))}
-                    {selectedNeighborhood !== 'All Neighborhoods' && !DEMO_NEIGHBORHOODS.includes(selectedNeighborhood) && (
-                      <option value={selectedNeighborhood}>{selectedNeighborhood}</option>
-                    )}
-                  </select>
+                  <input
+                    type="text"
+                    value={selectedCity}
+                    onChange={(e) => setSelectedCity(e.target.value)}
+                    placeholder="City"
+                    className="w-[110px] text-xs font-medium text-[#1E2320] bg-transparent border-0 placeholder:text-[#8C887E] focus:outline-hidden"
+                  />
                   <button
                     type="button"
                     onClick={handleDetectLocation}
@@ -203,7 +196,9 @@ export function HomePage() {
                       </p>
                     </Link>
                     <p className="text-xs text-slate-300 mt-1">
-                      {spotlightEvent.neighborhood} ·{' '}
+                      {formatEventLocation(spotlightEvent) && (
+                        <>{formatEventLocation(spotlightEvent)} ·{' '}</>
+                      )}
                       {formatEventDate(spotlightEvent.startDate)} ·{' '}
                       {spotlightEvent.registeredCount} Registered
                     </p>
@@ -255,10 +250,10 @@ export function HomePage() {
               <span>SmartMatch Personalized Discovery</span>
             </div>
             <h2 className="font-editorial text-3xl sm:text-4xl font-bold tracking-tight text-balance">
-              Find activities tailored to your exact neighborhood and interests.
+              Find activities tailored to your exact city and interests.
             </h2>
             <p className="text-sm sm:text-base text-[#D0E2D9] leading-relaxed">
-              Never miss a workshop or meetup. Set your preferred neighborhoods and topic interests, and receive transparent recommendations explaining exactly why each event was selected.
+              Never miss a workshop or meetup. Set your preferred city and topic interests, and receive transparent recommendations explaining exactly why each event was selected.
             </p>
             <div className="pt-2">
               <Link

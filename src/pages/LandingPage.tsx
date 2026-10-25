@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { eventsService } from '../services/events-service';
 import { EventItem } from '../types';
-import { formatEventDate, formatEventTimeRange, formatPrice } from '../utils/formatters';
+import { formatEventDate, formatEventTimeRange, formatPrice, getEventNeighborhood } from '../utils/formatters';
 import {
 
   ArrowRight,
@@ -40,8 +40,10 @@ export function LandingPage() {
       .then((res) => {
         if (cancelled) return;
         const list = res.data;
+        // "Neighborhoods" here are derived: a city counts only when the
+        // event also has a state selected.
         const neighborhoods = new Set(
-          list.map((e) => e.neighborhood).filter(Boolean),
+          list.map((e) => getEventNeighborhood(e)).filter(Boolean),
         ).size;
         const hosts = new Set(
           list.map((e) => e.organizer?.id || e.organizer?.name).filter(Boolean),
@@ -77,11 +79,11 @@ export function LandingPage() {
     },
     {
       q: 'Do I need an account to browse neighborhood events?',
-      a: 'No! You can freely explore the Discover feed, filter by neighborhood or category, view event locations and schedules without signing in. You only need a free account when you want to RSVP, save events to your personal wishlist, or receive personalized SmartMatch recommendations.'
+      a: 'No! You can freely explore the Discover feed, filter by city or category, view event locations and schedules without signing in. You only need a free account when you want to RSVP, save events to your personal wishlist, or receive personalized SmartMatch recommendations.'
     },
     {
       q: 'How does Locora protect my privacy compared to social media platforms?',
-      a: 'Locora has zero third-party advertising trackers and never sells your data to brokers. Your profile is strictly used to match you with gatherings in your chosen neighborhoods, and your calendar exports sync directly to your personal device.'
+      a: 'Locora has zero third-party advertising trackers and never sells your data to brokers. Your profile is strictly used to match you with gatherings in your chosen city, and your calendar exports sync directly to your personal device.'
     },
     {
       q: 'How can I publish my own neighborhood event or workshop?',
@@ -98,22 +100,19 @@ export function LandingPage() {
       quote:
         'We filled all 45 seats for our Community Fermentation & Sourdough Workshop in under 4 hours without spending a single dollar on social media ads. Locora connected us straight to true neighbors.',
       author: 'Elena Rostova',
-      role: 'Artisan Baker & Workshop Lead',
-      neighborhood: 'Downtown Arts District'
+      role: 'Artisan Baker & Workshop Lead'
     },
     {
       quote:
         'I relocated to the city three months ago knowing nobody. Through Locora’s courtyard acoustic sessions and Saturday maker clinics, I found a real circle of close friends.',
       author: 'Marcus Vance',
-      role: 'Civic Organizer & Attendee',
-      neighborhood: 'Historic Old Town'
+      role: 'Civic Organizer & Attendee'
     },
     {
       quote:
         'Managing volunteer registrations for our urban park restoration used to mean dozens of messy spreadsheets. Locora streamlined RSVPs and attendee notifications in five minutes.',
       author: 'Sarah Chen',
-      role: 'Community Garden Director',
-      neighborhood: 'Greenwood Heights'
+      role: 'Community Garden Director'
     }
   ];
 
@@ -207,8 +206,12 @@ export function LandingPage() {
                           {nextEvent.title}
                         </h4>
                         <div className="flex items-center gap-2 text-xs text-[#5F635D] mt-1">
-                          <span>{nextEvent.neighborhood}</span>
-                          <span aria-hidden="true">·</span>
+                          {getEventNeighborhood(nextEvent) && (
+                            <>
+                              <span>{getEventNeighborhood(nextEvent)}</span>
+                              <span aria-hidden="true">·</span>
+                            </>
+                          )}
                           <span className="tabular-nums">
                             {formatEventTimeRange(nextEvent.startDate, nextEvent.endDate)}
                           </span>
@@ -401,7 +404,7 @@ export function LandingPage() {
                 Personalized discovery without tracking cookies.
               </h3>
               <p className="text-sm text-[#D0E2D9] leading-relaxed">
-                Tune your interest profile once. Locora scores local happenings by category match and neighborhood closeness with 100% transparency.
+                Tune your interest profile once. Locora scores local happenings by category match and closeness to your city with 100% transparency.
               </p>
             </div>
             <div className="mt-6">
@@ -488,8 +491,6 @@ export function LandingPage() {
                 <p className="text-sm font-bold text-[#1E2320]">{t.author}</p>
                 <div className="flex items-center gap-2 text-xs text-[#5F635D] mt-0.5">
                   <span>{t.role}</span>
-                  <span aria-hidden="true">·</span>
-                  <span>{t.neighborhood}</span>
                 </div>
               </div>
             </div>
