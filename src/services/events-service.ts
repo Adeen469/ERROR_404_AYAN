@@ -187,15 +187,15 @@ export const eventsService = {
   async getEventById(id: string): Promise<EventItem | null> {
     if (!isDemoMode()) {
       try {
-        return await apiClient.get<EventItem>(`/events/${id}`);
+        // Single events go through /events?id=<id> on the shared list
+        // endpoint, NOT /events/<id>: the dynamic api/events/[id].ts
+        // route was never reached on Vercel (it came back as the SPA's
+        // HTML 404 page), which made every details page show
+        // "Event Not Found" even though the event listed fine on
+        // Discover. Fall back to the local store only if that fails too.
+        return await apiClient.get<EventItem>('/events', { id });
       } catch (err) {
-        // The live site has no Express backend on Vercel, so /api/events/:id
-        // returns the SPA HTML page instead of JSON. getEvents() already
-        // falls back to the local store in that case, but getEventById()
-        // used to return null here, which made EVERY event details page
-        // show "Event Not Found" even though the same events listed fine
-        // on Discover. Fall back to the local store instead.
-        console.warn('Backend API /events/:id unavailable, falling back to local events store:', err);
+        console.warn('Backend API /events?id unavailable, falling back to local events store:', err);
       }
     }
 
@@ -271,7 +271,7 @@ export const eventsService = {
   async updateEvent(id: string, updates: Partial<EventItem>): Promise<EventItem> {
     if (!isDemoMode()) {
       try {
-        return await apiClient.patch<EventItem>(`/events/${id}`, updates);
+        return await apiClient.patch<EventItem>('/events', updates, { id });
       } catch (err) {
         // Registration increments the count via updateEvent; without a
         // fallback that count would never persist on the live site.
@@ -295,7 +295,7 @@ export const eventsService = {
   async deleteEvent(id: string): Promise<boolean> {
     if (!isDemoMode()) {
       try {
-        await apiClient.delete(`/events/${id}`);
+        await apiClient.delete('/events', { id });
         return true;
       } catch (err) {
         console.warn('Backend API delete event unavailable, falling back to local events store:', err);

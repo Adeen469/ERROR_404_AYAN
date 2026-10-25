@@ -88,6 +88,28 @@ function slugify(text: string): string {
     .replace(/(^-|-$)+/g, "");
 }
 
+// Single-event operations use ?id= on this same endpoint instead of
+// /api/events/:id. The dynamic api/events/[id].ts route was never reached
+// on Vercel: requests to /api/events/<id> came back as the SPA's HTML
+// 404 page (the catch-all vercel.json rewrite), while /api/events itself
+// worked fine. So GET/PATCH/DELETE for one event go through here, where
+// the id arrives as a query parameter and the route is proven to deploy.
+function firstQuery(query: any, name: string): string {
+  const v = query ? query[name] : undefined;
+  if (Array.isArray(v)) return typeof v[0] === "string" ? v[0] : "";
+  return typeof v === "string" ? v : "";
+}
+
+async function fetchEvent(id: string): Promise<any | null> {
+  const res = await fetch(
+    supabaseBase() + "/rest/v1/events?select=data&id=eq." + encodeURIComponent(id),
+    { headers: supabaseHeaders() },
+  );
+  const rows = await res.json().catch(() => null);
+  if (!res.ok || !Array.isArray(rows)) return null;
+  return rows.length > 0 ? rows[0].data : null;
+}
+
 async function fetchAllEvents(): Promise<any[]> {
   const res = await fetch(
     supabaseBase() + "/rest/v1/events?select=data&order=created_at.desc&limit=1000",
@@ -177,6 +199,12 @@ export default async function handler(req: any, res: any) {
 
   if (req.method === "GET") {
     try {
+      const singleId = firstQuery(req.query, "id");
+      if (singleId) {
+        const event = await fetchEvent(singleId);
+        if (!event) return sendJson(res, 404, { message: "Event not found" });
+        return sendJson(res, 200, event);
+      }
       const filtered = applyFilters(await fetchAllEvents(), req.query || {});
       const page = Math.max(1, parseInt(String(req.query?.page || "1"), 10) || 1);
       const pageSize = Math.max(1, parseInt(String(req.query?.pageSize || "12"), 10) || 12);
@@ -246,6 +274,43 @@ export default async function handler(req: any, res: any) {
       return sendJson(res, 201, event);
     } catch (err: any) {
       return sendJson(res, 502, { message: "Could not save shared event: " + (err?.message || "unknown error") });
+    }
+  }
+
+  if (req.method === "PATCH") {
+    try {
+      const singleId = firstQuery(req.query, "id");
+      if (!singleId) return sendJson(res, 400, { message: "Missing event id" });
+      const existing = await fetchEvent(singleId);
+      if (!existing) return sendJson(res, 404, { message: "Event not found" });
+      const updates = await readBody(req);
+      const merged = { ...existing, ...updates, id: existing.id };
+      const supa = await fetch(
+        supabaseBase() + "/rest/v1/events?id=eq." + encodeURIComponent(singleId),
+        { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: merged }) },
+      );
+      if (!supa.ok) {
+        const rows = await supa.json().catch(() => null);
+        const detail = rows && rows.message ? rows.message : "Supabase update failed";
+        return sendJson(res, 502, { message: "Could not update shared event: " + detail });
+      }
+      return sendJson(res, 200, merged);
+    } catch (err: any) {
+      return sendJson(res, 502, { message: "Could not update shared event: " + (err?.message || "unknown error") });
+    }
+  }
+
+  if (req.method === "DELETE") {
+    try {
+      const singleId = firstQuery(req.query, "id");
+      if (!singleId) return sendJson(res, 400, { message: "Missing event id" });
+      await fetch(supabaseBase() + "/rest/v1/events?id=eq." + encodeURIComponent(singleId), {
+        method: "DELETE",
+        headers: supabaseHeaders(),
+      });
+      return sendJson(res, 200, { success: true });
+    } catch (err: any) {
+      return sendJson(res, 502, { message: "Could not delete shared event: " + (err?.message || "unknown error") });
     }
   }
 
