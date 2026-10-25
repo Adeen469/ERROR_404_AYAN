@@ -64,48 +64,24 @@ export function PrivacyPage() {
               Browser storage and cookies.
             </strong>{' '}
             Parts of your session, registrations, and saved events are kept in
-            your browser&apos;s local storage. During Google sign-in and
-            Google Calendar connection, we set a short-lived cookie that holds
-            a one-time security token to prevent forged sign-in requests. It
-            is not used for tracking or advertising.
+            your browser&apos;s local storage. During Google sign-in, we set
+            a short-lived cookie that holds a one-time security token to
+            prevent forged sign-in requests. It is not used for tracking or
+            advertising.
           </p>
         </Section>
 
-        <Section title="Google Calendar connection">
+        <Section title="Adding events to Google Calendar">
           <p>
-            Connecting Google Calendar is optional. If you connect it, Locora
-            requests a single Google permission: the ability to view and edit
-            events on your calendars. In practice Locora only uses it in two
-            ways:
-          </p>
-          <ul className="list-disc pl-5 space-y-1.5">
-            <li>
-              When you register for an event, Locora creates that event on
-              your primary Google Calendar, with the event&apos;s title, date
-              and time, venue, and description.
-            </li>
-            <li>
-              When you cancel that registration, Locora deletes the calendar
-              event it created.
-            </li>
-          </ul>
-          <p>
-            Locora never lists, reads, or copies your other calendar events.
-            It never invites other people to your calendar events, and it
-            never shares your calendar data with anyone.
-          </p>
-          <p>
-            To make this work after you leave the site, Google issues Locora
-            a refresh token. That token is stored encrypted (AES-GCM, with a
-            key derived from a server-only secret) in Locora&apos;s database,
-            and it is never shown to the browser or stored in your browser.
-            Short-lived access tokens are created from it only when an event
-            needs to be added or removed, and they are never stored.
-            Disconnecting Google Calendar in your Profile deletes the stored
-            token immediately. You can also revoke Locora&apos;s access at
-            any time from your Google Account permissions page; if access has
-            been revoked, Locora deletes the stored token the next time it
-            tries to use it.
+            Event pages have an &quot;Add to Google Calendar&quot; button.
+            Clicking it opens Google Calendar in your browser with that
+            event&apos;s title, date and time, venue, and description already
+            filled in, and you save it yourself from there. Locora does not
+            connect to your Google Calendar account, does not request any
+            calendar permission, does not store any calendar token, and never
+            reads your calendar events. Because the saved event is yours in
+            Google Calendar, cancelling a Locora registration does not delete
+            it — delete it in Google Calendar if you no longer want it.
           </p>
         </Section>
 
@@ -123,35 +99,24 @@ export function PrivacyPage() {
             Locora&apos;s shared event data is stored in a hosted database,
             and the site itself is hosted on a cloud hosting platform. These
             providers store and process data only to run the service. Beyond
-            that, Locora does not sell your personal information, does not
-            share it with advertisers, and does not share your calendar data
-            with any third party. Information is disclosed only if required by
-            law.
+            that, Locora does not sell your personal information and does not
+            share it with advertisers. Information is disclosed only if
+            required by law.
           </p>
         </Section>
 
         <Section title="Your control">
           <ul className="list-disc pl-5 space-y-1.5">
             <li>
-              <strong className="text-[#1E2320]">
-                Disconnect Google Calendar
-              </strong>{' '}
-              at any time from your Profile page; this deletes the stored
-              calendar token and stops all future calendar additions.
-            </li>
-            <li>
               <strong className="text-[#1E2320]">Cancel a registration</strong>{' '}
-              from the event page; this also removes the calendar event
-              Locora created for it.
+              from the event page at any time. Note that this does not delete
+              an event you already saved to your own Google Calendar with the
+              &quot;Add to Google Calendar&quot; button — delete that in
+              Google Calendar if you no longer want it.
             </li>
             <li>
               <strong className="text-[#1E2320]">Sign out</strong> from your
               Profile page at any time.
-            </li>
-            <li>
-              <strong className="text-[#1E2320]">Revoke Google access</strong>{' '}
-              from your Google Account permissions page; this cuts off
-              Locora&apos;s calendar access entirely.
             </li>
           </ul>
         </Section>

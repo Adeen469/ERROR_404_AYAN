@@ -18,20 +18,18 @@ import {
 import { EventItem, AttendeeRegistration } from '../types';
 import { eventsService } from '../services/events-service';
 import { registrationsService } from '../services/registrations-service';
-import { calendarService } from '../services/calendar-service';
 import { savedEventsService } from '../services/saved-events-service';
-import { authService } from '../services/auth-service';
 import { formatEventDate, formatEventTimeRange, formatPrice, getMapsSearchUrl } from '../utils/formatters';
 import { useToast } from '../components/ui/Toast';
 import { ConfirmDialog, Modal } from '../components/ui/Modal';
 import { EventCard } from '../components/events/EventCard';
 
-// Universal "Add to Google Calendar" link. This uses Google Calendar's
-// public template URL, which prefills an event in the visitor's own Google
-// Calendar — no OAuth, no Locora connection, and no Google verification
-// required, so it works for every visitor, including guests. It deliberately
-// only shows when the visitor has NOT connected via OAuth, so a connected
-// user never gets a duplicate event on top of the automatic one.
+// "Add to Google Calendar" link. This uses Google Calendar's public template
+// URL, which prefills an event in the visitor's own Google Calendar — no
+// OAuth, no Locora connection, and no Google verification required, so it
+// works for every visitor, including guests. This is now the only calendar
+// action on the page: the OAuth connect button and its automatic add/remove
+// code were removed.
 function toGoogleTemplateDate(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
@@ -62,9 +60,6 @@ export function EventDetailsPage() {
 
   const [event, setEvent] = useState<EventItem | null>(null);
   const [relatedEvents, setRelatedEvents] = useState<EventItem[]>([]);
-  const [calendarConnected, setCalendarConnected] = useState(false);
-  const [calendarEventId, setCalendarEventId] = useState<string | null>(null);
-  const [calendarBusy, setCalendarBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [isSaved, setIsSaved] = useState(false);
   const [registration, setRegistration] = useState<AttendeeRegistration | null>(null);
@@ -98,18 +93,6 @@ export function EventDetailsPage() {
       }
     }
     loadEventData();
-  }, [eventId]);
-
-  // Google Calendar connection for this user + whether this event was
-  // already added to their calendar (mapping kept in this browser).
-  useEffect(() => {
-    const user = authService.getCurrentUser();
-    if (!user || !eventId) return;
-    setCalendarEventId(calendarService.getCalendarEventId(eventId));
-    calendarService
-      .getStatus(user.id)
-      .then((status) => setCalendarConnected(status.connected))
-      .catch(() => {});
   }, [eventId]);
 
   if (loading) {
@@ -173,26 +156,6 @@ export function EventDetailsPage() {
         title: 'Registration Confirmed!',
         description: `Your ticket code is ${reg.ticketCode}. View it anytime in My Registrations.`,
       });
-      // Auto-add to Google Calendar when connected. Calendar is optional:
-      // a failure here must never fail the registration itself.
-      try {
-        const user = authService.getCurrentUser();
-        if (user && calendarConnected) {
-          const added = await calendarService.addEventToCalendar(user.id, event.id);
-          if (added.connected && added.calendarEventId) {
-            calendarService.setCalendarEventId(event.id, added.calendarEventId);
-            setCalendarEventId(added.calendarEventId);
-            toast({
-              type: 'success',
-              title: 'Added to your Google Calendar',
-            });
-          } else if (added.connected === false) {
-            setCalendarConnected(false);
-          }
-        }
-      } catch {
-        // Ignore — the registration already succeeded.
-      }
     } catch (err: unknown) {
       toast({
         type: 'error',
@@ -209,18 +172,6 @@ export function EventDetailsPage() {
     setActionLoading(true);
     try {
       await registrationsService.cancelRegistration(registration.id);
-      // Remove the calendar entry Locora created for this event, if any.
-      try {
-        const user = authService.getCurrentUser();
-        const mapped = event ? calendarService.getCalendarEventId(event.id) : null;
-        if (user && mapped) {
-          await calendarService.removeEventFromCalendar(user.id, mapped);
-          if (event) calendarService.clearCalendarEventId(event.id);
-          setCalendarEventId(null);
-        }
-      } catch {
-        // Ignore — the cancellation itself already succeeded.
-      }
       setRegistration(null);
       setEvent((prev) => (prev ? { ...prev, registeredCount: Math.max(0, prev.registeredCount - 1) } : null));
       setConfirmCancelOpen(false);
@@ -236,44 +187,6 @@ export function EventDetailsPage() {
       });
     } finally {
       setActionLoading(false);
-    }
-  };
-
-  const handleCalendarClick = async () => {
-    const user = authService.getCurrentUser();
-    if (!user || !event) return;
-    // Not connected yet: send the user through Google consent and back
-    // to this event page, where they can tap the button again to add it.
-    if (!calendarConnected) {
-      calendarService.connectCalendar(user.id, `/events/${event.id}`);
-      return;
-    }
-    setCalendarBusy(true);
-    try {
-      if (calendarEventId) {
-        await calendarService.removeEventFromCalendar(user.id, calendarEventId);
-        calendarService.clearCalendarEventId(event.id);
-        setCalendarEventId(null);
-        toast({ type: 'info', title: 'Removed from Google Calendar' });
-      } else {
-        const added = await calendarService.addEventToCalendar(user.id, event.id);
-        if (added.connected && added.calendarEventId) {
-          calendarService.setCalendarEventId(event.id, added.calendarEventId);
-          setCalendarEventId(added.calendarEventId);
-          toast({ type: 'success', title: 'Added to your Google Calendar' });
-        } else {
-          setCalendarConnected(false);
-          toast({
-            type: 'info',
-            title: 'Google Calendar is not connected',
-            description: 'Connect it from your profile page, then try again.',
-          });
-        }
-      }
-    } catch {
-      toast({ type: 'error', title: 'Could not update Google Calendar' });
-    } finally {
-      setCalendarBusy(false);
     }
   };
 
@@ -515,23 +428,6 @@ export function EventDetailsPage() {
                   </button>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={handleCalendarClick}
-                  disabled={calendarBusy}
-                  className="w-full py-2.5 px-3 text-xs font-semibold text-[#1E3F35] bg-white border border-[#D0E2D9] hover:bg-[#FAF8F5] rounded-lg transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <Calendar className="w-3.5 h-3.5" />
-                  <span>
-                    {calendarBusy
-                      ? 'Updating calendar…'
-                      : calendarEventId
-                        ? 'Remove from Google Calendar'
-                        : calendarConnected
-                          ? 'Add to Google Calendar'
-                          : 'Connect Google Calendar'}
-                  </span>
-                </button>
               </div>
             ) : (
               <div className="pt-2">
@@ -550,23 +446,21 @@ export function EventDetailsPage() {
               </div>
             )}
 
-            {!calendarConnected && (
-              <div className="pt-2 space-y-1.5">
-                <a
-                  href={buildGoogleCalendarTemplateUrl(event)}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="w-full py-2.5 px-3 text-xs font-semibold text-[#1E3F35] bg-white border border-[#D0E2D9] hover:bg-[#FAF8F5] rounded-lg transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <Calendar className="w-3.5 h-3.5" />
-                  <span>Add to Google Calendar</span>
-                </a>
-                <p className="text-[11px] text-[#8C887E] text-center">
-                  Opens Google Calendar with this event prefilled — works for
-                  everyone, no connection needed.
-                </p>
-              </div>
-            )}
+            <div className="pt-2 space-y-1.5">
+              <a
+                href={buildGoogleCalendarTemplateUrl(event)}
+                target="_blank"
+                rel="noreferrer"
+                className="w-full py-2.5 px-3 text-xs font-semibold text-[#1E3F35] bg-white border border-[#D0E2D9] hover:bg-[#FAF8F5] rounded-lg transition-colors flex items-center justify-center gap-1.5"
+              >
+                <Calendar className="w-3.5 h-3.5" />
+                <span>Add to Google Calendar</span>
+              </a>
+              <p className="text-[11px] text-[#8C887E] text-center">
+                Opens Google Calendar with this event prefilled — works for
+                everyone, no connection needed.
+              </p>
+            </div>
 
             <div className="pt-2 text-center">
               <p className="text-[11px] text-[#8C887E]">
