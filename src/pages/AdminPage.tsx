@@ -12,6 +12,7 @@ import {
   ApprovedOrganizer,
 } from '../services/roles-service';
 import { useToast } from '../components/ui/Toast';
+import { Skeleton } from '../components/ui/LoadingSkeleton';
 
 // Admin page: review organizer requests. Only the admin accounts can open
 // it; the server re-checks admin status on every list/approve/reject call.
@@ -127,8 +128,10 @@ export function AdminPage() {
 
   if (state === 'loading') {
     return (
-      <div className="max-w-3xl mx-auto px-4 py-20 text-center">
-        <p className="text-sm text-[#5F635D]">Checking admin access…</p>
+      <div className="max-w-3xl mx-auto px-4 py-20 space-y-4">
+        <Skeleton className="h-8 w-56 mx-auto" />
+        <Skeleton className="h-4 w-80 max-w-full mx-auto" />
+        <Skeleton className="h-32 w-full" />
       </div>
     );
   }

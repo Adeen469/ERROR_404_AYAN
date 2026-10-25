@@ -8,6 +8,7 @@ import { isAdminEmail } from '../services/roles-service';
 import { registrationsService } from '../services/registrations-service';
 import { formatEventDate } from '../utils/formatters';
 import { useToast } from '../components/ui/Toast';
+import { TableSkeleton } from '../components/ui/LoadingSkeleton';
 
 export function AttendeesPage() {
   const { eventId } = useParams<{ eventId: string }>();
@@ -109,7 +110,11 @@ export function AttendeesPage() {
   const checkedInCount = attendees.filter((a) => a.checkedIn).length;
 
   if (loading) {
-    return <div className="max-w-6xl mx-auto px-4 py-16 text-center text-xs text-slate-500">Loading attendee roster...</div>;
+    return (
+      <div className="max-w-6xl mx-auto px-4 py-8">
+        <TableSkeleton rows={6} />
+      </div>
+    );
   }
 
   if (!event) {

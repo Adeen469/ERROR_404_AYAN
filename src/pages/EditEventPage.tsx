@@ -7,6 +7,7 @@ import { eventsService, isEventOwner } from '../services/events-service';
 import { authService } from '../services/auth-service';
 import { isAdminEmail } from '../services/roles-service';
 import { useToast } from '../components/ui/Toast';
+import { FormSkeleton } from '../components/ui/LoadingSkeleton';
 import { PRESET_COVER_IMAGES } from './CreateEventPage';
 
 export function EditEventPage() {
@@ -148,7 +149,7 @@ export function EditEventPage() {
   };
 
   if (loading) {
-    return <div className="max-w-4xl mx-auto px-4 py-16 text-center text-xs text-slate-500">Loading event data...</div>;
+    return <FormSkeleton />;
   }
 
   if (!event) {

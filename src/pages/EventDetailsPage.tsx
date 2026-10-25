@@ -22,6 +22,7 @@ import { savedEventsService } from '../services/saved-events-service';
 import { formatEventDate, formatEventTimeRange, formatPrice, getMapsSearchUrl } from '../utils/formatters';
 import { useToast } from '../components/ui/Toast';
 import { ConfirmDialog, Modal } from '../components/ui/Modal';
+import { EventDetailsSkeleton } from '../components/ui/LoadingSkeleton';
 import { EventCard } from '../components/events/EventCard';
 
 // "Add to Google Calendar" link. This uses Google Calendar's public template
@@ -96,14 +97,7 @@ export function EventDetailsPage() {
   }, [eventId]);
 
   if (loading) {
-    return (
-      <div className="max-w-5xl mx-auto px-4 py-16 animate-pulse space-y-6">
-        <div className="h-6 w-32 bg-slate-200 rounded" />
-        <div className="h-80 bg-slate-200 rounded-2xl" />
-        <div className="h-8 w-2/3 bg-slate-200 rounded" />
-        <div className="h-4 w-1/3 bg-slate-200 rounded" />
-      </div>
-    );
+    return <EventDetailsSkeleton />;
   }
 
   if (!event) {

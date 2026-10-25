@@ -8,6 +8,7 @@ import { isAdminEmail } from '../services/roles-service';
 import { formatEventDate, formatPrice } from '../utils/formatters';
 import { useToast } from '../components/ui/Toast';
 import { ConfirmDialog } from '../components/ui/Modal';
+import { ListSkeleton } from '../components/ui/LoadingSkeleton';
 
 export function OrganizerEventsPage() {
   const { toast } = useToast();
@@ -134,7 +135,7 @@ export function OrganizerEventsPage() {
 
       {/* Events List Cards */}
       {loading ? (
-        <div className="p-8 text-center text-xs text-[#5F635D]">Loading events...</div>
+        <ListSkeleton count={4} />
       ) : filtered.length === 0 ? (
         <div className="p-12 text-center bg-white rounded-2xl border border-dashed border-[#E5E1D8] text-xs text-[#5F635D]">
           No events found in this category.
