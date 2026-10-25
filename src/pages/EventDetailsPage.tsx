@@ -26,6 +26,35 @@ import { useToast } from '../components/ui/Toast';
 import { ConfirmDialog, Modal } from '../components/ui/Modal';
 import { EventCard } from '../components/events/EventCard';
 
+// Universal "Add to Google Calendar" link. This uses Google Calendar's
+// public template URL, which prefills an event in the visitor's own Google
+// Calendar — no OAuth, no Locora connection, and no Google verification
+// required, so it works for every visitor, including guests. It deliberately
+// only shows when the visitor has NOT connected via OAuth, so a connected
+// user never gets a duplicate event on top of the automatic one.
+function toGoogleTemplateDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+}
+
+function buildGoogleCalendarTemplateUrl(event: EventItem): string {
+  const start = toGoogleTemplateDate(event.startDate);
+  const end = event.endDate
+    ? toGoogleTemplateDate(event.endDate)
+    : toGoogleTemplateDate(
+        new Date(new Date(event.startDate).getTime() + 2 * 60 * 60 * 1000).toISOString(),
+      );
+  const params = new URLSearchParams({
+    action: 'TEMPLATE',
+    text: event.title,
+    dates: `${start}/${end}`,
+    details: [event.summary, event.description].filter(Boolean).join('\n\n'),
+    location: [event.venueName, event.address, event.city].filter(Boolean).join(', '),
+  });
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
+}
+
 export function EventDetailsPage() {
   const { eventId } = useParams<{ eventId: string }>();
   const navigate = useNavigate();
@@ -518,6 +547,24 @@ export function EventDetailsPage() {
                 >
                   {isFull ? 'Event Sold Out' : 'Register for Event'}
                 </button>
+              </div>
+            )}
+
+            {!calendarConnected && (
+              <div className="pt-2 space-y-1.5">
+                <a
+                  href={buildGoogleCalendarTemplateUrl(event)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="w-full py-2.5 px-3 text-xs font-semibold text-[#1E3F35] bg-white border border-[#D0E2D9] hover:bg-[#FAF8F5] rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <Calendar className="w-3.5 h-3.5" />
+                  <span>Add to Google Calendar</span>
+                </a>
+                <p className="text-[11px] text-[#8C887E] text-center">
+                  Opens Google Calendar with this event prefilled — works for
+                  everyone, no connection needed.
+                </p>
               </div>
             )}
 

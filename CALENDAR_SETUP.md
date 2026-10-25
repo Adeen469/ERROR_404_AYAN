@@ -105,3 +105,23 @@ added this feature (it auto-deploys on push).
   Google's published limits (10,000 requests/min/project,
   1,000,000/day threshold). One registration is one insert, so normal
   Locora usage is far below them.
+
+## Universal "Add to Google Calendar" button (works for everyone, no verification)
+
+The event details page also has a second, verification-free path: when the
+visitor has **not** connected via OAuth, it shows an "Add to Google Calendar"
+button that links to Google Calendar's public template URL
+(`calendar.google.com/calendar/render?action=TEMPLATE`) with the event's
+title, dates, venue, and description prefilled. The visitor clicks Save in
+their own Google Calendar — no Locora permission, no test-user list, and no
+Google verification is involved, so it works for every user, including guests.
+
+Differences from the OAuth connection, stated honestly:
+
+- The template link adds **one event, once**, chosen by the visitor. It does
+  not auto-add on registration and does not auto-remove on cancellation.
+- The OAuth connection (Profile → Connect) is the automatic version, and it
+  becomes available to everyone only after Google verification (see
+  GOOGLE_VERIFICATION_PACK.md). Until then it is limited to test users.
+- The template button is hidden for OAuth-connected users so they never get
+  a duplicate event on top of the automatic one.
