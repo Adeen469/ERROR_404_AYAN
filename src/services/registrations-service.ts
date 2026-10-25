@@ -141,6 +141,9 @@ export const registrationsService = {
       userId: user.id,
       userName: user.name,
       userEmail: user.email,
+      // Saved by the details gate before registration; shared with the
+      // organizer only, for events that require attendee details.
+      userPhone: user.phone || undefined,
       status: 'confirmed',
       registeredAt: new Date().toISOString(),
       ticketCode: newTicketCode(),
@@ -150,6 +153,7 @@ export const registrationsService = {
     if (existing) {
       existing.status = 'confirmed';
       existing.ticketCode = newReg.ticketCode;
+      existing.userPhone = newReg.userPhone || existing.userPhone;
     } else {
       all.unshift(newReg);
     }
@@ -209,6 +213,9 @@ export const registrationsService = {
       userId: user.id,
       userName: user.name,
       userEmail: user.email,
+      // Saved by the details gate before registration; shared with the
+      // organizer only, for events that require attendee details.
+      userPhone: user.phone || undefined,
       status: 'pending',
       registeredAt: new Date().toISOString(),
       ticketCode: '',

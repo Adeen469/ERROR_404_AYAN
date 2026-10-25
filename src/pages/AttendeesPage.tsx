@@ -117,11 +117,12 @@ export function AttendeesPage() {
       toast({ type: 'info', title: 'No attendees to export' });
       return;
     }
-    const headers = ['Registration ID', 'Name', 'Email', 'Ticket Code', 'Status', 'Checked In'];
+    const headers = ['Registration ID', 'Name', 'Email', 'Phone', 'Ticket Code', 'Status', 'Checked In'];
     const rows = tableAttendees.map((a) => [
       a.id,
       `"${a.userName}"`,
       `"${a.userEmail}"`,
+      `"${a.userPhone || ''}"`,
       a.ticketCode,
       a.status,
       a.checkedIn ? 'Yes' : 'No',
@@ -148,6 +149,7 @@ export function AttendeesPage() {
       !q ||
       a.userName.toLowerCase().includes(q) ||
       a.userEmail.toLowerCase().includes(q) ||
+      (a.userPhone || '').toLowerCase().includes(q) ||
       a.ticketCode.toLowerCase().includes(q);
 
     if (!matchesSearch) return false;
@@ -271,6 +273,11 @@ export function AttendeesPage() {
                 <div className="text-xs space-y-0.5">
                   <p className="font-semibold text-[#1E2320] text-sm">{reg.userName}</p>
                   <p className="text-[#5F635D]">{reg.userEmail}</p>
+                  {reg.userPhone && (
+                    <p className="text-[#5F635D]">
+                      Mobile: <span className="font-semibold text-[#1E2320]">{reg.userPhone}</span>
+                    </p>
+                  )}
                   <p className="text-[#5F635D]">
                     UTR: <span className="font-mono font-semibold text-[#1E2320]">{reg.utr || '—'}</span>
                     <span aria-hidden="true"> · </span>
@@ -372,6 +379,9 @@ export function AttendeesPage() {
                     <td className="py-3.5 px-5">
                       <p className="font-semibold text-[#1E2320]">{att.userName}</p>
                       <p className="text-[11px] text-[#8C887E]">{att.userEmail}</p>
+                      {att.userPhone && (
+                        <p className="text-[11px] text-[#8C887E]">{att.userPhone}</p>
+                      )}
                     </td>
 
                     <td className="py-3.5 px-5 font-mono text-[#1E2320] font-medium">

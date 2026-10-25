@@ -60,6 +60,13 @@ export function PrivacyPage() {
             visible to other Locora users by design.
           </p>
           <p>
+            <strong className="text-[#1E2320]">Registration details.</strong>{' '}
+            For events that require attendee details, your full name, mobile
+            number, and email address are shared with that event&apos;s
+            organizer only, so they can manage registrations. They are never
+            shown publicly or shared with other attendees.
+          </p>
+          <p>
             <strong className="text-[#1E2320]">
               Browser storage and cookies.
             </strong>{' '}

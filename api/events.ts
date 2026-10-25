@@ -269,6 +269,9 @@ export default async function handler(req: any, res: any) {
         createdByEmail: p.createdByEmail || undefined,
         price: Number(p.price) || 0,
         upiId: p.upiId || undefined,
+        // Attendee details gate: older events predate this flag and
+        // behave as if it were on (details required).
+        requireAttendeeDetails: p.requireAttendeeDetails ?? true,
         capacity: Number(p.capacity) || 50,
         registeredCount: Number(p.registeredCount) || 0,
         status: p.status || "published",
