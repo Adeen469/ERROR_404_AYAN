@@ -108,11 +108,3 @@ export interface ApiResponse<T> {
   error?: string;
 }
 
-declare global {
-  const __GOOGLE_CLIENT_ID__: string;
-  interface Window {
-    google?: any;
-    __LOCORA_GOOGLE_CLIENT_ID__?: string;
-  }
-}
-
