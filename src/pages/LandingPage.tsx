@@ -1,5 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import { eventsService } from '../services/events-service';
+import { EventItem } from '../types';
+import { formatEventDate, formatEventTimeRange, formatPrice } from '../utils/formatters';
 import {
 
   ArrowRight,
@@ -17,6 +20,51 @@ import heroGatheringImg from '../assets/images/hero_neighborhood_gathering_17928
 
 export function LandingPage() {
   const [activeFaq, setActiveFaq] = useState<number | null>(null);
+
+  // Real platform stats, computed from the actual (shared) event list —
+  // not hardcoded marketing numbers. While the list is loading the
+  // tiles show a dash, never a made-up figure. $0 platform fees is a
+  // policy fact, not a count, so it stays as-is.
+  const [stats, setStats] = useState<{
+    neighborhoods: number;
+    rsvps: number;
+    hosts: number;
+  } | null>(null);
+  const [nextEvent, setNextEvent] = useState<EventItem | null>(null);
+  const [eventsLoaded, setEventsLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    eventsService
+      .getEvents({}, 1, 1000)
+      .then((res) => {
+        if (cancelled) return;
+        const list = res.data;
+        const neighborhoods = new Set(
+          list.map((e) => e.neighborhood).filter(Boolean),
+        ).size;
+        const hosts = new Set(
+          list.map((e) => e.organizer?.id || e.organizer?.name).filter(Boolean),
+        ).size;
+        const rsvps = list.reduce((sum, e) => sum + (e.registeredCount || 0), 0);
+        setStats({ neighborhoods, rsvps, hosts });
+        const now = Date.now();
+        const upcoming = list
+          .filter((e) => new Date(e.startDate).getTime() >= now)
+          .sort(
+            (a, b) =>
+              new Date(a.startDate).getTime() - new Date(b.startDate).getTime(),
+          );
+        setNextEvent(upcoming[0] || null);
+        setEventsLoaded(true);
+      })
+      .catch(() => {
+        if (!cancelled) setEventsLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const toggleFaq = (index: number) => {
     setActiveFaq(activeFaq === index ? null : index);
@@ -137,32 +185,43 @@ export function LandingPage() {
                 />
                 <div className="absolute inset-0 bg-gradient-to-t from-slate-950/85 via-slate-950/25 to-transparent" />
                 
-                {/* Floating Glassmorphic Event Ticket Preview */}
-                <div className="absolute bottom-4 left-4 right-4 bg-white/95 backdrop-blur-md p-4 rounded-xl border border-white/60 shadow-lg text-[#1E2320]">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-[11px] font-semibold text-[#1E3F35] uppercase tracking-wider">
-                        Happening This Saturday
-                      </p>
-                      <h4 className="text-sm font-bold text-[#1E2320] mt-0.5 line-clamp-1">
-                        Lantern Courtyard Concert & Artisan Market
-                      </h4>
-                      <div className="flex items-center gap-2 text-xs text-[#5F635D] mt-1">
-                        <span>Historic Old Town</span>
-                        <span aria-hidden="true">·</span>
-                        <span className="tabular-nums">6:30 PM</span>
-                        <span aria-hidden="true">·</span>
-                        <span className="text-[#1E3F35] font-semibold">Free RSVP</span>
+                {/* Floating Glassmorphic Event Ticket Preview — the next
+                    real upcoming event from the shared list. Hidden when
+                    there is no upcoming event, instead of showing a
+                    made-up event. */}
+                {eventsLoaded && nextEvent && (
+                  <div className="absolute bottom-4 left-4 right-4 bg-white/95 backdrop-blur-md p-4 rounded-xl border border-white/60 shadow-lg text-[#1E2320]">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-[11px] font-semibold text-[#1E3F35] uppercase tracking-wider">
+                          Upcoming · {formatEventDate(nextEvent.startDate)}
+                        </p>
+                        <h4 className="text-sm font-bold text-[#1E2320] mt-0.5 line-clamp-1">
+                          {nextEvent.title}
+                        </h4>
+                        <div className="flex items-center gap-2 text-xs text-[#5F635D] mt-1">
+                          <span>{nextEvent.neighborhood}</span>
+                          <span aria-hidden="true">·</span>
+                          <span className="tabular-nums">
+                            {formatEventTimeRange(nextEvent.startDate, nextEvent.endDate)}
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-[#1E3F35] font-semibold">
+                            {nextEvent.price === 0
+                              ? 'Free RSVP'
+                              : `${formatPrice(nextEvent.price)} RSVP`}
+                          </span>
+                        </div>
                       </div>
+                      <Link
+                        to={`/events/${nextEvent.id}`}
+                        className="px-3.5 py-1.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors shrink-0"
+                      >
+                        View Event
+                      </Link>
                     </div>
-                    <Link
-                      to="/login"
-                      className="px-3.5 py-1.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors shrink-0"
-                    >
-                      Sign In
-                    </Link>
                   </div>
-                </div>
+                )}
               </div>
             </div>
           </div>
@@ -173,7 +232,7 @@ export function LandingPage() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 p-6 sm:p-8 bg-white rounded-2xl border border-[#E7E3DB] shadow-xs">
             <div>
               <p className="font-editorial text-3xl sm:text-4xl font-bold text-[#1E3F35] tabular-nums">
-                45+
+                {stats ? stats.neighborhoods.toLocaleString() : '—'}
               </p>
               <p className="text-xs sm:text-sm text-[#5F635D] mt-1 font-medium">
                 Active Neighborhoods
@@ -181,7 +240,7 @@ export function LandingPage() {
             </div>
             <div>
               <p className="font-editorial text-3xl sm:text-4xl font-bold text-[#1E3F35] tabular-nums">
-                12,800+
+                {stats ? stats.rsvps.toLocaleString() : '—'}
               </p>
               <p className="text-xs sm:text-sm text-[#5F635D] mt-1 font-medium">
                 Community RSVPs
@@ -189,7 +248,7 @@ export function LandingPage() {
             </div>
             <div>
               <p className="font-editorial text-3xl sm:text-4xl font-bold text-[#1E3F35] tabular-nums">
-                320+
+                {stats ? stats.hosts.toLocaleString() : '—'}
               </p>
               <p className="text-xs sm:text-sm text-[#5F635D] mt-1 font-medium">
                 Local Event Hosts
