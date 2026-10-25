@@ -62,6 +62,20 @@ export function Navbar() {
 
   const isLandingPage = !currentUser && (location.pathname === '/' || location.pathname === '/landing');
 
+  // Auth pages for a guest must not show the logged-in navigation
+  // (Discover / SmartMatch / Organizer Hub / Post Event). Previously any
+  // guest page that was not '/' or '/landing' fell through to the
+  // logged-in nav, so /login and /signup looked signed-in even when
+  // nobody was signed in. A signed-in user visiting an auth page keeps
+  // the normal nav, so switching accounts still works.
+  const isAuthPage =
+    !currentUser &&
+    (location.pathname === '/login' ||
+      location.pathname === '/signup' ||
+      location.pathname === '/forgot-password');
+  const authOppositePath = location.pathname === '/login' ? '/signup' : '/login';
+  const authOppositeLabel = location.pathname === '/login' ? 'Join Free' : 'Sign In';
+
   const isCurrent = (path: string) => {
     if (path === '/') return location.pathname === '/';
     return location.pathname.startsWith(path);
@@ -83,7 +97,9 @@ export function Navbar() {
 
         {/* Zone 2: 4-5 single-line clean navigation links */}
         <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-[#5F635D]">
-          {isLandingPage ? (
+          {isAuthPage ? (
+            <></>
+          ) : isLandingPage ? (
             <>
               <a href="#how-it-works" className="hover:text-[#1E2320] transition-colors whitespace-nowrap shrink-0">
                 How It Works
@@ -254,6 +270,15 @@ export function Navbar() {
                 </div>
               )}
             </div>
+          ) : isAuthPage ? (
+            <div className="flex items-center gap-2">
+              <Link
+                to={authOppositePath}
+                className="px-4 py-2 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-2xs"
+              >
+                {authOppositeLabel}
+              </Link>
+            </div>
           ) : isLandingPage ? (
             <div className="flex items-center gap-2">
               <Link
@@ -290,7 +315,7 @@ export function Navbar() {
 
         {/* Mobile Hamburger Toggle */}
         <div className="flex md:hidden items-center gap-2">
-          {!isLandingPage && (
+          {!isLandingPage && !isAuthPage && (
             <Link
               to="/organizer/events/new"
               className="p-2 text-[#1E3F35] hover:bg-[#EAF1ED] rounded-lg"
@@ -312,7 +337,16 @@ export function Navbar() {
       {/* Mobile Navigation Drawer */}
       {mobileMenuOpen && (
         <div className="md:hidden border-t border-slate-200 bg-white px-4 py-5 space-y-4 shadow-lg animate-in fade-in slide-in-from-top-2 duration-150">
-          {isLandingPage ? (
+          {isAuthPage ? (
+            <div className="space-y-1">
+              <Link
+                to={authOppositePath}
+                className="block px-3 py-2.5 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50"
+              >
+                {authOppositeLabel}
+              </Link>
+            </div>
+          ) : isLandingPage ? (
             <div className="space-y-1">
               <a
                 href="#how-it-works"
@@ -441,6 +475,15 @@ export function Navbar() {
                   className="w-full text-center py-2.5 text-xs font-medium text-slate-700 bg-slate-100 rounded-lg"
                 >
                   Sign In
+                </Link>
+              </div>
+            ) : isAuthPage ? (
+              <div className="flex flex-col gap-2">
+                <Link
+                  to={authOppositePath}
+                  className="w-full text-center py-2.5 text-xs font-medium text-white bg-[#1E3F35] rounded-lg"
+                >
+                  {authOppositeLabel}
                 </Link>
               </div>
             ) : (

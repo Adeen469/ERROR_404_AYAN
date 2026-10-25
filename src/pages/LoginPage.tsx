@@ -10,8 +10,8 @@ export function LoginPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  const [email, setEmail] = useState('sarah.chen@example.com');
-  const [password, setPassword] = useState('locora2026demo');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -129,6 +129,7 @@ export function LoginPage() {
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
               required
               className="w-full pl-9 pr-3 py-2.5 text-xs bg-white border border-[#E2DFD8] rounded-lg text-[#1E2320] focus:border-[#1E3F35]"
             />
@@ -151,6 +152,7 @@ export function LoginPage() {
               type={showPassword ? 'text' : 'password'}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              placeholder="Enter your password"
               required
               className="w-full pl-9 pr-10 py-2.5 text-xs bg-white border border-[#E2DFD8] rounded-lg text-[#1E2320] focus:border-[#1E3F35]"
             />
