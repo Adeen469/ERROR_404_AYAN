@@ -189,6 +189,13 @@ export function LandingPage() {
                     real upcoming event from the shared list. Hidden when
                     there is no upcoming event, instead of showing a
                     made-up event. */}
+                {!eventsLoaded && (
+                  <div className="absolute bottom-4 left-4 right-4 bg-white/95 backdrop-blur-md p-4 rounded-xl border border-white/60 shadow-lg animate-pulse space-y-2">
+                    <div className="h-3 w-24 bg-[#EBE7DF] rounded" />
+                    <div className="h-4 w-2/3 bg-[#EBE7DF] rounded" />
+                    <div className="h-3 w-1/2 bg-[#EBE7DF] rounded" />
+                  </div>
+                )}
                 {eventsLoaded && nextEvent && (
                   <div className="absolute bottom-4 left-4 right-4 bg-white/95 backdrop-blur-md p-4 rounded-xl border border-white/60 shadow-lg text-[#1E2320]">
                     <div className="flex items-start justify-between gap-3">
@@ -232,7 +239,7 @@ export function LandingPage() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 p-6 sm:p-8 bg-white rounded-2xl border border-[#E7E3DB] shadow-xs">
             <div>
               <p className="font-editorial text-3xl sm:text-4xl font-bold text-[#1E3F35] tabular-nums">
-                {stats ? stats.neighborhoods.toLocaleString() : '—'}
+                {stats ? stats.neighborhoods.toLocaleString() : <span className="inline-block h-9 w-16 bg-[#EBE7DF] rounded animate-pulse" />}
               </p>
               <p className="text-xs sm:text-sm text-[#5F635D] mt-1 font-medium">
                 Active Neighborhoods
@@ -240,7 +247,7 @@ export function LandingPage() {
             </div>
             <div>
               <p className="font-editorial text-3xl sm:text-4xl font-bold text-[#1E3F35] tabular-nums">
-                {stats ? stats.rsvps.toLocaleString() : '—'}
+                {stats ? stats.rsvps.toLocaleString() : <span className="inline-block h-9 w-16 bg-[#EBE7DF] rounded animate-pulse" />}
               </p>
               <p className="text-xs sm:text-sm text-[#5F635D] mt-1 font-medium">
                 Community RSVPs
@@ -248,7 +255,7 @@ export function LandingPage() {
             </div>
             <div>
               <p className="font-editorial text-3xl sm:text-4xl font-bold text-[#1E3F35] tabular-nums">
-                {stats ? stats.hosts.toLocaleString() : '—'}
+                {stats ? stats.hosts.toLocaleString() : <span className="inline-block h-9 w-16 bg-[#EBE7DF] rounded animate-pulse" />}
               </p>
               <p className="text-xs sm:text-sm text-[#5F635D] mt-1 font-medium">
                 Local Event Hosts

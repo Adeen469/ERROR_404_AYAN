@@ -7,6 +7,7 @@ import { organizersService, OrganizerStats } from '../services/organizers-servic
 import { authService } from '../services/auth-service';
 import { isAdminEmail } from '../services/roles-service';
 import { formatEventDate, formatPrice } from '../utils/formatters';
+import { StatCardsSkeleton, TableSkeleton } from '../components/ui/LoadingSkeleton';
 
 export function OrganizerDashboardPage() {
   const currentUser = authService.getCurrentUser();
@@ -84,6 +85,9 @@ export function OrganizerDashboardPage() {
       </div>
 
       {/* Metrics Strip */}
+      {loading ? (
+        <StatCardsSkeleton />
+      ) : (
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="p-5 bg-white rounded-xl border border-[#E5E1D8] space-y-1 shadow-2xs">
           <span className="text-xs font-medium text-[#5F635D]">Total Events Hosted</span>
@@ -105,6 +109,7 @@ export function OrganizerDashboardPage() {
           <p className="font-editorial text-3xl font-bold text-[#1E2320] tabular-nums">4</p>
         </div>
       </div>
+      )}
 
       {/* Events Table */}
       <div className="bg-white rounded-2xl border border-[#E5E1D8] overflow-hidden shadow-xs">
@@ -125,7 +130,7 @@ export function OrganizerDashboardPage() {
         </div>
 
         {loading ? (
-          <div className="p-8 text-center text-xs text-[#5F635D]">Loading events...</div>
+          <TableSkeleton rows={6} />
         ) : events.length === 0 ? (
           <div className="p-12 text-center text-xs text-[#5F635D] space-y-3">
             <p>You haven't posted any events yet.</p>

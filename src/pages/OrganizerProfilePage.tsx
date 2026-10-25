@@ -4,7 +4,7 @@ import { MapPin, Globe, Mail, Calendar, Users, ArrowLeft, ShieldCheck } from 'lu
 import { Organizer, EventItem } from '../types';
 import { organizersService } from '../services/organizers-service';
 import { EventCard } from '../components/events/EventCard';
-import { EventListSkeleton } from '../components/ui/LoadingSkeleton';
+import { ProfileSkeleton } from '../components/ui/LoadingSkeleton';
 
 export function OrganizerProfilePage() {
   const { organizerId } = useParams<{ organizerId: string }>();
@@ -31,7 +31,7 @@ export function OrganizerProfilePage() {
   }, [organizerId]);
 
   if (loading) {
-    return <div className="max-w-5xl mx-auto px-4 py-16 text-center text-xs text-[#5F635D]">Loading organizer profile...</div>;
+    return <ProfileSkeleton />;
   }
 
   if (!organizer) {

@@ -6,7 +6,7 @@ import { registrationsService } from '../services/registrations-service';
 import { formatEventDate, formatEventTimeRange } from '../utils/formatters';
 import { useToast } from '../components/ui/Toast';
 import { Modal, ConfirmDialog } from '../components/ui/Modal';
-import { EmptyState } from '../components/ui/LoadingSkeleton';
+import { EmptyState, ListSkeleton } from '../components/ui/LoadingSkeleton';
 
 export function RegistrationsPage() {
   const { toast } = useToast();
@@ -108,10 +108,7 @@ export function RegistrationsPage() {
 
       {/* Registrations List */}
       {loading ? (
-        <div className="space-y-4 animate-pulse">
-          <div className="h-28 bg-[#F4F1EA] rounded-xl" />
-          <div className="h-28 bg-[#F4F1EA] rounded-xl" />
-        </div>
+        <ListSkeleton count={3} />
       ) : displayedList.length === 0 ? (
         <EmptyState
           icon="calendar"

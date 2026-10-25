@@ -7,6 +7,7 @@ import { registrationsService } from '../services/registrations-service';
 import { savedEventsService } from '../services/saved-events-service';
 import { formatEventDate, formatEventTimeRange } from '../utils/formatters';
 import { EventCard } from '../components/events/EventCard';
+import { EventListSkeleton } from '../components/ui/LoadingSkeleton';
 
 export function DashboardPage() {
   const [user, setUser] = useState<UserProfile | null>(() => authService.getCurrentUser());
@@ -152,7 +153,17 @@ export function DashboardPage() {
       </div>
 
       {/* Next Upcoming Ticket Feature */}
-      {nextUpcoming && (
+      {loading ? (
+        <div className="bg-white rounded-2xl border border-[#E5E1D8] p-6 animate-pulse flex flex-col md:flex-row gap-6">
+          <div className="w-full md:w-60 aspect-[16/10] bg-[#EBE7DF] rounded-xl shrink-0" />
+          <div className="flex-1 space-y-3">
+            <div className="h-3 w-24 bg-[#EBE7DF] rounded" />
+            <div className="h-6 w-2/3 bg-[#EBE7DF] rounded" />
+            <div className="h-3 w-1/2 bg-[#EBE7DF] rounded" />
+            <div className="h-8 w-40 bg-[#EBE7DF] rounded-lg" />
+          </div>
+        </div>
+      ) : nextUpcoming ? (
         <div className="bg-white rounded-2xl border border-[#E5E1D8] p-6 space-y-4 shadow-xs">
           <div className="flex items-center justify-between pb-3 border-b border-[#EBE7DF]">
             <h2 className="font-editorial text-base font-bold text-[#1E2320]">
@@ -211,7 +222,7 @@ export function DashboardPage() {
             </div>
           </div>
         </div>
-      )}
+      ) : null}
 
       {/* Saved Events Strip */}
       <div className="space-y-6">
@@ -232,7 +243,9 @@ export function DashboardPage() {
           </Link>
         </div>
 
-        {savedEvents.length === 0 ? (
+        {loading ? (
+          <EventListSkeleton count={3} />
+        ) : savedEvents.length === 0 ? (
           <div className="p-8 text-center bg-white rounded-xl border border-dashed border-[#E5E1D8] text-xs text-[#5F635D]">
             No saved events yet. Browse events in{' '}
             <Link to="/discover" className="text-[#1E3F35] font-semibold underline">
