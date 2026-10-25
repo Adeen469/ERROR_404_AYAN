@@ -14,6 +14,18 @@ export function DashboardPage() {
   const [savedEvents, setSavedEvents] = useState<EventItem[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // Keep the dashboard in sync if the stored user changes after mount
+  // (e.g. a sign-in in another tab, or a storage change outside React).
+  useEffect(() => {
+    const unsubscribe = authService.subscribe((u) => setUser(u));
+    const onStorage = () => setUser(authService.getCurrentUser());
+    window.addEventListener('storage', onStorage);
+    return () => {
+      unsubscribe();
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
+
   useEffect(() => {
     async function loadData() {
       setLoading(true);

@@ -282,13 +282,24 @@ export default async function handler(req: any, res: any) {
   return res.end(
     htmlPage(
       "Signing you in…",
-      `<p>Signing you in…</p>
+      `<p id="status">Signing you in…</p>
       <script>
+        var profile = ${profileJson};
+        var saved = false;
         try {
-          localStorage.setItem('locora_current_user', ${profileJson});
+          localStorage.setItem('locora_current_user', JSON.stringify(profile));
           localStorage.setItem('locora_auth_token', ${tokenJson});
-        } catch (e) {}
-        window.location.replace(${escapeForScript(JSON.stringify(returnTo))});
+          saved = localStorage.getItem('locora_current_user') !== null;
+        } catch (e) { saved = false; }
+        var status = document.getElementById('status');
+        if (saved) {
+          status.textContent = 'Signed in as ' + (profile.name || 'you') + ' — taking you to your dashboard…';
+          setTimeout(function () {
+            window.location.replace(${escapeForScript(JSON.stringify(returnTo))});
+          }, 900);
+        } else {
+          status.textContent = 'Could not save your sign-in in this browser (site storage appears blocked). Please allow storage for this site and try again, or use the demo profile on the sign-in page.';
+        }
       </script>
       <noscript><p>JavaScript is required to complete sign-in. <a href="/login">Back to sign in</a></p></noscript>`,
     ),

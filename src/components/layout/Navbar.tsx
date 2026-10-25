@@ -19,6 +19,24 @@ export function Navbar() {
     return () => unsubscribe();
   }, []);
 
+  // Re-read the stored user on every route change, and when another tab
+  // changes storage. Without this, the navbar can stay stuck showing
+  // "Sign In" (or a stale user) after a sign-in that happened outside
+  // React's own notify() path, until a full page reload.
+  useEffect(() => {
+    setCurrentUser(authService.getCurrentUser());
+  }, [location.pathname]);
+
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === null || e.key === 'locora_current_user') {
+        setCurrentUser(authService.getCurrentUser());
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
   // Close mobile drawer on route change
   useEffect(() => {
     setMobileMenuOpen(false);
