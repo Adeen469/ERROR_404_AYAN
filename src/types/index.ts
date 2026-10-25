@@ -14,7 +14,7 @@ export type EventCategory =
 
 export type EventStatus = 'published' | 'draft' | 'cancelled' | 'completed';
 
-export type RegistrationStatus = 'confirmed' | 'waitlist' | 'cancelled';
+export type RegistrationStatus = 'confirmed' | 'waitlist' | 'cancelled' | 'pending' | 'rejected';
 
 export interface Organizer {
   id: string;
@@ -52,6 +52,10 @@ export interface EventItem {
   // this field and fall back to their organizer's email for ownership.
   createdByEmail?: string;
   price: number; // 0 for free
+  // Organizer's UPI ID for manual-approval payments on paid events
+  // (shown to attendees at registration). Optional: without it, attendees
+  // are told to pay the organizer directly and submit their UTR.
+  upiId?: string;
   capacity: number;
   registeredCount: number;
   status: EventStatus;
@@ -72,6 +76,10 @@ export interface AttendeeRegistration {
   registeredAt: string;
   ticketCode: string;
   checkedIn: boolean;
+  // Manual-approval payments: the 12-digit UPI reference the attendee
+  // submitted with a paid registration. Empty until approval, when the
+  // ticket code is issued. Only present on paid registrations.
+  utr?: string;
 }
 
 export interface UserProfile {

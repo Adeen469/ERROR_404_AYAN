@@ -269,6 +269,7 @@ export default async function handler(req: any, res: any) {
         country: p.country || undefined,
         createdByEmail: p.createdByEmail || undefined,
         price: Number(p.price) || 0,
+        upiId: p.upiId || undefined,
         capacity: Number(p.capacity) || 50,
         registeredCount: Number(p.registeredCount) || 0,
         status: p.status || "published",

@@ -324,6 +324,7 @@ export const eventsService = {
       country: payload.country,
       createdByEmail: payload.createdByEmail,
       price: Number(payload.price) || 0,
+      upiId: payload.upiId || undefined,
       capacity: Number(payload.capacity) || 50,
       registeredCount: 0,
       status: 'published',
