@@ -1,8 +1,16 @@
 # Google Sign-In / Sign-Up — Custom OAuth Setup
 
-Locora now uses a custom, server-side Google OAuth flow (not Firebase
-`signInWithPopup`) for the "Continue with Google" buttons on `/login` and
-`/signup`.
+Locora now uses a custom, server-side Google OAuth flow for the
+"Continue with Google" buttons on `/login` and `/signup`.
+
+Firebase Auth has been removed entirely from this repo: `src/lib/firebase.ts`,
+`firebase-applet-config.json`, `firebase-blueprint.json`, `firestore.rules`,
+and the `firebase` / `firebase-admin` dependencies are gone, and no code
+imports Firebase any more. Google is now the only third-party auth provider
+in the live app. The email/password forms are unchanged — they use the
+app's own Express `/api/auth/*` routes (locally) / demo mode, not Firebase.
+If you ever need the deleted Firebase files back, they are still in
+`main`'s history.
 
 ## How it works
 
