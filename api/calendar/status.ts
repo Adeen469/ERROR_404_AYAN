@@ -64,6 +64,17 @@ export default async function handler(req: any, res: any) {
       );
       const rows = await rowRes.json().catch(() => null);
       if (!rowRes.ok || !Array.isArray(rows)) {
+        // Distinguish the one expected pre-setup failure from a real
+        // backend error: Supabase answers PGRST205 when the
+        // calendar_connections table has not been created yet (setup
+        // step 3). Saying so beats a generic error when diagnosing.
+        if (rows && (rows as any).code === "PGRST205") {
+          return sendJson(res, 503, {
+            connected: false,
+            message:
+              "calendar_connections table has not been created yet in Supabase. See CALENDAR_SETUP.md step 3.",
+          });
+        }
         return sendJson(res, 502, { message: "Could not check calendar connection" });
       }
       if (rows.length === 0) return sendJson(res, 200, { connected: false, google_email: null });
