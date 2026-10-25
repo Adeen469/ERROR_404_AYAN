@@ -208,7 +208,15 @@ export const eventsService = {
     const current = await this.getEventById(eventId);
     if (!current) return [];
 
-    const all = getStoredEvents();
+    // Use the shared list when it is available (getEvents already falls
+    // back to local storage if the shared API is not configured), so
+    // related events are not limited to this browser's local copy.
+    let all: EventItem[];
+    try {
+      all = (await this.getEvents({}, 1, 100)).data;
+    } catch {
+      all = getStoredEvents();
+    }
     return all
       .filter((e) => e.id !== eventId && (e.category === current.category || e.neighborhood === current.neighborhood))
       .slice(0, limit);
@@ -286,8 +294,12 @@ export const eventsService = {
 
   async deleteEvent(id: string): Promise<boolean> {
     if (!isDemoMode()) {
-      await apiClient.delete(`/events/${id}`);
-      return true;
+      try {
+        await apiClient.delete(`/events/${id}`);
+        return true;
+      } catch (err) {
+        console.warn('Backend API delete event unavailable, falling back to local events store:', err);
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, 150));
