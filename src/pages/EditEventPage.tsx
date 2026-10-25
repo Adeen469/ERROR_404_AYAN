@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { ArrowLeft, Check, AlertCircle } from 'lucide-react';
 import { EventCategory, EventItem } from '../types';
-import { DEMO_CATEGORIES, DEMO_NEIGHBORHOODS } from '../mocks/demo-data';
+import { DEMO_CATEGORIES } from '../mocks/demo-data';
 import { eventsService, isEventOwner } from '../services/events-service';
 import { authService } from '../services/auth-service';
 import { isAdminEmail } from '../services/roles-service';
@@ -41,7 +41,7 @@ export function EditEventPage() {
   const [endDate, setEndDate] = useState('');
   const [venueName, setVenueName] = useState('');
   const [address, setAddress] = useState('');
-  const [neighborhood, setNeighborhood] = useState('Downtown Arts District');
+
   const [price, setPrice] = useState('0');
   const [capacity, setCapacity] = useState('50');
   const [tagsInput, setTagsInput] = useState('');
@@ -71,7 +71,6 @@ export function EditEventPage() {
           setEndDate(data.endDate.slice(0, 16));
           setVenueName(data.venueName);
           setAddress(data.address);
-          setNeighborhood(data.neighborhood);
           setPrice(String(data.price));
           setCapacity(String(data.capacity));
           setTagsInput(data.tags.join(', '));
@@ -124,7 +123,8 @@ export function EditEventPage() {
         endDate: new Date(endDate).toISOString(),
         venueName: venueName.trim(),
         address: address.trim(),
-        neighborhood,
+        // Neighborhood retired: state/city are the location now.
+        neighborhood: '',
         price: Number(price),
         capacity: Number(capacity),
         tags,
@@ -231,22 +231,6 @@ export function EditEventPage() {
               </select>
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
-                Neighborhood *
-              </label>
-              <select
-                value={neighborhood}
-                onChange={(e) => setNeighborhood(e.target.value)}
-                className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
-              >
-                {DEMO_NEIGHBORHOODS.filter((n) => n !== 'All Neighborhoods').map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
-              </select>
-            </div>
           </div>
 
           <div>

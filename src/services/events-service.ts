@@ -305,7 +305,7 @@ export const eventsService = {
       endDate: payload.endDate || new Date(Date.now() + 86400000 * 7 + 7200000).toISOString(),
       venueName: payload.venueName || 'Community Hall',
       address: payload.address || '100 Main Street',
-      neighborhood: payload.neighborhood || 'Downtown Arts District',
+      neighborhood: payload.neighborhood || '',
       city: payload.city || 'Metro City',
       state: payload.state,
       country: payload.country,

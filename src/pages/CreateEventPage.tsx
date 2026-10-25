@@ -56,7 +56,6 @@ export function CreateEventPage() {
   const [endDate, setEndDate] = useState('2026-11-20T21:00');
   const [venueName, setVenueName] = useState('');
   const [address, setAddress] = useState('');
-  const [neighborhood, setNeighborhood] = useState('Downtown Arts District');
   // Worldwide event location (Country -> State -> City). Previously every
   // event was silently fixed to 'Metro City' with no way to change it.
   const [location, setLocation] = useState({ country: '', state: '', city: '' });
@@ -133,7 +132,8 @@ export function CreateEventPage() {
         endDate: new Date(endDate).toISOString(),
         venueName: venueName.trim(),
         address: address.trim(),
-        neighborhood,
+        // Neighborhood retired: state/city from the picker are the location now.
+        neighborhood: '',
         city: location.city.trim() || 'Metro City',
         state: location.state.trim() || undefined,
         country: location.country.trim() || undefined,
@@ -381,18 +381,6 @@ export function CreateEventPage() {
               )}
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
-                Neighborhood / Area
-              </label>
-              <input
-                type="text"
-                value={neighborhood}
-                onChange={(e) => setNeighborhood(e.target.value)}
-                placeholder="e.g. Downtown Arts District"
-                className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
-              />
-            </div>
           </div>
 
           <div>

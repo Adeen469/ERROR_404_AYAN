@@ -109,7 +109,10 @@ export function EventCard({ event, isRegistered = false, onBookmarkChange }: Eve
         <div className="pt-3 border-t border-[#EBE7DF] flex items-center justify-between text-xs text-[#5F635D]">
           <div className="flex items-center gap-1.5 truncate max-w-[65%]">
             <MapPin className="w-3.5 h-3.5 shrink-0 text-[#8C887E]" />
-            <span className="truncate">{event.neighborhood}</span>
+            <span className="truncate">
+              {[event.state, event.city].filter(Boolean).join(', ') ||
+                event.neighborhood}
+            </span>
           </div>
 
           <div className="flex items-center gap-1 shrink-0 font-medium tabular-nums text-[#1E2320]">
