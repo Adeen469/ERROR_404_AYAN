@@ -1,6 +1,33 @@
 import { EventFilterOptions, EventItem, PaginatedResponse } from '../types';
 import { DEMO_EVENTS, DEMO_ORGANIZERS } from '../mocks/demo-data';
 import { apiClient, isDemoMode } from './api-client';
+import { authService } from './auth-service';
+
+// Ownership rule for event management. Admins may manage any event.
+// Otherwise the creator's email (createdByEmail, stamped at creation)
+// must match the signed-in user's email. Events created before
+// createdByEmail existed fall back to the organizer's email, so legacy
+// events are still owned by whoever their organizer record names.
+// This is enforced in the app only: the shared API has no session auth,
+// so it cannot verify who is calling it.
+export function isEventOwner(
+  event: EventItem,
+  userEmail: string | undefined | null,
+  isAdmin = false,
+): boolean {
+  if (isAdmin) return true;
+  if (!userEmail) return false;
+  const email = userEmail.trim().toLowerCase();
+  if (event.createdByEmail) {
+    return event.createdByEmail.trim().toLowerCase() === email;
+  }
+  return (event.organizer?.email || '').trim().toLowerCase() === email;
+}
+
+export interface OwnershipOptions {
+  ownerEmail?: string;
+  isAdmin?: boolean;
+}
 
 // Cover images live in src/assets/images. They must be imported so Vite
 // bundles them into dist/ for production. A plain src/ URL
@@ -241,9 +268,17 @@ export const eventsService = {
   },
 
   async createEvent(eventPayload: Partial<EventItem>): Promise<EventItem> {
+    // Stamp the creator before either path, so the shared event and the
+    // local copy both carry the ownership key. The Create page already
+    // passes createdByEmail; this is the fallback for any other caller.
+    const payload: Partial<EventItem> = {
+      ...eventPayload,
+      createdByEmail:
+        eventPayload.createdByEmail || authService.getCurrentUser()?.email,
+    };
     if (!isDemoMode()) {
       try {
-        return await apiClient.post<EventItem>('/events', eventPayload);
+        return await apiClient.post<EventItem>('/events', payload);
       } catch (err) {
         console.warn('Backend API /events post unavailable, falling back to local events store:', err);
       }
@@ -253,31 +288,34 @@ export const eventsService = {
     const events = getStoredEvents();
 
     const newId = `evt-${Date.now()}`;
-    const slug = (eventPayload.title || 'event')
+    const slug = (payload.title || 'event')
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/(^-|-$)+/g, '');
 
     const newEvent: EventItem = {
       id: newId,
-      title: eventPayload.title || 'Untitled Community Event',
+      title: payload.title || 'Untitled Community Event',
       slug,
-      summary: eventPayload.summary || eventPayload.description?.slice(0, 140) || 'Local community gathering.',
-      description: eventPayload.description || '',
-      category: eventPayload.category || 'Food & Community',
-      coverImage: eventPayload.coverImage || heroGatheringImg,
-      startDate: eventPayload.startDate || new Date(Date.now() + 86400000 * 7).toISOString(),
-      endDate: eventPayload.endDate || new Date(Date.now() + 86400000 * 7 + 7200000).toISOString(),
-      venueName: eventPayload.venueName || 'Community Hall',
-      address: eventPayload.address || '100 Main Street',
-      neighborhood: eventPayload.neighborhood || 'Downtown Arts District',
-      city: eventPayload.city || 'Metro City',
-      price: Number(eventPayload.price) || 0,
-      capacity: Number(eventPayload.capacity) || 50,
+      summary: payload.summary || payload.description?.slice(0, 140) || 'Local community gathering.',
+      description: payload.description || '',
+      category: payload.category || 'Food & Community',
+      coverImage: payload.coverImage || heroGatheringImg,
+      startDate: payload.startDate || new Date(Date.now() + 86400000 * 7).toISOString(),
+      endDate: payload.endDate || new Date(Date.now() + 86400000 * 7 + 7200000).toISOString(),
+      venueName: payload.venueName || 'Community Hall',
+      address: payload.address || '100 Main Street',
+      neighborhood: payload.neighborhood || 'Downtown Arts District',
+      city: payload.city || 'Metro City',
+      state: payload.state,
+      country: payload.country,
+      createdByEmail: payload.createdByEmail,
+      price: Number(payload.price) || 0,
+      capacity: Number(payload.capacity) || 50,
       registeredCount: 0,
       status: 'published',
-      organizer: eventPayload.organizer || DEMO_ORGANIZERS[0],
-      tags: eventPayload.tags && eventPayload.tags.length > 0 ? eventPayload.tags : ['Local', 'Community'],
+      organizer: payload.organizer || DEMO_ORGANIZERS[0],
+      tags: payload.tags && payload.tags.length > 0 ? payload.tags : ['Local', 'Community'],
       isFeatured: false,
     };
 
@@ -286,7 +324,17 @@ export const eventsService = {
     return newEvent;
   },
 
-  async updateEvent(id: string, updates: Partial<EventItem>): Promise<EventItem> {
+  async updateEvent(id: string, updates: Partial<EventItem>, opts?: OwnershipOptions): Promise<EventItem> {
+    // Ownership is opt-in: organizer pages pass opts, so only the event's
+    // owner (or an admin) can edit it. Callers that do not pass opts —
+    // notably registrations bumping registeredCount when an attendee
+    // registers — are intentionally unchecked and behave exactly as before.
+    if (opts?.ownerEmail) {
+      const existing = await this.getEventById(id);
+      if (!existing || !isEventOwner(existing, opts.ownerEmail, opts.isAdmin)) {
+        throw new Error('You can only edit your own events.');
+      }
+    }
     if (!isDemoMode()) {
       try {
         return await apiClient.patch<EventItem>('/events', updates, { id });
@@ -310,7 +358,15 @@ export const eventsService = {
     return updated;
   },
 
-  async deleteEvent(id: string): Promise<boolean> {
+  async deleteEvent(id: string, opts?: OwnershipOptions): Promise<boolean> {
+    // Same opt-in ownership rule as updateEvent: only the event's owner
+    // (or an admin) may delete it when opts are supplied.
+    if (opts?.ownerEmail) {
+      const existing = await this.getEventById(id);
+      if (!existing || !isEventOwner(existing, opts.ownerEmail, opts.isAdmin)) {
+        throw new Error('You can only delete your own events.');
+      }
+    }
     if (!isDemoMode()) {
       try {
         await apiClient.delete('/events', { id });

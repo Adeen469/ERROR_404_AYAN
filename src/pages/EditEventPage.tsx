@@ -3,7 +3,9 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import { ArrowLeft, Check, AlertCircle } from 'lucide-react';
 import { EventCategory, EventItem } from '../types';
 import { DEMO_CATEGORIES, DEMO_NEIGHBORHOODS } from '../mocks/demo-data';
-import { eventsService } from '../services/events-service';
+import { eventsService, isEventOwner } from '../services/events-service';
+import { authService } from '../services/auth-service';
+import { isAdminEmail } from '../services/roles-service';
 import { useToast } from '../components/ui/Toast';
 import { PRESET_COVER_IMAGES } from './CreateEventPage';
 
@@ -14,6 +16,21 @@ export function EditEventPage() {
 
   const [loading, setLoading] = useState(true);
   const [event, setEvent] = useState<EventItem | null>(null);
+  // True when the loaded event belongs to another organizer. The form is
+  // never rendered in that case, and the save is ownership-checked too.
+  const [notOwner, setNotOwner] = useState(false);
+
+  // Ownership for this page: the event's owner, or an admin (who may
+  // manage any event).
+  const currentUser = authService.getCurrentUser();
+  const isAdmin =
+    !!currentUser &&
+    currentUser.role === 'admin' &&
+    isAdminEmail(currentUser.email);
+  const ownershipOpts = {
+    ownerEmail: currentUser?.email,
+    isAdmin,
+  };
 
   const [title, setTitle] = useState('');
   const [summary, setSummary] = useState('');
@@ -39,6 +56,11 @@ export function EditEventPage() {
       try {
         const data = await eventsService.getEventById(eventId);
         if (data) {
+          if (!isEventOwner(data, currentUser?.email, isAdmin)) {
+            setNotOwner(true);
+            setEvent(data);
+            return;
+          }
           setEvent(data);
           setTitle(data.title);
           setSummary(data.summary);
@@ -106,7 +128,7 @@ export function EditEventPage() {
         price: Number(price),
         capacity: Number(capacity),
         tags,
-      });
+      }, ownershipOpts);
 
       toast({
         type: 'success',
@@ -134,6 +156,23 @@ export function EditEventPage() {
       <div className="max-w-md mx-auto px-4 py-20 text-center space-y-4">
         <h2 className="text-xl font-bold text-slate-900">Event Not Found</h2>
         <Link to="/organizer/events" className="text-xs font-semibold text-indigo-600 underline">
+          Return to Events
+        </Link>
+      </div>
+    );
+  }
+
+  if (notOwner) {
+    return (
+      <div className="max-w-md mx-auto px-4 py-20 text-center space-y-4">
+        <h2 className="font-editorial text-2xl font-bold text-[#1E2320]">
+          This event belongs to another organizer
+        </h2>
+        <p className="text-sm text-[#5F635D]">
+          You can only edit events you created. This event's details are
+          shown to its own organizer, not here.
+        </p>
+        <Link to="/organizer/events" className="text-xs font-semibold text-[#1E3F35] hover:underline">
           Return to Events
         </Link>
       </div>

@@ -2,7 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Search, Download, CheckCircle, Clock, XCircle, Users } from 'lucide-react';
 import { AttendeeRegistration, EventItem } from '../types';
-import { eventsService } from '../services/events-service';
+import { eventsService, isEventOwner } from '../services/events-service';
+import { authService } from '../services/auth-service';
+import { isAdminEmail } from '../services/roles-service';
 import { registrationsService } from '../services/registrations-service';
 import { formatEventDate } from '../utils/formatters';
 import { useToast } from '../components/ui/Toast';
@@ -16,6 +18,9 @@ export function AttendeesPage() {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'confirmed' | 'checked_in'>('all');
+  // True when the event belongs to another organizer. The attendee list
+  // is never loaded or shown in that case.
+  const [notOwner, setNotOwner] = useState(false);
 
   useEffect(() => {
     async function loadData() {
@@ -24,6 +29,16 @@ export function AttendeesPage() {
       try {
         const evt = await eventsService.getEventById(eventId);
         setEvent(evt);
+        if (!evt) return;
+        const currentUser = authService.getCurrentUser();
+        const isAdmin =
+          !!currentUser &&
+          currentUser.role === 'admin' &&
+          isAdminEmail(currentUser.email);
+        if (!isEventOwner(evt, currentUser?.email, isAdmin)) {
+          setNotOwner(true);
+          return;
+        }
         const list = await registrationsService.getEventAttendees(eventId);
         setAttendees(list);
       } finally {
@@ -102,6 +117,23 @@ export function AttendeesPage() {
       <div className="max-w-md mx-auto px-4 py-20 text-center space-y-4">
         <h2 className="text-xl font-bold text-slate-900">Event Not Found</h2>
         <Link to="/organizer/events" className="text-xs font-semibold text-indigo-600 underline">
+          Back to Events
+        </Link>
+      </div>
+    );
+  }
+
+  if (notOwner) {
+    return (
+      <div className="max-w-md mx-auto px-4 py-20 text-center space-y-4">
+        <h2 className="font-editorial text-2xl font-bold text-[#1E2320]">
+          This event belongs to another organizer
+        </h2>
+        <p className="text-sm text-[#5F635D]">
+          Only the event's own organizer (and admins) can view its attendee
+          list.
+        </p>
+        <Link to="/organizer/events" className="text-xs font-semibold text-[#1E3F35] hover:underline">
           Back to Events
         </Link>
       </div>

@@ -47,6 +47,10 @@ export interface EventItem {
   // create page. Older events predate this and may not carry them.
   state?: string;
   country?: string;
+  // Ownership key: the creator's email, stamped at creation. Only this
+  // user (or an admin) may edit or delete the event. Older events predate
+  // this field and fall back to their organizer's email for ownership.
+  createdByEmail?: string;
   price: number; // 0 for free
   capacity: number;
   registeredCount: number;

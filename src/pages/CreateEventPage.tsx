@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { ArrowLeft, Image, AlertCircle, Sparkles, Check } from 'lucide-react';
 import { EventCategory, EventItem } from '../types';
-import { DEMO_CATEGORIES, DEMO_ORGANIZERS } from '../mocks/demo-data';
+import { DEMO_CATEGORIES } from '../mocks/demo-data';
 import { LocationPicker } from '../components/LocationPicker';
 import { eventsService } from '../services/events-service';
 import { authService } from '../services/auth-service';
@@ -102,6 +102,19 @@ export function CreateEventPage() {
       return;
     }
 
+    // Ownership: the event is attributed to the signed-in user, not to a
+    // shared demo organizer. Without a signed-in user there is no owner,
+    // so the event cannot be created (the OrganizerGuard already blocks
+    // guests from reaching this page; this is the defensive second check).
+    if (!currentUser) {
+      toast({
+        type: 'error',
+        title: 'Sign in required',
+        description: 'Please sign in before creating an event.',
+      });
+      return;
+    }
+
     setSubmitting(true);
     try {
       const activeImage = customImageUrl.trim() ? customImageUrl.trim() : coverImage;
@@ -127,7 +140,18 @@ export function CreateEventPage() {
         price: Number(price),
         capacity: Number(capacity),
         tags,
-        organizer: DEMO_ORGANIZERS[0],
+        organizer: {
+          id: currentUser.id,
+          name: currentUser.name,
+          slug: currentUser.name.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+          avatar: currentUser.avatar,
+          bio: currentUser.bio,
+          email: currentUser.email,
+          location: currentUser.neighborhood,
+          eventsCount: 0,
+          totalAttendeesServed: 0,
+        },
+        createdByEmail: currentUser.email,
       });
 
       toast({

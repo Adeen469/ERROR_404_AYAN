@@ -2,7 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { PlusCircle, Edit, Users, Trash2, Eye, EyeOff, ArrowLeft } from 'lucide-react';
 import { EventItem } from '../types';
-import { eventsService } from '../services/events-service';
+import { eventsService, isEventOwner } from '../services/events-service';
+import { authService } from '../services/auth-service';
+import { isAdminEmail } from '../services/roles-service';
 import { formatEventDate, formatPrice } from '../utils/formatters';
 import { useToast } from '../components/ui/Toast';
 import { ConfirmDialog } from '../components/ui/Modal';
@@ -16,11 +18,26 @@ export function OrganizerEventsPage() {
   const [deleteTarget, setDeleteTarget] = useState<EventItem | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  // Ownership for this list: an organizer sees only their own events;
+  // admins see everything. The same rule is re-checked by the service on
+  // every edit/delete, so a filtered list alone is not the protection.
+  const currentUser = authService.getCurrentUser();
+  const isAdmin =
+    !!currentUser &&
+    currentUser.role === 'admin' &&
+    isAdminEmail(currentUser.email);
+  const ownershipOpts = {
+    ownerEmail: currentUser?.email,
+    isAdmin,
+  };
+
   const loadEvents = async () => {
     setLoading(true);
     try {
       const { data } = await eventsService.getEvents({}, 1, 100);
-      setEvents(data);
+      setEvents(
+        data.filter((e) => isEventOwner(e, currentUser?.email, isAdmin)),
+      );
     } finally {
       setLoading(false);
     }
@@ -28,12 +45,13 @@ export function OrganizerEventsPage() {
 
   useEffect(() => {
     loadEvents();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleTogglePublish = async (event: EventItem) => {
     const newStatus = event.status === 'published' ? 'draft' : 'published';
     try {
-      await eventsService.updateEvent(event.id, { status: newStatus });
+      await eventsService.updateEvent(event.id, { status: newStatus }, ownershipOpts);
       setEvents((prev) =>
         prev.map((e) => (e.id === event.id ? { ...e, status: newStatus } : e))
       );
@@ -50,7 +68,7 @@ export function OrganizerEventsPage() {
     if (!deleteTarget) return;
     setDeleting(true);
     try {
-      await eventsService.deleteEvent(deleteTarget.id);
+      await eventsService.deleteEvent(deleteTarget.id, ownershipOpts);
       setEvents((prev) => prev.filter((e) => e.id !== deleteTarget.id));
       setDeleteTarget(null);
       toast({

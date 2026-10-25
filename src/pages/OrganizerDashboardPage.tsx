@@ -2,9 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { PlusCircle, Calendar, Users, Eye, BarChart2, Edit, ChevronRight, CheckCircle2 } from 'lucide-react';
 import { EventItem, Organizer } from '../types';
-import { eventsService } from '../services/events-service';
+import { eventsService, isEventOwner } from '../services/events-service';
 import { organizersService, OrganizerStats } from '../services/organizers-service';
 import { authService } from '../services/auth-service';
+import { isAdminEmail } from '../services/roles-service';
 import { formatEventDate, formatPrice } from '../utils/formatters';
 
 export function OrganizerDashboardPage() {
@@ -23,13 +24,21 @@ export function OrganizerDashboardPage() {
       setLoading(true);
       try {
         const { data } = await eventsService.getEvents({}, 1, 50);
-        // For demo, show events where organizer is org-1 or current user
-        setEvents(data);
+        // An organizer's console shows only their own events; admins see
+        // everything. Previously this listed every event in the system.
+        const isAdmin =
+          !!currentUser &&
+          currentUser.role === 'admin' &&
+          isAdminEmail(currentUser.email);
+        const owned = data.filter((e) =>
+          isEventOwner(e, currentUser?.email, isAdmin),
+        );
+        setEvents(owned);
 
-        const totalRegs = data.reduce((acc, curr) => acc + (curr.registeredCount || 0), 0);
+        const totalRegs = owned.reduce((acc, curr) => acc + (curr.registeredCount || 0), 0);
         setStats({
-          totalEvents: data.length,
-          publishedCount: data.filter((e) => e.status === 'published').length,
+          totalEvents: owned.length,
+          publishedCount: owned.filter((e) => e.status === 'published').length,
           totalRegistrations: totalRegs,
           activeCommunities: 1,
         });
@@ -38,6 +47,7 @@ export function OrganizerDashboardPage() {
       }
     }
     loadOrganizerData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
