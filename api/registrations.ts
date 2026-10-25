@@ -164,6 +164,55 @@ async function loadEvent(eventId: string): Promise<any | null> {
 // without sending. The recipient is the STORED event's organizer email
 // (loaded server-side above), never an address the caller supplied, so
 // this cannot be used to relay mail to arbitrary addresses.
+// Locora email theme: the website's own palette — warm parchment page,
+// white card, deep forest headings, terracotta accent, serif wordmark.
+// Plain-text versions stay unchanged; only the HTML part is themed.
+// All styles are inline (email clients strip <style> blocks). The logo
+// loads from the live site; if an inbox blocks images, the "Locora"
+// wordmark beside it still reads.
+const SITE_URL = "https://locora-hyperlocal.vercel.app";
+
+function esc(s: string): string {
+  return (s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function emailLayout(title: string, inner: string): string {
+  return (
+    `<div style="background:#FAF8F5;padding:24px 12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">` +
+    `<div style="max-width:600px;margin:0 auto;background:#ffffff;border:1px solid #E7E3DB;border-radius:16px;overflow:hidden;">` +
+    `<div style="height:4px;background:#C25E00;"></div>` +
+    `<div style="padding:32px;">` +
+    `<div style="margin-bottom:24px;">` +
+    `<img src="${SITE_URL}/locora-logo.png" alt="Locora" width="36" height="36" style="vertical-align:middle;border-radius:8px;" />` +
+    `<span style="font-family:Georgia,'Times New Roman',serif;font-size:28px;font-weight:700;color:#1E3F35;vertical-align:middle;margin-left:10px;">Locora</span>` +
+    `</div>` +
+    `<h1 style="font-family:Georgia,'Times New Roman',serif;font-size:22px;line-height:1.3;color:#1E3F35;margin:0 0 16px;">${title}</h1>` +
+    inner +
+    `<div style="margin-top:24px;padding-top:16px;border-top:1px solid #E7E3DB;font-size:12px;line-height:1.5;color:#5F635D;">Locora · Hyperlocal Event Discovery &amp; Community Engagement<br />This is an automated email — please don't reply.</div>` +
+    `</div></div></div>`
+  );
+}
+
+function bodyText(s: string): string {
+  return `<p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#1E2320;">${s}</p>`;
+}
+
+function detailRow(label: string, value: string): string {
+  return `<p style="margin:0 0 10px;font-size:15px;line-height:1.6;color:#1E2320;"><span style="color:#5F635D;">${label}:</span> ${value}</p>`;
+}
+
+function primaryButton(label: string, href: string): string {
+  return `<p style="margin:20px 0 0;"><a href="${href}" style="display:inline-block;background:#1E3F35;color:#ffffff;padding:12px 24px;border-radius:999px;text-decoration:none;font-weight:600;font-size:15px;">${label}</a></p>`;
+}
+
+function ticketBox(code: string): string {
+  return `<div style="background:#FAF8F5;border:1px solid #E7E3DB;border-radius:12px;padding:16px;text-align:center;margin:20px 0;"><div style="font-size:12px;letter-spacing:1px;text-transform:uppercase;color:#5F635D;margin-bottom:6px;">Your ticket code</div><div style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:20px;letter-spacing:2px;font-weight:700;color:#1E3F35;">${code}</div></div>`;
+}
+
 export function buildApprovalEmail(reg: any, event: any): { to: string; subject: string; text: string; html: string } | null {
   const to = event?.organizer?.email || event?.createdByEmail || '';
   if (!to) return null;
@@ -177,11 +226,14 @@ export function buildApprovalEmail(reg: any, event: any): { to: string; subject:
     `Submitted: ${reg.registeredAt || ''}`,
     `Verify the payment in your UPI app, then approve to issue their pass (or reject to release the spot): ${link}`,
   ].join('\n\n');
-  const html = [
-    `<p><strong>${reg.userName || 'An attendee'}</strong> (${reg.userEmail || ''}) paid <strong>${amount}</strong> for "${title}" and submitted a payment for approval.</p>`,
-    `<p>UTR: <strong>${reg.utr || '—'}</strong><br/>Submitted: ${reg.registeredAt || ''}</p>`,
-    `<p>Verify the payment in your UPI app, then <a href="${link}">approve to issue their pass</a> (or reject to release the spot).</p>`,
-  ].join('\n');
+  const html = emailLayout(
+    "New payment approval needed",
+    bodyText(`<strong>${esc(reg.userName || 'An attendee')}</strong> (${esc(reg.userEmail || '')}) paid <strong>${esc(amount)}</strong> for "${esc(title)}" and submitted a payment for approval.`) +
+      detailRow("UTR", `<strong>${esc(reg.utr || '—')}</strong>`) +
+      detailRow("Submitted", esc(reg.registeredAt || '')) +
+      bodyText(`Verify the payment in your UPI app, then approve to issue their pass — or reject to release the spot.`) +
+      primaryButton("Review in Attendees", link),
+  );
   return { to, subject, text, html };
 }
 
@@ -217,7 +269,15 @@ export function buildAttendeeConfirmationEmail(reg: any, event: any): { to: stri
     `Show this code at the event. View the event here: ${link}`,
   ].filter(Boolean);
   const text = lines.join('\n\n');
-  const html = lines.map((l) => `<p>${l}</p>`).join('\n');
+  const html = emailLayout(
+    "You're registered",
+    bodyText(`You're registered for "${esc(title)}".`) +
+      ticketBox(esc(reg.ticketCode)) +
+      (venue ? detailRow("Venue", esc(venue)) : '') +
+      (when ? detailRow("When", esc(when)) : '') +
+      bodyText(`Show this code at the event.`) +
+      primaryButton("View event", link),
+  );
   return { to, subject, text, html };
 }
 
@@ -238,7 +298,13 @@ export function buildAttendeePendingEmail(reg: any, event: any): { to: string; s
     `The organizer will verify the payment and approve it, then your ticket code will arrive by email. You can also check the status on the event page: ${link}`,
   ].filter(Boolean);
   const text = lines.join('\n\n');
-  const html = lines.map((l) => `<p>${l}</p>`).join('\n');
+  const html = emailLayout(
+    "Payment received",
+    bodyText(`We received your payment of <strong>${esc(amount)}</strong> for "${esc(title)}".`) +
+      (reg?.utr ? detailRow("UTR", `<strong>${esc(reg.utr)}</strong>`) : '') +
+      bodyText(`The organizer will verify the payment and approve it, then your ticket code will arrive by email.`) +
+      primaryButton("View event", link),
+  );
   return { to, subject, text, html };
 }
 

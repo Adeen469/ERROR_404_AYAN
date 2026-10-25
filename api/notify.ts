@@ -63,6 +63,43 @@ function cleanName(name: string): string {
   return (name || "").replace(/[\r\n]+/g, " ").trim().slice(0, 100);
 }
 
+// Locora email theme: the website's own palette — warm parchment page,
+// white card, deep forest headings, terracotta accent, serif wordmark.
+// Plain-text versions stay unchanged; only the HTML part is themed.
+// All styles are inline (email clients strip <style> blocks). The logo
+// loads from the live site; if an inbox blocks images, the "Locora"
+// wordmark beside it still reads.
+const SITE_URL = "https://locora-hyperlocal.vercel.app";
+
+function emailLayout(title: string, inner: string): string {
+  return (
+    `<div style="background:#FAF8F5;padding:24px 12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">` +
+    `<div style="max-width:600px;margin:0 auto;background:#ffffff;border:1px solid #E7E3DB;border-radius:16px;overflow:hidden;">` +
+    `<div style="height:4px;background:#C25E00;"></div>` +
+    `<div style="padding:32px;">` +
+    `<div style="margin-bottom:24px;">` +
+    `<img src="${SITE_URL}/locora-logo.png" alt="Locora" width="36" height="36" style="vertical-align:middle;border-radius:8px;" />` +
+    `<span style="font-family:Georgia,'Times New Roman',serif;font-size:28px;font-weight:700;color:#1E3F35;vertical-align:middle;margin-left:10px;">Locora</span>` +
+    `</div>` +
+    `<h1 style="font-family:Georgia,'Times New Roman',serif;font-size:22px;line-height:1.3;color:#1E3F35;margin:0 0 16px;">${title}</h1>` +
+    inner +
+    `<div style="margin-top:24px;padding-top:16px;border-top:1px solid #E7E3DB;font-size:12px;line-height:1.5;color:#5F635D;">Locora · Hyperlocal Event Discovery &amp; Community Engagement<br />This is an automated email — please don't reply.</div>` +
+    `</div></div></div>`
+  );
+}
+
+function bodyText(s: string): string {
+  return `<p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#1E2320;">${s}</p>`;
+}
+
+function detailRow(label: string, value: string): string {
+  return `<p style="margin:0 0 10px;font-size:15px;line-height:1.6;color:#1E2320;"><span style="color:#5F635D;">${label}:</span> ${value}</p>`;
+}
+
+function primaryButton(label: string, href: string): string {
+  return `<p style="margin:20px 0 0;"><a href="${href}" style="display:inline-block;background:#1E3F35;color:#ffffff;padding:12px 24px;border-radius:999px;text-decoration:none;font-weight:600;font-size:15px;">${label}</a></p>`;
+}
+
 function supabaseHeaders(): Record<string, string> {
   const key = getEnv("SUPABASE_SERVICE_ROLE_KEY");
   return {
@@ -181,21 +218,36 @@ export function buildWelcomeEmail(name: string, email: string): { to: string; su
     `Welcome to Locora! Your account (${email}) is ready.`,
     `Discover events near you: https://locora-hyperlocal.vercel.app/discover`,
   ].join("\n\n");
-  const html = `<p>Hi ${display},</p><p>Welcome to Locora! Your account (${esc(email)}) is ready.</p><p><a href="https://locora-hyperlocal.vercel.app/discover">Discover events near you</a></p>`;
+  const html = emailLayout(
+    "Welcome to Locora",
+    bodyText(`Hi ${display},`) +
+      bodyText(`Welcome to Locora! Your account (${esc(email)}) is ready.`) +
+      primaryButton("Discover events near you", `${SITE_URL}/discover`),
+  );
   return { to: email, subject: "Welcome to Locora", text, html };
 }
 
 export function buildLoginEmail(email: string, device: string, location: string, ip: string): { to: string; subject: string; text: string; html: string } {
+  const when = `${istNow()} (IST)`;
+  const loc = location || "Unknown location";
   const lines = [
     `There was a new sign-in to your Locora account (${email}).`,
-    `When: ${istNow()} (IST)`,
+    `When: ${when}`,
     `Device: ${device}`,
-    `Location: ${location || "Unknown location"}`,
+    `Location: ${loc}`,
     ip ? `IP address: ${ip}` : "",
     `If this wasn't you, change your password right away.`,
   ].filter(Boolean);
   const text = lines.join("\n\n");
-  const html = lines.map((l) => `<p>${esc(l)}</p>`).join("\n");
+  const html = emailLayout(
+    "New sign-in to your account",
+    bodyText(`There was a new sign-in to your Locora account (${esc(email)}).`) +
+      detailRow("When", esc(when)) +
+      detailRow("Device", esc(device)) +
+      detailRow("Location", esc(loc)) +
+      (ip ? detailRow("IP address", esc(ip)) : "") +
+      `<div style="background:#FAF8F5;border:1px solid #E7E3DB;border-radius:12px;padding:14px 16px;margin-top:16px;font-size:15px;line-height:1.6;color:#1E2320;font-weight:600;">If this wasn't you, change your password right away.</div>`,
+  );
   return { to: email, subject: "New sign-in to your Locora account", text, html };
 }
 
