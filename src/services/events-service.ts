@@ -14,6 +14,11 @@ import morningYogaImg from '../assets/images/event_morning_yoga_1792850962615.jp
 
 const STORAGE_KEY = 'locora_events_db';
 
+// Sample events removed from the app. Any copy already saved in a
+// returning visitor's browser is filtered out here, so Discover does
+// not keep showing them after the code change.
+const SAMPLE_EVENT_IDS = new Set(['evt-1', 'evt-2', 'evt-3', 'evt-4', 'evt-5', 'evt-6', 'evt-7', 'evt-8']);
+
 // Map an old cover-image filename to its Vite-bundled URL.
 //
 // Browsers that visited the site before the image fix have events saved
@@ -54,14 +59,18 @@ function getStoredEvents(): EventItem[] {
       return event;
     });
     // Persist the migration once, so the next load is already clean.
+    const withoutSamples = migrated.filter((event: EventItem) => !SAMPLE_EVENT_IDS.has(event.id));
+    if (withoutSamples.length !== migrated.length) {
+      changed = true;
+    }
     if (changed) {
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(withoutSamples));
       } catch {
-        // If storage is full/blocked, still return the migrated list.
+        // If storage is full/blocked, still return the filtered list.
       }
     }
-    return migrated;
+    return withoutSamples;
   } catch {
     return DEMO_EVENTS;
   }

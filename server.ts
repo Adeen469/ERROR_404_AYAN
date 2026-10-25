@@ -58,173 +58,9 @@ function writeJsonFile<T>(filePath: string, data: T): void {
 }
 
 // Prepopulate initial events if file is empty
-const INITIAL_SEED_EVENTS = [
-  {
-    id: 'evt-1',
-    title: 'Metro Civic Hackathon: Urban Transit & Mobility Solutions',
-    slug: 'metro-civic-hackathon-urban-transit',
-    summary: 'A 24-hour community hackathon designing open-source tools for pedestrian safety and bus reliability.',
-    description: 'Join developers, civic designers, and transit advocates for an intensive collaborative weekend building public tools for our city transit system. Mentors will be on-site to assist with geospatial APIs, accessibility standards, and rapid prototyping.',
-    category: 'Technology & Hackathons',
-    coverImage: '/assets/images/event_tech_hackathon_1792850960780.jpg',
-    startDate: '2026-11-14T09:00:00Z',
-    endDate: '2026-11-15T17:00:00Z',
-    venueName: 'Urban Innovation Lab — Floor 4',
-    address: '420 Technology Way',
-    neighborhood: 'Downtown Arts District',
-    city: 'Metro City',
-    price: 0,
-    capacity: 80,
-    registeredCount: 64,
-    status: 'published',
-    tags: ['Coding', 'Open Data', 'Civic Tech', 'Hackathon'],
-    isFeatured: true,
-    ageRestriction: 'All Ages',
-    organizer: {
-      id: 'org-1',
-      name: 'Metro Civic Tech Collective',
-      slug: 'metro-civic-tech',
-      avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
-      bio: 'Fostering grassroots civic innovation, open data workshops, and ethical technology hackathons for our urban community.',
-      email: 'organizers@civictech.demo',
-      location: 'Downtown Arts District',
-      eventsCount: 14,
-      totalAttendeesServed: 1240,
-    },
-  },
-  {
-    id: 'evt-2',
-    title: 'Silverlake Weekend Harvest & Artisan Baker Market',
-    slug: 'silverlake-weekend-harvest-artisan-market',
-    summary: 'Fresh regional produce, sourdough breads, heirloom flowers, and local preserves at the open-air square.',
-    description: 'Celebrate our regional agricultural bounty at the Silverlake Commons outdoor pavilion. Meet over 30 family farms, micro-bakers, and organic honey producers.',
-    category: 'Food & Community',
-    coverImage: '/assets/images/event_farmers_market_1792850961672.jpg',
-    startDate: '2026-11-08T08:30:00Z',
-    endDate: '2026-11-08T14:00:00Z',
-    venueName: 'Silverlake Commons Central Plaza',
-    address: '150 Orchard Avenue',
-    neighborhood: 'Silverlake Commons',
-    city: 'Metro City',
-    price: 0,
-    capacity: 350,
-    registeredCount: 218,
-    status: 'published',
-    tags: ['Farmers Market', 'Local Food', 'Artisan Bread'],
-    isFeatured: true,
-    ageRestriction: 'All Ages',
-    organizer: {
-      id: 'org-2',
-      name: 'Green Roots Urban Agriculture',
-      slug: 'green-roots-urban-ag',
-      avatar: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=150&auto=format&fit=crop&q=80',
-      bio: 'Connecting local growers, artisan bakers, and urban gardeners.',
-      email: 'hello@greenroots.demo',
-      location: 'Silverlake Commons',
-      eventsCount: 28,
-      totalAttendeesServed: 3450,
-    },
-  },
-  {
-    id: 'evt-3',
-    title: 'Courtyard Garden Acoustic Sessions: Indie Songwriter Showcase',
-    slug: 'courtyard-garden-acoustic-sessions',
-    summary: 'An intimate evening of live acoustic folk and storytelling in the historic brick courtyard under lantern lights.',
-    description: 'Experience the sound of four emerging independent songwriters performing unplugged in our ivy-covered courtyard garden. Seating on rustic benches.',
-    category: 'Live Music & Culture',
-    coverImage: '/assets/images/event_acoustic_music_1792850962324.jpg',
-    startDate: '2026-11-12T19:00:00Z',
-    endDate: '2026-11-12T21:30:00Z',
-    venueName: 'The Old Mill Courtyard Garden',
-    address: '88 Millstone Lane',
-    neighborhood: 'Historic Old Town',
-    city: 'Metro City',
-    price: 15,
-    capacity: 65,
-    registeredCount: 52,
-    status: 'published',
-    tags: ['Live Music', 'Acoustic', 'Folk', 'Indie'],
-    isFeatured: true,
-    ageRestriction: '16+',
-    organizer: {
-      id: 'org-3',
-      name: 'Courtyard Sessions Live',
-      slug: 'courtyard-sessions-live',
-      avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80',
-      bio: 'Independent live acoustic performances and intimate musical evenings.',
-      email: 'booking@courtyardsessions.demo',
-      location: 'Historic Old Town',
-      eventsCount: 19,
-      totalAttendeesServed: 1820,
-    },
-  },
-  {
-    id: 'evt-4',
-    title: 'Sunrise Waterfront Vinyasa Yoga & Breathwork',
-    slug: 'sunrise-waterfront-vinyasa-yoga',
-    summary: 'An energizing 75-minute outdoor yoga flow with panoramic river views, open to all levels.',
-    description: 'Greet the sunrise over the harbor with a mindful, grounding Vinyasa flow led by certified instructor Maya Lin. Alignment, breath awareness, and gentle mobility.',
-    category: 'Fitness & Outdoors',
-    coverImage: '/assets/images/event_morning_yoga_1792850962615.jpg',
-    startDate: '2026-11-07T07:15:00Z',
-    endDate: '2026-11-07T08:30:00Z',
-    venueName: 'Harbor Green Riverfront Lawn',
-    address: '300 Promenade Boulevard',
-    neighborhood: 'Waterfront Green',
-    city: 'Metro City',
-    price: 0,
-    capacity: 50,
-    registeredCount: 41,
-    status: 'published',
-    tags: ['Yoga', 'Mindfulness', 'Outdoors', 'Wellness'],
-    isFeatured: false,
-    ageRestriction: 'All Ages',
-    organizer: {
-      id: 'org-4',
-      name: 'City Parks Wellness Initiative',
-      slug: 'city-parks-wellness',
-      avatar: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=150&auto=format&fit=crop&q=80',
-      bio: 'Promoting free and accessible community yoga and outdoor wellness.',
-      email: 'info@citywellness.demo',
-      location: 'Waterfront Green',
-      eventsCount: 32,
-      totalAttendeesServed: 4200,
-    },
-  },
-  {
-    id: 'evt-5',
-    title: 'Lantern Night Festival & Local Food Truck Gathering',
-    slug: 'lantern-night-festival-food-trucks',
-    summary: 'A vibrant evening block party featuring 15 culinary trucks, craft market stalls, and light installations.',
-    description: 'A neighborhood evening celebration bringing together our culinary favorites, artisan jewelers, printmakers, and live DJ sets in the historic cobblestone square.',
-    category: 'Food & Community',
-    coverImage: '/assets/images/hero_neighborhood_gathering_1792850960020.jpg',
-    startDate: '2026-11-20T17:30:00Z',
-    endDate: '2026-11-20T22:30:00Z',
-    venueName: 'The Historic Cobblestone Market Square',
-    address: '12 Wharf Street',
-    neighborhood: 'Historic Old Town',
-    city: 'Metro City',
-    price: 0,
-    capacity: 500,
-    registeredCount: 380,
-    status: 'published',
-    tags: ['Night Market', 'Food Trucks', 'Community', 'Crafts'],
-    isFeatured: true,
-    ageRestriction: 'All Ages',
-    organizer: {
-      id: 'org-2',
-      name: 'Green Roots Urban Agriculture',
-      slug: 'green-roots-urban-ag',
-      avatar: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=150&auto=format&fit=crop&q=80',
-      bio: 'Connecting local growers, artisan bakers, and urban gardeners.',
-      email: 'hello@greenroots.demo',
-      location: 'Silverlake Commons',
-      eventsCount: 28,
-      totalAttendeesServed: 3450,
-    },
-  },
-];
+const INITIAL_SEED_EVENTS: any[] = [];
+
+// Sample events were removed: the local server also starts with no events.
 
 if (!fs.existsSync(EVENTS_FILE)) {
   writeJsonFile(EVENTS_FILE, INITIAL_SEED_EVENTS);
@@ -636,14 +472,14 @@ app.get('/api/events/:id/attendees', (req: Request, res: Response) => {
 
 // 10. Saved Bookmarks
 app.get('/api/me/saved-events', (_req: Request, res: Response) => {
-  const savedIds = readJsonFile<string[]>(SAVED_FILE, ['evt-1', 'evt-3']);
+  const savedIds = readJsonFile<string[]>(SAVED_FILE, []);
   const events = readJsonFile<any[]>(EVENTS_FILE, INITIAL_SEED_EVENTS);
   const savedEvents = events.filter((e) => savedIds.includes(e.id));
   res.json(savedEvents);
 });
 
 app.post('/api/me/saved-events/:id', (req: Request, res: Response) => {
-  let savedIds = readJsonFile<string[]>(SAVED_FILE, ['evt-1', 'evt-3']);
+  let savedIds = readJsonFile<string[]>(SAVED_FILE, []);
   if (!savedIds.includes(req.params.id)) {
     savedIds.push(req.params.id);
     writeJsonFile(SAVED_FILE, savedIds);
@@ -652,7 +488,7 @@ app.post('/api/me/saved-events/:id', (req: Request, res: Response) => {
 });
 
 app.delete('/api/me/saved-events/:id', (req: Request, res: Response) => {
-  let savedIds = readJsonFile<string[]>(SAVED_FILE, ['evt-1', 'evt-3']);
+  let savedIds = readJsonFile<string[]>(SAVED_FILE, []);
   savedIds = savedIds.filter((id) => id !== req.params.id);
   writeJsonFile(SAVED_FILE, savedIds);
   res.json({ saved: false });

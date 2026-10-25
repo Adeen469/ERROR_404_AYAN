@@ -6,8 +6,8 @@ import { isDemoMode, apiClient } from './api-client';
 const SAVED_STORAGE_KEY = 'locora_saved_events';
 
 function getInitialSaved(): string[] {
-  // Prepopulate evt-1 and evt-3 as saved for demo user
-  return ['evt-1', 'evt-3'];
+  // No sample saved events: sample events (evt-1..evt-8) were removed.
+  return [];
 }
 
 function getStoredSavedIds(): string[] {
@@ -18,7 +18,14 @@ function getStoredSavedIds(): string[] {
       localStorage.setItem(SAVED_STORAGE_KEY, JSON.stringify(initial));
       return initial;
     }
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    // Drop saved ids for removed sample events (evt-1..evt-8).
+    const sampleIds = new Set(['evt-1', 'evt-2', 'evt-3', 'evt-4', 'evt-5', 'evt-6', 'evt-7', 'evt-8']);
+    const filtered = Array.isArray(parsed) ? parsed.filter((id: string) => !sampleIds.has(id)) : parsed;
+    if (Array.isArray(parsed) && filtered.length !== parsed.length) {
+      try { localStorage.setItem(SAVED_STORAGE_KEY, JSON.stringify(filtered)); } catch { /* keep filtered list in memory */ }
+    }
+    return filtered;
   } catch {
     return getInitialSaved();
   }

@@ -7,33 +7,9 @@ import { apiClient, isDemoMode } from './api-client';
 const REG_STORAGE_KEY = 'locora_registrations';
 
 function getInitialRegistrations(): AttendeeRegistration[] {
-  // Prepopulate with a couple of realistic demo registrations for Sarah Chen
-  return [
-    {
-      id: 'reg-1',
-      eventId: 'evt-2',
-      event: DEMO_EVENTS[1],
-      userId: 'usr-attendee-1',
-      userName: 'Sarah Chen',
-      userEmail: 'sarah.chen@example.com',
-      status: 'confirmed',
-      registeredAt: '2026-10-20T14:30:00Z',
-      ticketCode: 'LOC-7192-SH',
-      checkedIn: false,
-    },
-    {
-      id: 'reg-2',
-      eventId: 'evt-4',
-      event: DEMO_EVENTS[3],
-      userId: 'usr-attendee-1',
-      userName: 'Sarah Chen',
-      userEmail: 'sarah.chen@example.com',
-      status: 'confirmed',
-      registeredAt: '2026-10-22T09:15:00Z',
-      ticketCode: 'LOC-4830-VY',
-      checkedIn: false,
-    },
-  ];
+  // No sample registrations: sample events (evt-1..evt-8) were removed,
+  // so the prepopulated registrations for them are removed too.
+  return [];
 }
 
 function getStoredRegistrations(): AttendeeRegistration[] {
@@ -44,7 +20,14 @@ function getStoredRegistrations(): AttendeeRegistration[] {
       localStorage.setItem(REG_STORAGE_KEY, JSON.stringify(initial));
       return initial;
     }
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    // Drop registrations for removed sample events (evt-1..evt-8).
+    const sampleIds = new Set(['evt-1', 'evt-2', 'evt-3', 'evt-4', 'evt-5', 'evt-6', 'evt-7', 'evt-8']);
+    const filtered = Array.isArray(parsed) ? parsed.filter((r: AttendeeRegistration) => !sampleIds.has(r.eventId)) : parsed;
+    if (Array.isArray(parsed) && filtered.length !== parsed.length) {
+      try { localStorage.setItem(REG_STORAGE_KEY, JSON.stringify(filtered)); } catch { /* keep filtered list in memory */ }
+    }
+    return filtered;
   } catch {
     return getInitialRegistrations();
   }
