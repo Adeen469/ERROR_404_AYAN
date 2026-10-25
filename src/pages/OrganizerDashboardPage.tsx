@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { PlusCircle, Calendar, Users, Eye, BarChart2, Edit, ChevronRight, CheckCircle2 } from 'lucide-react';
 import { EventItem, Organizer } from '../types';
-import { eventsService, isEventOwner } from '../services/events-service';
+import { eventsService, isEventOwner, canManageEvent } from '../services/events-service';
 import { organizersService, OrganizerStats } from '../services/organizers-service';
 import { authService } from '../services/auth-service';
 import { isAdminEmail } from '../services/roles-service';
@@ -31,7 +31,7 @@ export function OrganizerDashboardPage() {
           currentUser.role === 'admin' &&
           isAdminEmail(currentUser.email);
         const owned = data.filter((e) =>
-          isEventOwner(e, currentUser?.email, isAdmin),
+          canManageEvent(e, currentUser?.email, isAdmin),
         );
         setEvents(owned);
 
@@ -214,13 +214,15 @@ export function OrganizerDashboardPage() {
                         <span>Roster</span>
                       </Link>
 
-                      <Link
-                        to={`/organizer/events/${evt.id}/edit`}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-[#1E2320] hover:text-[#1E3F35] bg-[#F4F1EA] hover:bg-[#EBE7DF] border border-[#E2DFD8] rounded-md transition-colors"
-                      >
-                        <Edit className="w-3 h-3 text-[#8C887E]" />
-                        <span>Edit</span>
-                      </Link>
+                      {isEventOwner(evt, currentUser?.email) && (
+                        <Link
+                          to={`/organizer/events/${evt.id}/edit`}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-[#1E2320] hover:text-[#1E3F35] bg-[#F4F1EA] hover:bg-[#EBE7DF] border border-[#E2DFD8] rounded-md transition-colors"
+                        >
+                          <Edit className="w-3 h-3 text-[#8C887E]" />
+                          <span>Edit</span>
+                        </Link>
+                      )}
                     </td>
                   </tr>
                 ))}

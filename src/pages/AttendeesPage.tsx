@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Search, Download, CheckCircle, Clock, XCircle, Users } from 'lucide-react';
 import { AttendeeRegistration, EventItem } from '../types';
-import { eventsService, isEventOwner } from '../services/events-service';
+import { eventsService, canManageEvent } from '../services/events-service';
 import { authService } from '../services/auth-service';
 import { isAdminEmail } from '../services/roles-service';
 import { registrationsService } from '../services/registrations-service';
@@ -35,7 +35,7 @@ export function AttendeesPage() {
           !!currentUser &&
           currentUser.role === 'admin' &&
           isAdminEmail(currentUser.email);
-        if (!isEventOwner(evt, currentUser?.email, isAdmin)) {
+        if (!canManageEvent(evt, currentUser?.email, isAdmin)) {
           setNotOwner(true);
           return;
         }

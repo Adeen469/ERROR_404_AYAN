@@ -3,19 +3,21 @@ import { DEMO_EVENTS, DEMO_ORGANIZERS } from '../mocks/demo-data';
 import { apiClient, isDemoMode } from './api-client';
 import { authService } from './auth-service';
 
-// Ownership rule for event management. Admins may manage any event.
-// Otherwise the creator's email (createdByEmail, stamped at creation)
-// must match the signed-in user's email. Events created before
-// createdByEmail existed fall back to the organizer's email, so legacy
-// events are still owned by whoever their organizer record names.
+// Ownership rules for event management — the permission matrix:
+// - Edit event details: the event's OWNER only. Admins explicitly cannot
+//   edit another organizer's event details.
+// - Delete, publish/unpublish, attendees/check-in: the owner OR an admin.
+// - Any other organizer: none of the above.
+// The owner is the creator's email (createdByEmail, stamped at creation).
+// Events created before createdByEmail existed fall back to the
+// organizer's email, so legacy events are still owned by whoever their
+// organizer record names.
 // This is enforced in the app only: the shared API has no session auth,
 // so it cannot verify who is calling it.
 export function isEventOwner(
   event: EventItem,
   userEmail: string | undefined | null,
-  isAdmin = false,
 ): boolean {
-  if (isAdmin) return true;
   if (!userEmail) return false;
   const email = userEmail.trim().toLowerCase();
   if (event.createdByEmail) {
@@ -24,9 +26,20 @@ export function isEventOwner(
   return (event.organizer?.email || '').trim().toLowerCase() === email;
 }
 
+export function canManageEvent(
+  event: EventItem,
+  userEmail: string | undefined | null,
+  isAdmin = false,
+): boolean {
+  return isAdmin || isEventOwner(event, userEmail);
+}
+
 export interface OwnershipOptions {
   ownerEmail?: string;
   isAdmin?: boolean;
+  // Whether an admin may perform this operation. Delete and status
+  // changes allow admins; detail edits do not.
+  allowAdmin?: boolean;
 }
 
 // Cover images live in src/assets/images. They must be imported so Vite
@@ -325,15 +338,26 @@ export const eventsService = {
   },
 
   async updateEvent(id: string, updates: Partial<EventItem>, opts?: OwnershipOptions): Promise<EventItem> {
-    // Ownership is opt-in: organizer pages pass opts, so only the event's
-    // owner (or an admin) can edit it. Callers that do not pass opts —
-    // notably registrations bumping registeredCount when an attendee
-    // registers — are intentionally unchecked and behave exactly as before.
-    if (opts?.ownerEmail) {
-      const existing = await this.getEventById(id);
-      if (!existing || !isEventOwner(existing, opts.ownerEmail, opts.isAdmin)) {
-        throw new Error('You can only edit your own events.');
-      }
+    // Ownership is MANDATORY: every caller must prove who is acting, or
+    // the update is refused. There is no unchecked path anymore — a
+    // caller that forgets opts used to silently skip the check entirely.
+    // Registration count bumps use adjustRegisteredCount instead.
+    if (!opts?.ownerEmail) {
+      throw new Error('Ownership check required to update an event.');
+    }
+    const existing = await this.getEventById(id);
+    if (!existing) {
+      throw new Error('Event not found');
+    }
+    const allowed = opts.allowAdmin
+      ? canManageEvent(existing, opts.ownerEmail, opts.isAdmin)
+      : isEventOwner(existing, opts.ownerEmail);
+    if (!allowed) {
+      throw new Error(
+        opts.isAdmin && !opts.allowAdmin
+          ? 'Admins cannot edit event details.'
+          : 'You can only edit your own events.',
+      );
     }
     if (!isDemoMode()) {
       try {
@@ -359,13 +383,14 @@ export const eventsService = {
   },
 
   async deleteEvent(id: string, opts?: OwnershipOptions): Promise<boolean> {
-    // Same opt-in ownership rule as updateEvent: only the event's owner
-    // (or an admin) may delete it when opts are supplied.
-    if (opts?.ownerEmail) {
-      const existing = await this.getEventById(id);
-      if (!existing || !isEventOwner(existing, opts.ownerEmail, opts.isAdmin)) {
-        throw new Error('You can only delete your own events.');
-      }
+    // Delete is an owner-or-admin operation, and the check is mandatory:
+    // a caller without ownership proof is refused, never silently allowed.
+    if (!opts?.ownerEmail) {
+      throw new Error('Ownership check required to delete an event.');
+    }
+    const existing = await this.getEventById(id);
+    if (!existing || !canManageEvent(existing, opts.ownerEmail, opts.isAdmin)) {
+      throw new Error('You can only delete your own events.');
     }
     if (!isDemoMode()) {
       try {
@@ -381,6 +406,29 @@ export const eventsService = {
     events = events.filter((e) => e.id !== id);
     saveStoredEvents(events);
     return true;
+  },
+
+  // System-only count adjustment used by registration flows. This is NOT
+  // a user edit: it only moves registeredCount, and it is never exposed
+  // as an edit/delete affordance. It exists so updateEvent can require
+  // ownership proof from every caller without breaking registrations.
+  async adjustRegisteredCount(id: string, registeredCount: number): Promise<void> {
+    if (!isDemoMode()) {
+      try {
+        await apiClient.patch('/events', { registeredCount }, { id });
+        return;
+      } catch (err) {
+        console.warn('Backend API count update unavailable, falling back to local events store:', err);
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const events = getStoredEvents();
+    const index = events.findIndex((e) => e.id === id);
+    if (index !== -1) {
+      events[index] = { ...events[index], registeredCount };
+      saveStoredEvents(events);
+    }
   },
 
   async searchLiveRealEvents(city: string, query?: string): Promise<{ success: boolean; data: EventItem[]; count: number }> {

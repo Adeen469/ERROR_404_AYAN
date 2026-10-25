@@ -140,11 +140,13 @@ export const registrationsService = {
     }
     saveStoredRegistrations(all);
 
-    // Update event registered count in demo state
+    // Update event registered count in demo state (system count bump,
+    // not a user edit, so it does not go through the ownership check).
     try {
-      await eventsService.updateEvent(event.id, {
-        registeredCount: Math.min(event.capacity, event.registeredCount + 1),
-      });
+      await eventsService.adjustRegisteredCount(
+        event.id,
+        Math.min(event.capacity, event.registeredCount + 1),
+      );
     } catch (e) {
       console.warn('Could not increment event registered count:', e);
     }
@@ -170,13 +172,14 @@ export const registrationsService = {
     target.status = 'cancelled';
     saveStoredRegistrations(all);
 
-    // Decrement event registered count
+    // Decrement event registered count (system count bump, not a user edit).
     try {
       const event = await eventsService.getEventById(target.eventId);
       if (event && event.registeredCount > 0) {
-        await eventsService.updateEvent(target.eventId, {
-          registeredCount: event.registeredCount - 1,
-        });
+        await eventsService.adjustRegisteredCount(
+          target.eventId,
+          event.registeredCount - 1,
+        );
       }
     } catch (e) {
       console.warn('Could not decrement event count:', e);

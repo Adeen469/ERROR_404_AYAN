@@ -20,8 +20,8 @@ export function EditEventPage() {
   // never rendered in that case, and the save is ownership-checked too.
   const [notOwner, setNotOwner] = useState(false);
 
-  // Ownership for this page: the event's owner, or an admin (who may
-  // manage any event).
+  // Ownership for this page: the event's owner ONLY. Admins may delete
+  // and operate events, but they cannot edit event details.
   const currentUser = authService.getCurrentUser();
   const isAdmin =
     !!currentUser &&
@@ -56,7 +56,7 @@ export function EditEventPage() {
       try {
         const data = await eventsService.getEventById(eventId);
         if (data) {
-          if (!isEventOwner(data, currentUser?.email, isAdmin)) {
+          if (!isEventOwner(data, currentUser?.email)) {
             setNotOwner(true);
             setEvent(data);
             return;
@@ -128,7 +128,7 @@ export function EditEventPage() {
         price: Number(price),
         capacity: Number(capacity),
         tags,
-      }, ownershipOpts);
+      }, { ...ownershipOpts, allowAdmin: false });
 
       toast({
         type: 'success',
@@ -166,11 +166,14 @@ export function EditEventPage() {
     return (
       <div className="max-w-md mx-auto px-4 py-20 text-center space-y-4">
         <h2 className="font-editorial text-2xl font-bold text-[#1E2320]">
-          This event belongs to another organizer
+          {isAdmin
+            ? 'Admins cannot edit event details'
+            : 'This event belongs to another organizer'}
         </h2>
         <p className="text-sm text-[#5F635D]">
-          You can only edit events you created. This event's details are
-          shown to its own organizer, not here.
+          {isAdmin
+            ? 'You can delete and manage this event from the Events list, but its details can only be edited by the organizer who created it.'
+            : 'You can only edit events you created. This event\'s details are shown to its own organizer, not here.'}
         </p>
         <Link to="/organizer/events" className="text-xs font-semibold text-[#1E3F35] hover:underline">
           Return to Events

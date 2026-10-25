@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { PlusCircle, Edit, Users, Trash2, Eye, EyeOff, ArrowLeft } from 'lucide-react';
 import { EventItem } from '../types';
-import { eventsService, isEventOwner } from '../services/events-service';
+import { eventsService, isEventOwner, canManageEvent } from '../services/events-service';
 import { authService } from '../services/auth-service';
 import { isAdminEmail } from '../services/roles-service';
 import { formatEventDate, formatPrice } from '../utils/formatters';
@@ -19,8 +19,10 @@ export function OrganizerEventsPage() {
   const [deleting, setDeleting] = useState(false);
 
   // Ownership for this list: an organizer sees only their own events;
-  // admins see everything. The same rule is re-checked by the service on
-  // every edit/delete, so a filtered list alone is not the protection.
+  // admins see everything (they may delete and operate events, but not
+  // edit details — the Edit button below is owner-only). The service
+  // re-checks ownership on every edit/delete, so a filtered list alone
+  // is not the protection.
   const currentUser = authService.getCurrentUser();
   const isAdmin =
     !!currentUser &&
@@ -36,7 +38,7 @@ export function OrganizerEventsPage() {
     try {
       const { data } = await eventsService.getEvents({}, 1, 100);
       setEvents(
-        data.filter((e) => isEventOwner(e, currentUser?.email, isAdmin)),
+        data.filter((e) => canManageEvent(e, currentUser?.email, isAdmin)),
       );
     } finally {
       setLoading(false);
@@ -51,7 +53,7 @@ export function OrganizerEventsPage() {
   const handleTogglePublish = async (event: EventItem) => {
     const newStatus = event.status === 'published' ? 'draft' : 'published';
     try {
-      await eventsService.updateEvent(event.id, { status: newStatus }, ownershipOpts);
+      await eventsService.updateEvent(event.id, { status: newStatus }, { ...ownershipOpts, allowAdmin: true });
       setEvents((prev) =>
         prev.map((e) => (e.id === event.id ? { ...e, status: newStatus } : e))
       );
@@ -180,13 +182,15 @@ export function OrganizerEventsPage() {
                   <span>Roster</span>
                 </Link>
 
-                <Link
-                  to={`/organizer/events/${evt.id}/edit`}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#1E2320] hover:text-[#1E3F35] bg-[#F4F1EA] hover:bg-[#EBE7DF] border border-[#E2DFD8] rounded-lg transition-colors"
-                >
-                  <Edit className="w-3.5 h-3.5 text-[#8C887E]" />
-                  <span>Edit</span>
-                </Link>
+                {isEventOwner(evt, currentUser?.email) && (
+                  <Link
+                    to={`/organizer/events/${evt.id}/edit`}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#1E2320] hover:text-[#1E3F35] bg-[#F4F1EA] hover:bg-[#EBE7DF] border border-[#E2DFD8] rounded-lg transition-colors"
+                  >
+                    <Edit className="w-3.5 h-3.5 text-[#8C887E]" />
+                    <span>Edit</span>
+                  </Link>
+                )}
 
                 <button
                   type="button"
