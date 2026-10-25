@@ -53,6 +53,115 @@ export function ProfilePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Telegram phone verification (free, no SMS — see
+  // api/telegram-verify.ts). The verified flag here is a display flag
+  // initialized from the saved profile; the server-attested badge on
+  // registrations is checked separately at registration time.
+  const [phoneVerified, setPhoneVerified] = useState(currentUser?.phoneVerified || false);
+  const [verifyLink, setVerifyLink] = useState('');
+  const [verifyWaiting, setVerifyWaiting] = useState(false);
+  const [verifyStarting, setVerifyStarting] = useState(false);
+  const [verifyError, setVerifyError] = useState('');
+  const verifyTokenRef = React.useRef<string | null>(null);
+  const verifyTimerRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopVerifyPolling = () => {
+    if (verifyTimerRef.current) {
+      clearInterval(verifyTimerRef.current);
+      verifyTimerRef.current = null;
+    }
+  };
+
+  const pollVerifyStatus = (token: string) => {
+    stopVerifyPolling();
+    verifyTimerRef.current = setInterval(async () => {
+      try {
+        const res = await fetch('/api/telegram-verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'status', token }),
+        });
+        const data = await res.json();
+        if (data.status === 'verified') {
+          stopVerifyPolling();
+          setVerifyWaiting(false);
+          setVerifyLink('');
+          verifyTokenRef.current = null;
+          localStorage.removeItem('locora-telegram-verify-token');
+          setPhoneVerified(true);
+          try {
+            await authService.updateProfile({ phoneVerified: true });
+          } catch {
+            // The badge above already reflects the verified state.
+          }
+          toast({
+            type: 'success',
+            title: 'Mobile number verified',
+            description: 'Your number is now confirmed via Telegram.',
+          });
+        } else if (data.status === 'expired' || data.status === 'not_found') {
+          stopVerifyPolling();
+          setVerifyWaiting(false);
+          setVerifyLink('');
+          verifyTokenRef.current = null;
+          localStorage.removeItem('locora-telegram-verify-token');
+          setVerifyError(
+            data.status === 'expired'
+              ? 'This verification link expired (links last 15 minutes). Get a fresh one below.'
+              : 'Verification link not found. Get a fresh one below.',
+          );
+        }
+      } catch {
+        // Polling failures are silent; the next tick retries.
+      }
+    }, 3000);
+  };
+
+  // Resume a verification started earlier (e.g. the page reloaded
+  // while the user was in Telegram).
+  useEffect(() => {
+    const token = localStorage.getItem('locora-telegram-verify-token');
+    if (token && !currentUser?.phoneVerified) {
+      verifyTokenRef.current = token;
+      setVerifyWaiting(true);
+      pollVerifyStatus(token);
+    }
+    return () => stopVerifyPolling();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleStartVerify = async () => {
+    if (!currentUser || !currentUser.phone) return;
+    setVerifyError('');
+    setVerifyStarting(true);
+    try {
+      const res = await fetch('/api/telegram-verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'start', email: currentUser.email, phone: currentUser.phone }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Could not start verification.');
+      verifyTokenRef.current = data.token;
+      localStorage.setItem('locora-telegram-verify-token', data.token);
+      setVerifyLink(data.link);
+      setVerifyWaiting(true);
+      pollVerifyStatus(data.token);
+    } catch (err: unknown) {
+      setVerifyError(err instanceof Error ? err.message : 'Could not start verification.');
+    } finally {
+      setVerifyStarting(false);
+    }
+  };
+
+  const handleCancelVerify = () => {
+    stopVerifyPolling();
+    setVerifyWaiting(false);
+    setVerifyLink('');
+    verifyTokenRef.current = null;
+    localStorage.removeItem('locora-telegram-verify-token');
+  };
+
   const handleRequestAccess = async () => {
     if (!currentUser) return;
     setRequestingAccess(true);
@@ -100,15 +209,23 @@ export function ProfilePage() {
     setSaving(true);
 
     try {
+      // Changing the number invalidates its verification: the new
+      // number has never been confirmed. (Comparing digits, so a
+      // +91 prefix difference alone does not reset it.)
+      const savedPhoneDigits = (currentUser?.phone || '').replace(/\D/g, '');
+      const newPhoneDigits = phone.replace(/\D/g, '');
+      const phoneChanged = newPhoneDigits !== savedPhoneDigits;
       await authService.updateProfile({
         name: name.trim(),
         phone: phone.trim(),
+        ...(phoneChanged ? { phoneVerified: false } : {}),
         bio: bio.trim(),
         country: homeLocation.country,
         state: homeLocation.state,
         city: homeLocation.city,
         interests,
       });
+      if (phoneChanged) setPhoneVerified(false);
       toast({
         type: 'success',
         title: 'Profile Updated',
@@ -294,6 +411,70 @@ export function ProfilePage() {
           </button>
         </div>
       </form>
+
+      {/* Mobile verification (free via Telegram, no SMS) */}
+      <div className="bg-white p-6 sm:p-8 rounded-2xl border border-[#E5E1D8] shadow-xs space-y-4">
+        <h2 className="font-editorial text-base font-bold text-[#1E2320] pb-2 border-b border-[#EBE7DF]">
+          Mobile Verification
+        </h2>
+        {!currentUser?.phone ? (
+          <p className="text-xs text-[#5F635D] leading-relaxed">
+            Save a mobile number above first, then verify it here. Verification is free — it uses Telegram, not SMS.
+          </p>
+        ) : phoneVerified ? (
+          <p className="text-xs text-[#1E2320] leading-relaxed">
+            <span className="font-semibold text-[#1E3F35]">✓ {currentUser.phone} is verified</span> via Telegram.
+            Changing your number above and saving will remove verification until the new number is confirmed.
+          </p>
+        ) : verifyWaiting ? (
+          <div className="space-y-3">
+            <p className="text-xs text-[#5F635D] leading-relaxed">
+              Waiting for you to share your number in Telegram. Open the link below, tap “Share my phone number” in the
+              bot chat, and this page will update automatically. The link lasts 15 minutes.
+            </p>
+            {verifyLink && (
+              <a
+                href={verifyLink}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-block px-5 py-2.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors"
+              >
+                Open Telegram
+              </a>
+            )}
+            <div>
+              <button
+                type="button"
+                onClick={handleCancelVerify}
+                className="text-xs font-semibold text-[#5F635D] hover:text-[#1E2320] transition-colors"
+              >
+                Cancel verification
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <p className="text-xs text-[#5F635D] leading-relaxed">
+              Confirm {currentUser.phone} is really yours — free, via Telegram. No SMS code, no cost: the bot asks you to
+              share the number Telegram already verified, and Locora matches it to this profile.
+            </p>
+            {phone.trim() !== currentUser.phone && (
+              <p className="text-[11px] text-amber-700">
+                You edited the number above but haven&apos;t saved it yet — save it first, then verify.
+              </p>
+            )}
+            <button
+              type="button"
+              onClick={handleStartVerify}
+              disabled={verifyStarting || phone.trim() !== currentUser.phone}
+              className="px-5 py-2.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-60"
+            >
+              {verifyStarting ? 'Starting…' : 'Verify via Telegram'}
+            </button>
+          </div>
+        )}
+        {verifyError && <p className="text-[11px] text-rose-600">{verifyError}</p>}
+      </div>
 
       {/* Organizer access */}
       <div className="bg-white p-6 sm:p-8 rounded-2xl border border-[#E5E1D8] shadow-xs space-y-4">

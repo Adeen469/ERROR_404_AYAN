@@ -93,6 +93,11 @@ export interface AttendeeRegistration {
   // events that require them (see EventItem.requireAttendeeDetails).
   // Only present on registrations made after the details gate.
   userPhone?: string;
+  // True when the server confirmed, at registration time, that a
+  // Telegram-verified row matches this registration's email + phone
+  // (api/registrations.ts). A client-sent value is never trusted: the
+  // server overwrites it from the verification rows.
+  phoneVerified?: boolean;
   // Slot accounting: pending registrations created BEFORE this flag
   // existed held a spot (registeredCount +1 at payment time). Those
   // rows predate the flag and are treated as holding one. New pending
@@ -112,6 +117,14 @@ export interface UserProfile {
   // reused (with a per-registration sharing confirmation). Never
   // displayed publicly; shared with the event organizer only.
   phone?: string;
+  // Free Telegram verification (see api/telegram-verify.ts): true once
+  // the user shared, via the bot, a Telegram-verified number matching
+  // this profile number. Changing the number resets it to false.
+  // Note: this flag itself is set from the browser after polling, so
+  // in this app's session model it is a display flag; the registration
+  // badge is the server-attested one (api/registrations.ts checks the
+  // verification rows before stamping it).
+  phoneVerified?: boolean;
   avatar: string;
   bio: string;
   // Legacy: the home-neighborhood field is retired. Home location is

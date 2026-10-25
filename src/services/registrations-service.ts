@@ -144,6 +144,10 @@ export const registrationsService = {
       // Saved by the details gate before registration; shared with the
       // organizer only, for events that require attendee details.
       userPhone: user.phone || undefined,
+      // Snapshot of the profile's verified flag. The server re-checks
+      // this against the verification rows before storing (see
+      // api/registrations.ts), so a client-sent value is never trusted.
+      phoneVerified: user.phoneVerified || undefined,
       status: 'confirmed',
       registeredAt: new Date().toISOString(),
       ticketCode: newTicketCode(),
@@ -154,6 +158,7 @@ export const registrationsService = {
       existing.status = 'confirmed';
       existing.ticketCode = newReg.ticketCode;
       existing.userPhone = newReg.userPhone || existing.userPhone;
+      existing.phoneVerified = newReg.phoneVerified || existing.phoneVerified;
     } else {
       all.unshift(newReg);
     }
@@ -219,6 +224,9 @@ export const registrationsService = {
       // Saved by the details gate before registration; shared with the
       // organizer only, for events that require attendee details.
       userPhone: user.phone || undefined,
+      // Snapshot of the profile's verified flag; the server re-checks
+      // it against the verification rows before storing.
+      phoneVerified: user.phoneVerified || undefined,
       // No slot held while the organizer decides (see holdsSpot).
       holdsSpot: false,
       status: 'pending',

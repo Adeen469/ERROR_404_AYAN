@@ -292,6 +292,9 @@ export function AttendeesPage() {
                   {reg.userPhone && (
                     <p className="text-[#5F635D]">
                       Mobile: <span className="font-semibold text-[#1E2320]">{reg.userPhone}</span>
+                      {reg.phoneVerified && (
+                        <span className="text-[#1E3F35] font-semibold"> ✓ Verified</span>
+                      )}
                     </p>
                   )}
                   <p className="text-[#5F635D]">
@@ -405,6 +408,9 @@ export function AttendeesPage() {
                       <p className="text-[11px] text-[#8C887E]">{att.userEmail}</p>
                       {att.userPhone && (
                         <p className="text-[11px] text-[#8C887E]">{att.userPhone}</p>
+                      )}
+                      {att.phoneVerified && (
+                        <p className="text-[11px] text-[#1E3F35] font-semibold">✓ Verified</p>
                       )}
                     </td>
 
