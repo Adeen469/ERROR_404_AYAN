@@ -17,6 +17,7 @@ import {
   Check,
 } from 'lucide-react';
 import { EventItem, AttendeeRegistration } from '../types';
+import QRCode from 'qrcode';
 import { eventsService } from '../services/events-service';
 import { registrationsService } from '../services/registrations-service';
 import { savedEventsService } from '../services/saved-events-service';
@@ -77,6 +78,34 @@ export function EventDetailsPage() {
   const [utr, setUtr] = useState('');
   const [utrError, setUtrError] = useState('');
   const [copiedUpi, setCopiedUpi] = useState(false);
+  const [upiQr, setUpiQr] = useState('');
+
+  // UPI deep link: tapping it opens the user's UPI app with the payee,
+  // amount and note prefilled. The same string is encoded in the QR
+  // code below, so desktop users can scan it with their phone.
+  const upiUri = event && event.upiId
+    ? `upi://pay?pa=${encodeURIComponent(event.upiId)}&pn=${encodeURIComponent(event.organizer?.name || 'Locora Organizer')}&am=${event.price}&cu=INR&tn=${encodeURIComponent((event.title || 'Event payment').slice(0, 60))}`
+    : '';
+
+  // Render the QR code client-side (no third-party QR service sees the
+  // organizer's UPI ID or the amount).
+  useEffect(() => {
+    if (!upiUri) {
+      setUpiQr('');
+      return;
+    }
+    let active = true;
+    QRCode.toDataURL(upiUri, { margin: 1, width: 220 })
+      .then((url) => {
+        if (active) setUpiQr(url);
+      })
+      .catch(() => {
+        if (active) setUpiQr('');
+      });
+    return () => {
+      active = false;
+    };
+  }, [upiUri]);
 
   useEffect(() => {
     async function loadEventData() {
@@ -627,7 +656,7 @@ export function EventDetailsPage() {
           setUtrError('');
         }}
         title="Pay & Register"
-        description={`This is a paid event. Pay ${formatPrice(event.price)} to the organizer via UPI, then enter your 12-digit UTR below. Your pass is issued once the organizer approves the payment.`}
+        description={`This is a paid event. Pay ${formatPrice(event.price)} to the organizer via UPI — scan the QR code or tap Pay via UPI app — then enter your 12-digit UTR below. Your pass is issued once the organizer approves the payment.`}
       >
         <div className="space-y-4">
           <div className="p-4 bg-[#F4F1EA] border border-[#E2DFD8] rounded-lg space-y-2">
@@ -636,24 +665,44 @@ export function EventDetailsPage() {
               <span className="font-editorial text-lg font-bold text-[#1E2320]">{formatPrice(event.price)}</span>
             </div>
             {event.upiId ? (
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs text-[#5F635D]">Pay to UPI ID</span>
-                <span className="flex items-center gap-1.5">
-                  <span className="font-mono text-xs font-semibold text-[#1E2320] break-all">{event.upiId}</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText(event.upiId || '');
-                      setCopiedUpi(true);
-                      setTimeout(() => setCopiedUpi(false), 2000);
-                    }}
-                    className="px-2 py-1 bg-[#1E3F35] text-white rounded-md text-[11px] font-medium hover:bg-[#163028] flex items-center gap-1 shrink-0"
-                  >
-                    {copiedUpi ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                    <span>{copiedUpi ? 'Copied' : 'Copy'}</span>
-                  </button>
-                </span>
-              </div>
+              <>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-[#5F635D]">Pay to UPI ID</span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="font-mono text-xs font-semibold text-[#1E2320] break-all">{event.upiId}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(event.upiId || '');
+                        setCopiedUpi(true);
+                        setTimeout(() => setCopiedUpi(false), 2000);
+                      }}
+                      className="px-2 py-1 bg-[#1E3F35] text-white rounded-md text-[11px] font-medium hover:bg-[#163028] flex items-center gap-1 shrink-0"
+                    >
+                      {copiedUpi ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                      <span>{copiedUpi ? 'Copied' : 'Copy'}</span>
+                    </button>
+                  </span>
+                </div>
+                {upiQr && (
+                  <div className="pt-2 flex flex-col items-center gap-2">
+                    <img
+                      src={upiQr}
+                      alt={`QR code to pay ${formatPrice(event.price)} to ${event.upiId}`}
+                      className="w-44 h-44 rounded-lg border border-[#E2DFD8] bg-white"
+                    />
+                    <p className="text-[11px] text-[#5F635D] text-center">
+                      Scan with any UPI app — the amount is prefilled
+                    </p>
+                    <a
+                      href={upiUri}
+                      className="px-4 py-2 bg-[#1E3F35] text-white rounded-lg text-xs font-semibold hover:bg-[#163028] transition-colors"
+                    >
+                      Pay via UPI app
+                    </a>
+                  </div>
+                )}
+              </>
             ) : (
               <p className="text-xs text-[#5F635D]">
                 The organizer hasn't shared a UPI ID — pay them directly via UPI and enter your UTR below.
