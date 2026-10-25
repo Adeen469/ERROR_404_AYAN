@@ -1,7 +1,6 @@
 import { UserProfile } from '../types';
 import { DEFAULT_DEMO_USER, DEFAULT_DEMO_ORGANIZER_USER } from '../mocks/demo-data';
 import { isDemoMode, apiClient } from './api-client';
-import { auth, googleAuthProvider, signInWithPopup } from '../lib/firebase';
 
 const USER_STORAGE_KEY = 'locora_current_user';
 const TOKEN_STORAGE_KEY = 'locora_auth_token';
@@ -57,38 +56,20 @@ export const authService = {
     return user;
   },
 
-  async loginWithGoogle(): Promise<UserProfile> {
-    try {
-      const cred = await signInWithPopup(auth, googleAuthProvider);
-      const idToken = await cred.user.getIdToken();
-      const userProfile: UserProfile = {
-        id: cred.user.uid,
-        name: cred.user.displayName || 'Community Member',
-        email: cred.user.email || '',
-        avatar: cred.user.photoURL || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
-        bio: 'Active Locora community member.',
-        neighborhood: 'Downtown Arts District',
-        interests: ['Food & Community', 'Live Music & Culture'],
-        role: 'attendee',
-        createdAt: new Date().toISOString(),
-      };
-      localStorage.setItem(TOKEN_STORAGE_KEY, idToken);
-      localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(userProfile));
-      notify(userProfile);
-      return userProfile;
-    } catch (err: any) {
-      console.error('Google Auth Error:', err);
-      if (err.code === 'auth/popup-blocked') {
-        throw new Error('Sign-in popup was blocked by your browser. Please allow popups for this site.');
-      }
-      if (err.code === 'auth/popup-closed-by-user') {
-        throw new Error('Sign-in window was closed before completion. Please try again.');
-      }
-      if (err.code === 'auth/cancelled-popup-request') {
-        throw new Error('Sign-in was interrupted. Please try again.');
-      }
-      throw new Error(err.message || 'Google authentication failed.');
-    }
+  // Custom Google OAuth flow (server-side, using GOOGLE_CLIENT_ID /
+  // GOOGLE_CLIENT_SECRET from Vercel environment variables).
+  //
+  // This replaces the previous Firebase signInWithPopup flow. It redirects
+  // the browser to /api/auth/google (a Vercel Serverless Function), which
+  // redirects to Google, and Google redirects back to
+  // /api/auth/google/callback, which stores the profile in localStorage
+  // and sends the user to /dashboard. Because the page navigates away,
+  // this promise intentionally never resolves — the sign-in completes
+  // via the callback, not via a return value here.
+  async loginWithGoogle(role: 'attendee' | 'organizer' = 'attendee'): Promise<UserProfile> {
+    const params = new URLSearchParams({ role });
+    window.location.href = `/api/auth/google?${params.toString()}`;
+    return new Promise<UserProfile>(() => {});
   },
 
   async signup(name: string, email: string, role: 'attendee' | 'organizer' = 'attendee'): Promise<UserProfile> {

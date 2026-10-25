@@ -183,7 +183,7 @@ export function SignupPage() {
             setLoading(true);
             setError('');
             try {
-              const user = await authService.loginWithGoogle();
+              const user = await authService.loginWithGoogle(role);
               toast({
                 type: 'success',
                 title: `Account Ready`,
