@@ -126,6 +126,24 @@ export const eventsService = {
       events = events.filter((e) => e.neighborhood === filters.neighborhood);
     }
 
+    // Worldwide location filter (Country -> State -> City). A set filter
+    // matches only events that actually carry that value (case-insensitive);
+    // older events without a country/state do not match a filtered region,
+    // so browsing a country never shows placeless legacy events.
+    const locEq = (eventValue: string | undefined, filterValue: string | undefined) =>
+      !!filterValue?.trim() &&
+      !!eventValue &&
+      eventValue.trim().toLowerCase() === filterValue.trim().toLowerCase();
+    if (filters.country?.trim()) {
+      events = events.filter((e) => locEq(e.country, filters.country));
+    }
+    if (filters.state?.trim()) {
+      events = events.filter((e) => locEq(e.state, filters.state));
+    }
+    if (filters.city?.trim()) {
+      events = events.filter((e) => locEq(e.city, filters.city));
+    }
+
     // Price type
     if (filters.priceType === 'free') {
       events = events.filter((e) => e.price === 0);

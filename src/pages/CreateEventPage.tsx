@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { ArrowLeft, Image, AlertCircle, Sparkles, Check } from 'lucide-react';
 import { EventCategory, EventItem } from '../types';
-import { DEMO_CATEGORIES, DEMO_NEIGHBORHOODS, DEMO_ORGANIZERS } from '../mocks/demo-data';
+import { DEMO_CATEGORIES, DEMO_ORGANIZERS } from '../mocks/demo-data';
+import { LocationPicker } from '../components/LocationPicker';
 import { eventsService } from '../services/events-service';
 import { authService } from '../services/auth-service';
 import { useToast } from '../components/ui/Toast';
@@ -56,7 +57,9 @@ export function CreateEventPage() {
   const [venueName, setVenueName] = useState('');
   const [address, setAddress] = useState('');
   const [neighborhood, setNeighborhood] = useState('Downtown Arts District');
-  const [city, setCity] = useState('Metro City');
+  // Worldwide event location (Country -> State -> City). Previously every
+  // event was silently fixed to 'Metro City' with no way to change it.
+  const [location, setLocation] = useState({ country: '', state: '', city: '' });
   const [price, setPrice] = useState('0');
   const [capacity, setCapacity] = useState('50');
   const [tagsInput, setTagsInput] = useState('Community, Gathering');
@@ -118,7 +121,9 @@ export function CreateEventPage() {
         venueName: venueName.trim(),
         address: address.trim(),
         neighborhood,
-        city,
+        city: location.city.trim() || 'Metro City',
+        state: location.state.trim() || undefined,
+        country: location.country.trim() || undefined,
         price: Number(price),
         capacity: Number(capacity),
         tags,
@@ -354,20 +359,27 @@ export function CreateEventPage() {
 
             <div>
               <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
-                Neighborhood *
+                Neighborhood / Area
               </label>
-              <select
+              <input
+                type="text"
                 value={neighborhood}
                 onChange={(e) => setNeighborhood(e.target.value)}
-                className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] cursor-pointer focus:border-[#1E3F35]"
-              >
-                {DEMO_NEIGHBORHOODS.filter((n) => n !== 'All Neighborhoods').map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
-              </select>
+                placeholder="e.g. Downtown Arts District"
+                className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
+              />
             </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+              Event Location — Country, State, City
+            </label>
+            <LocationPicker mode="form" value={location} onChange={setLocation} />
+            <p className="text-[11px] text-[#5F635D] mt-1">
+              Pick anywhere in the world. If left blank, the event stays
+              listed under Metro City as before.
+            </p>
           </div>
 
           <div>

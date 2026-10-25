@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { LayoutGrid, List, Globe, Sparkles, Loader2, Navigation } from 'lucide-react';
 import { EventItem, EventFilterOptions } from '../types';
 import { eventsService } from '../services/events-service';
+import { authService } from '../services/auth-service';
 import { EventCard } from '../components/events/EventCard';
 import { EventFilters } from '../components/events/EventFilters';
 import { EventListSkeleton, EmptyState } from '../components/ui/LoadingSkeleton';
@@ -17,10 +18,28 @@ export function DiscoverPage() {
     query: searchParams.get('q') || '',
     category: searchParams.get('category') || 'All',
     neighborhood: searchParams.get('neighborhood') || 'All',
+    country: searchParams.get('country') || '',
+    state: searchParams.get('state') || '',
+    city: searchParams.get('city') || '',
     dateRange: (searchParams.get('dateRange') as EventFilterOptions['dateRange']) || 'all',
     priceType: (searchParams.get('priceType') as EventFilterOptions['priceType']) || 'all',
     sortBy: (searchParams.get('sortBy') as EventFilterOptions['sortBy']) || 'relevance',
   });
+
+  // Saved home location (from Profile) for the one-tap "Near me" filter.
+  const savedUser = authService.getCurrentUser();
+  const savedLocationLabel = savedUser?.city
+    ? [savedUser.city, savedUser.state, savedUser.country].filter(Boolean).join(', ')
+    : '';
+  const handleSavedLocation = () => {
+    if (!savedUser?.city) return;
+    updateFilters({
+      ...filters,
+      country: savedUser.country || '',
+      state: savedUser.state || '',
+      city: savedUser.city,
+    });
+  };
 
   const [events, setEvents] = useState<EventItem[]>([]);
   const [totalResults, setTotalResults] = useState(0);
@@ -45,6 +64,9 @@ export function DiscoverPage() {
       if (newFilters.query) params.set('q', newFilters.query);
       if (newFilters.category && newFilters.category !== 'All') params.set('category', newFilters.category);
       if (newFilters.neighborhood && newFilters.neighborhood !== 'All') params.set('neighborhood', newFilters.neighborhood);
+      if (newFilters.country) params.set('country', newFilters.country);
+      if (newFilters.state) params.set('state', newFilters.state);
+      if (newFilters.city) params.set('city', newFilters.city);
       if (newFilters.dateRange && newFilters.dateRange !== 'all') params.set('dateRange', newFilters.dateRange);
       if (newFilters.priceType && newFilters.priceType !== 'all') params.set('priceType', newFilters.priceType);
       if (newFilters.sortBy && newFilters.sortBy !== 'relevance') params.set('sortBy', newFilters.sortBy);
@@ -115,7 +137,8 @@ export function DiscoverPage() {
             Discover Local Events
           </h1>
           <p className="text-sm text-[#5F635D] mt-1">
-            Explore activities, gatherings, and workshops happening across Metro City neighborhoods.
+            Explore activities, gatherings, and workshops near you — or pick
+            any country, state, and city in the world.
           </p>
         </div>
 
@@ -157,7 +180,13 @@ export function DiscoverPage() {
       </div>
 
       {/* Filter Toolbar */}
-      <EventFilters filters={filters} onChange={updateFilters} totalResults={totalResults} />
+      <EventFilters
+        filters={filters}
+        onChange={updateFilters}
+        totalResults={totalResults}
+        onSavedLocation={savedLocationLabel ? handleSavedLocation : undefined}
+        savedLocationLabel={savedLocationLabel}
+      />
 
       {/* Main Events Presentation */}
       {loading ? (
@@ -173,6 +202,9 @@ export function DiscoverPage() {
               query: '',
               category: 'All',
               neighborhood: 'All',
+              country: '',
+              state: '',
+              city: '',
               dateRange: 'all',
               priceType: 'all',
               sortBy: 'relevance',

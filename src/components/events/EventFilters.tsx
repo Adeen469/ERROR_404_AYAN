@@ -1,15 +1,20 @@
 import React, { useState } from 'react';
-import { Search, SlidersHorizontal, X, RotateCcw } from 'lucide-react';
+import { Search, SlidersHorizontal, X, RotateCcw, MapPin } from 'lucide-react';
 import { EventFilterOptions } from '../../types';
 import { DEMO_CATEGORIES, DEMO_NEIGHBORHOODS } from '../../mocks/demo-data';
+import { LocationPicker } from '../LocationPicker';
 
 interface EventFiltersProps {
   filters: EventFilterOptions;
   onChange: (updated: EventFilterOptions) => void;
   totalResults: number;
+  // Set when the signed-in user has a saved home location (Profile):
+  // shows a one-tap "near me" button for that location.
+  onSavedLocation?: () => void;
+  savedLocationLabel?: string;
 }
 
-export function EventFilters({ filters, onChange, totalResults }: EventFiltersProps) {
+export function EventFilters({ filters, onChange, totalResults, onSavedLocation, savedLocationLabel }: EventFiltersProps) {
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
 
   const activeCategory = filters.category || 'All';
@@ -17,6 +22,9 @@ export function EventFilters({ filters, onChange, totalResults }: EventFiltersPr
     Boolean(filters.query) ||
     Boolean(filters.category && filters.category !== 'All') ||
     Boolean(filters.neighborhood && filters.neighborhood !== 'All' && filters.neighborhood !== 'All Neighborhoods') ||
+    Boolean(filters.country) ||
+    Boolean(filters.state) ||
+    Boolean(filters.city) ||
     Boolean(filters.dateRange && filters.dateRange !== 'all') ||
     Boolean(filters.priceType && filters.priceType !== 'all');
 
@@ -25,10 +33,19 @@ export function EventFilters({ filters, onChange, totalResults }: EventFiltersPr
       query: '',
       category: 'All',
       neighborhood: 'All',
+      country: '',
+      state: '',
+      city: '',
       dateRange: 'all',
       priceType: 'all',
       sortBy: 'relevance',
     });
+  };
+
+  const locationValue = {
+    country: filters.country || '',
+    state: filters.state || '',
+    city: filters.city || '',
   };
 
   return (
@@ -143,6 +160,33 @@ export function EventFilters({ filters, onChange, totalResults }: EventFiltersPr
         </div>
       </div>
 
+      {/* Worldwide Location: Country -> State -> City, plus nearby */}
+      <div className="bg-white border border-[#E2DFD8] rounded-xl p-3 sm:p-4 space-y-2 shadow-2xs">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <p className="text-xs font-semibold text-[#1E2320] flex items-center gap-1.5">
+            <MapPin className="w-3.5 h-3.5 text-[#1E3F35]" />
+            Location
+          </p>
+          {onSavedLocation && savedLocationLabel && (
+            <button
+              type="button"
+              onClick={onSavedLocation}
+              className="text-[11px] font-semibold text-[#1E3F35] hover:underline"
+            >
+              Near me: {savedLocationLabel}
+            </button>
+          )}
+        </div>
+        <LocationPicker
+          mode="filter"
+          showDetect
+          value={locationValue}
+          onChange={(loc) =>
+            onChange({ ...filters, country: loc.country, state: loc.state, city: loc.city })
+          }
+        />
+      </div>
+
       {/* Interactive Category Segmented Strip */}
       <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
         <button
@@ -223,6 +267,18 @@ export function EventFilters({ filters, onChange, totalResults }: EventFiltersPr
                   </option>
                 ))}
               </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">Location (worldwide)</label>
+              <LocationPicker
+                mode="filter"
+                showDetect
+                value={locationValue}
+                onChange={(loc) =>
+                  onChange({ ...filters, country: loc.country, state: loc.state, city: loc.city })
+                }
+              />
             </div>
 
             <div>

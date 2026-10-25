@@ -3,7 +3,8 @@ import { useNavigate, Link } from 'react-router-dom';
 import { User, Check, AlertCircle, MapPin, Sparkles, LogOut } from 'lucide-react';
 import { authService } from '../services/auth-service';
 import { UserProfile, EventCategory } from '../types';
-import { DEMO_CATEGORIES, DEMO_NEIGHBORHOODS } from '../mocks/demo-data';
+import { DEMO_CATEGORIES } from '../mocks/demo-data';
+import { LocationPicker } from '../components/LocationPicker';
 import { useToast } from '../components/ui/Toast';
 import { isDemoMode } from '../services/api-client';
 import {
@@ -23,6 +24,12 @@ export function ProfilePage() {
   const [neighborhood, setNeighborhood] = useState(
     currentUser?.neighborhood || 'Silverlake Commons'
   );
+  // Home location (Country -> State -> City) for "Near me" on Discover.
+  const [homeLocation, setHomeLocation] = useState({
+    country: currentUser?.country || '',
+    state: currentUser?.state || '',
+    city: currentUser?.city || '',
+  });
   const [interests, setInterests] = useState<EventCategory[]>(
     currentUser?.interests || ['Food & Community', 'Live Music & Culture']
   );
@@ -91,6 +98,9 @@ export function ProfilePage() {
         name: name.trim(),
         bio: bio.trim(),
         neighborhood,
+        country: homeLocation.country,
+        state: homeLocation.state,
+        city: homeLocation.city,
         interests,
       });
       toast({
@@ -194,23 +204,26 @@ export function ProfilePage() {
             Location Settings
           </h2>
 
+          <LocationPicker
+            mode="form"
+            value={homeLocation}
+            onChange={setHomeLocation}
+          />
           <div>
             <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
-              Primary Home Neighborhood
+              Primary Home Neighborhood / Area
             </label>
-            <select
+            <input
+              type="text"
               value={neighborhood}
               onChange={(e) => setNeighborhood(e.target.value)}
-              className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-2.5 text-[#1E2320] cursor-pointer focus:border-[#1E3F35]"
-            >
-              {DEMO_NEIGHBORHOODS.filter((n) => n !== 'All Neighborhoods').map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
+              placeholder="e.g. Downtown Arts District"
+              className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-2.5 text-[#1E2320] focus:border-[#1E3F35]"
+            />
             <p className="text-[11px] text-[#5F635D] mt-1">
-              Used to calculate proximity weighting for SmartMatch recommendations.
+              Your home city powers the "Near me" filter on Discover, and your
+              neighborhood is used to calculate proximity weighting for
+              SmartMatch recommendations.
             </p>
           </div>
         </div>

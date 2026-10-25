@@ -146,6 +146,23 @@ function applyFilters(events: any[], query: any): any[] {
   if (query.neighborhood && query.neighborhood !== "All" && query.neighborhood !== "All Neighborhoods") {
     out = out.filter((e: any) => e.neighborhood === query.neighborhood);
   }
+  // Worldwide location filter (Country -> State -> City). Same rule as the
+  // frontend's local filter: a set filter matches only events that actually
+  // carry that value, case-insensitively.
+  const locEq = (eventValue: any, filterValue: any) =>
+    typeof filterValue === "string" &&
+    filterValue.trim() !== "" &&
+    typeof eventValue === "string" &&
+    eventValue.trim().toLowerCase() === filterValue.trim().toLowerCase();
+  if (typeof query.country === "string" && query.country.trim() !== "") {
+    out = out.filter((e: any) => locEq(e.country, query.country));
+  }
+  if (typeof query.state === "string" && query.state.trim() !== "") {
+    out = out.filter((e: any) => locEq(e.state, query.state));
+  }
+  if (typeof query.city === "string" && query.city.trim() !== "") {
+    out = out.filter((e: any) => locEq(e.city, query.city));
+  }
   if (query.priceType === "free") {
     out = out.filter((e: any) => Number(e.price) === 0);
   } else if (query.priceType === "paid") {

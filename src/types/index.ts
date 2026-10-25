@@ -43,6 +43,10 @@ export interface EventItem {
   address: string;
   neighborhood: string;
   city: string;
+  // Worldwide location, set by the Country -> State -> City picker on the
+  // create page. Older events predate this and may not carry them.
+  state?: string;
+  country?: string;
   price: number; // 0 for free
   capacity: number;
   registeredCount: number;
@@ -73,6 +77,10 @@ export interface UserProfile {
   avatar: string;
   bio: string;
   neighborhood: string;
+  // Home location from the Country -> State -> City picker on Profile.
+  country?: string;
+  state?: string;
+  city?: string;
   interests: EventCategory[];
   role: 'attendee' | 'organizer' | 'admin';
   // How this account's email was verified: 'google' for Google sign-in
@@ -92,6 +100,10 @@ export interface EventFilterOptions {
   query?: string;
   category?: string;
   neighborhood?: string;
+  // Worldwide location filter (Country -> State -> City, from Discover).
+  country?: string;
+  state?: string;
+  city?: string;
   dateRange?: 'all' | 'today' | 'tomorrow' | 'this_weekend' | 'this_month';
   priceType?: 'all' | 'free' | 'paid';
   sortBy?: 'soonest' | 'relevance' | 'capacity';
