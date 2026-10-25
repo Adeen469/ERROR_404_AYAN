@@ -101,6 +101,11 @@ export function EditEventPage() {
     const capNum = Number(capacity);
     if (isNaN(capNum) || capNum <= 0) errs.capacity = 'Capacity must be at least 1 spot.';
 
+    // Same rule as create: paid events need a UPI ID, because it powers
+    // the QR code and tap-to-pay UPI link in the payment dialog. Free
+    // events (price 0) leave it optional.
+    if (Number(price) > 0 && !upiId.trim()) errs.upiId = 'UPI ID is required for paid events — attendees pay via the QR code and UPI link.';
+
     setErrors(errs);
     return Object.keys(errs).length === 0;
   };
@@ -333,17 +338,20 @@ export function EditEventPage() {
 
             <div>
               <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
-                Organizer UPI ID (for paid events)
+                Organizer UPI ID {Number(price) > 0 ? '*' : '(for paid events)'}
               </label>
               <input
                 type="text"
                 value={upiId}
                 onChange={(e) => setUpiId(e.target.value)}
                 placeholder="e.g. yourname@okhdfcbank"
-                className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
+                className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] ${
+                  errors.upiId ? 'border-rose-500' : 'border-[#E2DFD8]'
+                }`}
               />
+              {errors.upiId && <p className="text-[11px] text-rose-600 mt-1">{errors.upiId}</p>}
               <span className="text-[11px] text-[#8C887E]">
-                Shown to attendees of paid events so they can pay you directly. Leave blank if you don't take UPI.
+                Shown to attendees of paid events as a QR code and UPI link so they can pay you directly. Optional for free events.
               </span>
             </div>
 
