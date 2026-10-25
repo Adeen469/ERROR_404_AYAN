@@ -28,11 +28,15 @@ function saveStoredEvents(events: EventItem[]): void {
 export const eventsService = {
   async getEvents(filters: EventFilterOptions = {}, page = 1, pageSize = 12): Promise<PaginatedResponse<EventItem>> {
     if (!isDemoMode()) {
-      return apiClient.get<PaginatedResponse<EventItem>>('/events', {
-        ...filters,
-        page,
-        pageSize,
-      });
+      try {
+        return await apiClient.get<PaginatedResponse<EventItem>>('/events', {
+          ...filters,
+          page,
+          pageSize,
+        });
+      } catch (err) {
+        console.warn('Backend API /events unavailable, falling back to local events store:', err);
+      }
     }
 
     // Simulated network delay for authentic UI states
@@ -147,7 +151,11 @@ export const eventsService = {
 
   async createEvent(eventPayload: Partial<EventItem>): Promise<EventItem> {
     if (!isDemoMode()) {
-      return apiClient.post<EventItem>('/events', eventPayload);
+      try {
+        return await apiClient.post<EventItem>('/events', eventPayload);
+      } catch (err) {
+        console.warn('Backend API /events post unavailable, falling back to local events store:', err);
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, 250));

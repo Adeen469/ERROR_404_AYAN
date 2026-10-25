@@ -815,6 +815,40 @@ app.post('/api/auth/signup', (req: Request, res: Response) => {
   res.status(201).json({ user: newUser, token: 'demo_jwt_token_locora_preview' });
 });
 
+app.post('/api/auth/google', (req: Request, res: Response) => {
+  const { id, name, email, avatar, role = 'attendee' } = req.body;
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required for Google authentication.' });
+  }
+
+  const users = readJsonFile<any[]>(USERS_FILE, INITIAL_USERS);
+  let user = users.find((u) => u.email.toLowerCase() === email.toLowerCase());
+
+  if (user) {
+    user.name = name || user.name;
+    user.avatar = avatar || user.avatar;
+    writeJsonFile(USERS_FILE, users);
+  } else {
+    user = {
+      id: id || `usr-google-${Date.now()}`,
+      name: name || 'Community Member',
+      email,
+      avatar:
+        avatar ||
+        'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
+      bio: role === 'organizer' ? 'Community organizer in Metro City.' : 'Local resident and active event attendee.',
+      neighborhood: 'Downtown Arts District',
+      interests: ['Food & Community', 'Live Music & Culture'],
+      role,
+      createdAt: new Date().toISOString(),
+    };
+    users.push(user);
+    writeJsonFile(USERS_FILE, users);
+  }
+
+  res.json({ user, token: `g_session_${Date.now()}` });
+});
+
 app.get('/api/me', (_req: Request, res: Response) => {
   const users = readJsonFile<any[]>(USERS_FILE, INITIAL_USERS);
   res.json(users[0]);
