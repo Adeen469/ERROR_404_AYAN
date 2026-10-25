@@ -13,12 +13,14 @@ import { TableSkeleton } from '../components/ui/LoadingSkeleton';
 export function AttendeesPage() {
   const { eventId } = useParams<{ eventId: string }>();
   const { toast } = useToast();
+  const currentUser = authService.getCurrentUser();
 
   const [event, setEvent] = useState<EventItem | null>(null);
   const [attendees, setAttendees] = useState<AttendeeRegistration[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'confirmed' | 'checked_in'>('all');
+  const [busyId, setBusyId] = useState<string | null>(null);
   // True when the event belongs to another organizer. The attendee list
   // is never loaded or shown in that case.
   const [notOwner, setNotOwner] = useState(false);
@@ -49,9 +51,47 @@ export function AttendeesPage() {
     loadData();
   }, [eventId]);
 
+  const handleApprove = async (reg: AttendeeRegistration) => {
+    const email = currentUser?.email;
+    if (!email) return;
+    setBusyId(reg.id);
+    try {
+      const updated = await registrationsService.approveRegistration(reg.id, email);
+      setAttendees((prev) => prev.map((a) => (a.id === reg.id ? updated : a)));
+      toast({
+        type: 'success',
+        title: 'Payment approved',
+        description: `${reg.userName}'s pass ${updated.ticketCode} is now active.`,
+      });
+    } catch {
+      toast({ type: 'error', title: 'Could not approve payment' });
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleReject = async (reg: AttendeeRegistration) => {
+    const email = currentUser?.email;
+    if (!email) return;
+    setBusyId(reg.id);
+    try {
+      const updated = await registrationsService.rejectRegistration(reg.id, email);
+      setAttendees((prev) => prev.map((a) => (a.id === reg.id ? updated : a)));
+      toast({
+        type: 'info',
+        title: 'Payment rejected',
+        description: `${reg.userName}'s held spot has been released.`,
+      });
+    } catch {
+      toast({ type: 'error', title: 'Could not reject payment' });
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const handleToggleCheckIn = async (regId: string) => {
     try {
-      const updated = await registrationsService.toggleCheckIn(regId);
+      const updated = await registrationsService.toggleCheckIn(regId, currentUser?.email);
       setAttendees((prev) => prev.map((a) => (a.id === regId ? updated : a)));
       toast({
         type: 'success',
@@ -63,13 +103,18 @@ export function AttendeesPage() {
     }
   };
 
+  // Pending payments live in their own section below; the roster table
+  // (and its export) covers confirmed and rejected registrations only.
+  const pendingRegs = attendees.filter((a) => a.status === 'pending');
+  const tableAttendees = attendees.filter((a) => a.status !== 'pending');
+
   const handleExportCSV = () => {
-    if (attendees.length === 0) {
+    if (tableAttendees.length === 0) {
       toast({ type: 'info', title: 'No attendees to export' });
       return;
     }
     const headers = ['Registration ID', 'Name', 'Email', 'Ticket Code', 'Status', 'Checked In'];
-    const rows = attendees.map((a) => [
+    const rows = tableAttendees.map((a) => [
       a.id,
       `"${a.userName}"`,
       `"${a.userEmail}"`,
@@ -93,7 +138,7 @@ export function AttendeesPage() {
     });
   };
 
-  const filtered = attendees.filter((a) => {
+  const filtered = tableAttendees.filter((a) => {
     const q = searchQuery.toLowerCase().trim();
     const matchesSearch =
       !q ||
@@ -203,6 +248,55 @@ export function AttendeesPage() {
         </div>
       </div>
 
+      {/* Pending payment approvals — manual-approval flow for paid events.
+          Approve issues the pass; reject releases the held spot. */}
+      {pendingRegs.length > 0 && (
+        <div className="bg-amber-50/60 rounded-2xl border border-amber-200 p-5 space-y-3 shadow-xs">
+          <h2 className="font-editorial text-base font-bold text-[#1E2320]">
+            Pending payment approvals ({pendingRegs.length})
+          </h2>
+          <p className="text-xs text-[#5F635D]">
+            These attendees paid and submitted a UTR. Verify each payment in your bank or UPI app, then approve to issue their pass — or reject to release the spot.
+          </p>
+          <div className="space-y-2">
+            {pendingRegs.map((reg) => (
+              <div
+                key={reg.id}
+                className="bg-white rounded-xl border border-[#E5E1D8] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+              >
+                <div className="text-xs space-y-0.5">
+                  <p className="font-semibold text-[#1E2320] text-sm">{reg.userName}</p>
+                  <p className="text-[#5F635D]">{reg.userEmail}</p>
+                  <p className="text-[#5F635D]">
+                    UTR: <span className="font-mono font-semibold text-[#1E2320]">{reg.utr || '—'}</span>
+                    <span aria-hidden="true"> · </span>
+                    {formatEventDate(reg.registeredAt)}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    disabled={busyId === reg.id}
+                    onClick={() => handleApprove(reg)}
+                    className="px-3.5 py-2 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors disabled:opacity-60"
+                  >
+                    Approve & Issue Pass
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busyId === reg.id}
+                    onClick={() => handleReject(reg)}
+                    className="px-3.5 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-lg transition-colors disabled:opacity-60"
+                  >
+                    Reject
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Search & Filter Toolbar */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
         <div className="relative flex-1 max-w-sm">
@@ -225,7 +319,7 @@ export function AttendeesPage() {
                 : 'bg-white border border-[#E2DFD8] text-[#5F635D]'
             }`}
           >
-            All ({attendees.length})
+            All ({tableAttendees.length})
           </button>
           <button
             onClick={() => setStatusFilter('confirmed')}

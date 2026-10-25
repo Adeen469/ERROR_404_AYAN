@@ -42,7 +42,7 @@ export function RegistrationsPage() {
       setCancelTarget(null);
       toast({
         type: 'info',
-        title: 'RSVP Cancelled',
+        title: cancelTarget.status === 'pending' ? 'Payment Request Withdrawn' : 'RSVP Cancelled',
         description: `Your registration for "${cancelTarget.event.title.slice(0, 30)}..." was cancelled.`,
       });
     } catch {
@@ -55,8 +55,10 @@ export function RegistrationsPage() {
     }
   };
 
-  const upcomingList = registrations.filter((r) => r.status === 'confirmed');
-  const pastList = registrations.filter((r) => r.status !== 'confirmed');
+  // Upcoming = confirmed passes plus payments awaiting organizer approval.
+  // Past = cancelled, rejected, and waitlisted records.
+  const upcomingList = registrations.filter((r) => r.status === 'confirmed' || r.status === 'pending');
+  const pastList = registrations.filter((r) => r.status !== 'confirmed' && r.status !== 'pending');
   const displayedList = filterTab === 'upcoming' ? upcomingList : pastList;
 
   return (
@@ -188,6 +190,31 @@ export function RegistrationsPage() {
                       Cancel RSVP
                     </button>
                   </>
+                ) : reg.status === 'pending' ? (
+                  <>
+                    <span className="text-xs font-medium text-amber-800 px-3 py-1 bg-amber-50 rounded-md border border-amber-200">
+                      Payment pending · UTR {reg.utr || '—'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setCancelTarget(reg)}
+                      className="px-3.5 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-lg transition-colors"
+                    >
+                      Withdraw Request
+                    </button>
+                  </>
+                ) : reg.status === 'rejected' ? (
+                  <>
+                    <span className="text-xs font-medium text-rose-700 px-3 py-1 bg-rose-50 rounded-md border border-rose-200">
+                      Payment not approved
+                    </span>
+                    <Link
+                      to={`/events/${reg.event.id}`}
+                      className="px-3.5 py-2 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors"
+                    >
+                      Try Again
+                    </Link>
+                  </>
                 ) : (
                   <span className="text-xs font-medium text-[#8C887E] px-3 py-1 bg-[#F4F1EA] rounded-md border border-[#E2DFD8]">
                     Cancelled
@@ -253,9 +280,13 @@ export function RegistrationsPage() {
         onConfirm={handleCancelRegistration}
         isLoading={cancelling}
         isDestructive
-        title="Cancel Event RSVP"
-        message={`Are you sure you want to cancel your RSVP for "${cancelTarget?.event.title}"? Your spot will be made available to other attendees immediately.`}
-        confirmLabel="Yes, Cancel RSVP"
+        title={cancelTarget?.status === 'pending' ? 'Withdraw Payment Request' : 'Cancel Event RSVP'}
+        message={
+          cancelTarget?.status === 'pending'
+            ? `Withdraw your pending payment request for "${cancelTarget?.event.title}"? Your held spot will be released.`
+            : `Are you sure you want to cancel your RSVP for "${cancelTarget?.event.title}"? Your spot will be made available to other attendees immediately.`
+        }
+        confirmLabel={cancelTarget?.status === 'pending' ? 'Yes, Withdraw Request' : 'Yes, Cancel RSVP'}
       />
     </div>
   );

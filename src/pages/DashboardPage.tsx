@@ -61,7 +61,9 @@ export function DashboardPage() {
     );
   }
 
-  const nextUpcoming = registrations[0];
+  // The next ticket must be a confirmed pass: a pending payment has no
+  // ticket code yet, so it must never render as the featured ticket.
+  const nextUpcoming = registrations.find((r) => r.status === 'confirmed');
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-10">

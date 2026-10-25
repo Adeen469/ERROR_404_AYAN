@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { PlusCircle, Edit, Users, Trash2, Eye, EyeOff, ArrowLeft } from 'lucide-react';
+import { PlusCircle, Edit, Users, Trash2, Eye, EyeOff, ArrowLeft, Clock } from 'lucide-react';
 import { EventItem } from '../types';
 import { eventsService, isEventOwner, canManageEvent } from '../services/events-service';
+import { registrationsService } from '../services/registrations-service';
 import { authService } from '../services/auth-service';
 import { isAdminEmail } from '../services/roles-service';
 import { formatEventDate, formatPrice } from '../utils/formatters';
@@ -18,6 +19,8 @@ export function OrganizerEventsPage() {
 
   const [deleteTarget, setDeleteTarget] = useState<EventItem | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // Pending manual-approval payments per event (shared table only).
+  const [pendingCounts, setPendingCounts] = useState<Record<string, number>>({});
 
   // Ownership for this list: an organizer sees only their own events;
   // admins see everything (they may delete and operate events, but not
@@ -48,6 +51,7 @@ export function OrganizerEventsPage() {
 
   useEffect(() => {
     loadEvents();
+    registrationsService.getPendingCounts().then(setPendingCounts).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -175,6 +179,15 @@ export function OrganizerEventsPage() {
 
               {/* Action Buttons */}
               <div className="flex items-center gap-2 self-end md:self-center shrink-0">
+                {pendingCounts[evt.id] ? (
+                  <Link
+                    to={`/organizer/events/${evt.id}/attendees`}
+                    className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-lg transition-colors"
+                  >
+                    <Clock className="w-3 h-3" />
+                    <span>{pendingCounts[evt.id]} pending</span>
+                  </Link>
+                ) : null}
                 <Link
                   to={`/organizer/events/${evt.id}/attendees`}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#1E2320] hover:text-[#1E3F35] bg-[#F4F1EA] hover:bg-[#EBE7DF] border border-[#E2DFD8] rounded-lg transition-colors"
