@@ -29,23 +29,27 @@ import {
   getRedirectUri,
   htmlPage,
   parseCookies,
+  sendText,
 } from "../../_lib/google-oauth";
 
 const FALLBACK_AVATAR =
   "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80";
 
 function errorPage(res: any, status: number, heading: string, detail: string) {
-  return res.status(status).send(
+  return sendText(
+    res,
+    status,
     htmlPage(
       heading,
       `<h1>${heading}</h1><p>${detail}</p><p><a href="/login">Back to sign in</a></p>`,
     ),
+    "text/html; charset=utf-8",
   );
 }
 
 export default async function handler(req: any, res: any) {
   if (req.method !== "GET") {
-    return res.status(405).send("Method not allowed");
+    return sendText(res, 405, "Method not allowed");
   }
 
   const clientId = getClientId();
@@ -215,10 +219,13 @@ export default async function handler(req: any, res: any) {
 
   // 4. Hand the profile back to the SPA, in the same localStorage shape
   //    the app already uses, then send the user to their dashboard.
-  res.setHeader("Set-Cookie", clearStateCookieHeader(req));
   const profileJson = escapeForScript(JSON.stringify(profile));
   const tokenJson = escapeForScript(JSON.stringify(tokenData.id_token));
-  return res.status(200).send(
+  res.writeHead(200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Set-Cookie": clearStateCookieHeader(req),
+  });
+  return res.end(
     htmlPage(
       "Signing you in…",
       `<p>Signing you in…</p>

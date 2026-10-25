@@ -11,7 +11,7 @@
 //   tsconfig only includes vite/client types, so `tsc --noEmit` would
 //   otherwise complain. Both are available in the Vercel Node runtime.
 
-import { randomBytes } from "node:crypto";
+import { randomBytes } from "crypto";
 
 declare const process: any;
 declare const Buffer: any;
@@ -99,4 +99,21 @@ ${bodyHtml}
 
 export function escapeForScript(json: string): string {
   return json.replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+}
+
+// Plain Node response helpers.
+//
+// Vercel's Node runtime is a plain http.ServerResponse in some setups,
+// so Express-style res.status().send() / res.redirect() cannot be relied
+// on here. These helpers use only writeHead/end, which always exist.
+export function sendText(res: any, status: number, body: string, contentType = "text/plain; charset=utf-8"): void {
+  res.writeHead(status, { "Content-Type": contentType });
+  res.end(body);
+}
+
+export function redirectTo(res: any, location: string, cookie?: string): void {
+  const headers: Record<string, string> = { Location: location };
+  if (cookie) headers["Set-Cookie"] = cookie;
+  res.writeHead(302, headers);
+  res.end();
 }

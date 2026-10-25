@@ -16,22 +16,24 @@ import {
   getClientId,
   getRedirectUri,
   randomToken,
+  redirectTo,
+  sendText,
   stateCookieHeader,
 } from "../_lib/google-oauth";
 
 export default function handler(req: any, res: any) {
   if (req.method !== "GET") {
-    return res.status(405).send("Method not allowed");
+    return sendText(res, 405, "Method not allowed");
   }
 
   const clientId = getClientId();
   if (!clientId) {
-    return res
-      .status(500)
-      .send(
-        "Google sign-in is not configured on the server. " +
-          "Set GOOGLE_CLIENT_ID in Vercel (Production) and redeploy.",
-      );
+    return sendText(
+      res,
+      500,
+      "Google sign-in is not configured on the server. " +
+        "Set GOOGLE_CLIENT_ID in Vercel (Production) and redeploy.",
+    );
   }
 
   // Role comes from the signup page's attendee/organizer choice. Anything
@@ -50,7 +52,7 @@ export default function handler(req: any, res: any) {
   // echoed back inside `state`. The callback only proceeds if they match.
   const csrf = randomToken();
   const state = encodeState({ csrf, role, returnTo });
-  res.setHeader("Set-Cookie", stateCookieHeader(csrf, req));
+  const cookie = stateCookieHeader(csrf, req);
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -62,8 +64,9 @@ export default function handler(req: any, res: any) {
     state,
   });
 
-  return res.redirect(
-    302,
+  return redirectTo(
+    res,
     `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`,
+    cookie,
   );
 }
