@@ -20,6 +20,10 @@ export function ProfilePage() {
 
   const [name, setName] = useState(currentUser?.name || '');
   const [email] = useState(currentUser?.email || '');
+  // Mobile number: collected once by the attendee details gate before
+  // a registration that requires details, and editable here any time.
+  // Shared with event organizers only, on registrations that require it.
+  const [phone, setPhone] = useState(currentUser?.phone || '');
   const [bio, setBio] = useState(currentUser?.bio || '');
   // Home location (Country -> State -> City) for "Near me" on Discover.
   const [homeLocation, setHomeLocation] = useState({
@@ -87,12 +91,18 @@ export function ProfilePage() {
       setError('Please select at least one interest to power your recommendations.');
       return;
     }
+    const phoneDigits = phone.replace(/\D/g, '');
+    if (phone.trim() && (phoneDigits.length < 7 || phoneDigits.length > 15)) {
+      setError('Please enter a valid mobile number (7–15 digits).');
+      return;
+    }
     setError('');
     setSaving(true);
 
     try {
       await authService.updateProfile({
         name: name.trim(),
+        phone: phone.trim(),
         bio: bio.trim(),
         country: homeLocation.country,
         state: homeLocation.state,
@@ -177,6 +187,22 @@ export function ProfilePage() {
                 value={email}
                 className="w-full text-xs bg-[#F4F1EA] border border-[#E2DFD8] rounded-lg p-2.5 text-[#8C887E] cursor-not-allowed"
               />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+                Mobile Number
+              </label>
+              <input
+                type="tel"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="e.g. 9876543210"
+                className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-2.5 text-[#1E2320] focus:border-[#1E3F35]"
+              />
+              <span className="text-[11px] text-[#8C887E]">
+                Shared with event organizers only, when you register for events that require attendee details.
+              </span>
             </div>
           </div>
 
