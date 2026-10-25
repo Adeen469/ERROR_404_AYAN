@@ -34,10 +34,24 @@ custom domain is needed.
      (spaces don't matter; they are stripped).
 4. Redeploy (or wait for the next push to deploy).
 
+## Attendee confirmation emails
+
+The same Gmail setup also sends confirmation emails to attendees — no
+extra configuration:
+
+- A **free** registration issues its pass instantly and emails the
+  attendee a confirmation with the ticket code.
+- An **approved** paid registration emails the attendee their pass
+  (ticket code) at approval time.
+- The recipient is the registration's own email address, and the email
+  links back to the event page.
+
 ## Requirements and limits
 
-- Email only fires for **pending** registrations (paid events). Free
-  events issue passes instantly, so there is nothing to approve.
+- The organizer approval email only fires for **pending** registrations
+  (paid events). Free events issue passes instantly, so there is
+  nothing to approve — but the attendee still gets the confirmation
+  email above.
 - Email requires the shared `registrations` table (see
   `REGISTRATIONS_SETUP.md`). Without it, registrations only live in the
   attendee's browser, the server never sees them, and no email is sent.

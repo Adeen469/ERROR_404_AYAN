@@ -44,15 +44,19 @@
 // If the env vars are missing, this returns 503 JSON and the frontend
 // falls back to per-browser local registrations.
 //
-// Organizer email notification (see ORGANIZER_NOTIFICATIONS_SETUP.md):
+// Email notifications (see ORGANIZER_NOTIFICATIONS_SETUP.md):
 // when a PENDING registration is stored (a paid event's payment awaiting
 // approval), the organizer gets an email with the attendee, amount, UTR
-// and a link to the Attendees page. Sending is best-effort and gated on
-// GMAIL_USER / GMAIL_APP_PASSWORD: without them nothing is sent and the
-// registration still succeeds, and the in-app "N pending" badge remains
-// the fallback signal. The send is awaited before responding (serverless
-// work after a response is not guaranteed to run), but any mail failure
-// is swallowed so it can never fail a registration.
+// and a link to the Attendees page; and when a registration is CONFIRMED
+// with a ticket code (a free instant registration, or an organizer's
+// approval), the attendee gets a confirmation email with that code.
+// Sending is best-effort and gated on GMAIL_USER / GMAIL_APP_PASSWORD:
+// without them nothing is sent and the registration still succeeds, and
+// the in-app pass / "N pending" badge remain the fallback signals. Sends
+// are awaited before responding (serverless work after a response is not
+// guaranteed to run), but any mail failure is swallowed so it can never
+// fail a registration. Rejected payments mail nobody; the attendee sees
+// "Payment not approved" in the app.
 
 function getEnv(name: string): string {
   try {
@@ -181,10 +185,45 @@ export function buildApprovalEmail(reg: any, event: any): { to: string; subject:
   return { to, subject, text, html };
 }
 
-async function sendApprovalEmail(reg: any, event: any): Promise<boolean> {
+// Confirmation email for the attendee. Sent when a registration is
+// confirmed with a ticket code: a free instant registration, or an
+// organizer's approval of a paid one. Returns null without a recipient
+// or without a ticket code, so a confirmation without a pass is never
+// mailed. Exported for unit tests, like buildApprovalEmail.
+export function buildAttendeeConfirmationEmail(reg: any, event: any): { to: string; subject: string; text: string; html: string } | null {
+  const to = reg?.userEmail || '';
+  if (!to || !reg?.ticketCode) return null;
+  const title = event?.title || 'the event';
+  const venue = [event?.venueName, event?.city, event?.state].filter(Boolean).join(', ');
+  let when = '';
+  try {
+    if (event?.startDate) {
+      when = new Date(event.startDate).toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        dateStyle: 'medium',
+        timeStyle: 'short',
+      });
+    }
+  } catch {
+    when = '';
+  }
+  const link = `https://locora-hyperlocal.vercel.app/events/${reg.eventId}`;
+  const subject = `You're registered: ${title}`;
+  const lines = [
+    `You're registered for "${title}".`,
+    `Your ticket code: ${reg.ticketCode}`,
+    venue ? `Venue: ${venue}` : '',
+    when ? `When: ${when}` : '',
+    `Show this code at the event. View the event here: ${link}`,
+  ].filter(Boolean);
+  const text = lines.join('\n\n');
+  const html = lines.map((l) => `<p>${l}</p>`).join('\n');
+  return { to, subject, text, html };
+}
+
+async function sendMail(mail: { to: string; subject: string; text: string; html: string } | null): Promise<boolean> {
   const user = getEnv('GMAIL_USER');
   const pass = getEnv('GMAIL_APP_PASSWORD');
-  const mail = buildApprovalEmail(reg, event);
   if (!user || !pass || !mail) return false;
   try {
     // Dynamic import: nodemailer loads only when an email is actually
@@ -197,9 +236,17 @@ async function sendApprovalEmail(reg: any, event: any): Promise<boolean> {
     await transporter.sendMail({ from: user, ...mail });
     return true;
   } catch (err) {
-    console.warn('Approval email failed (registration still stored):', err);
+    console.warn('Email failed (registration still stored):', err);
     return false;
   }
+}
+
+async function sendApprovalEmail(reg: any, event: any): Promise<boolean> {
+  return sendMail(buildApprovalEmail(reg, event));
+}
+
+async function sendAttendeeConfirmationEmail(reg: any, event: any): Promise<boolean> {
+  return sendMail(buildAttendeeConfirmationEmail(reg, event));
 }
 
 function mayManageEvent(event: any, approverEmail: string): boolean {
@@ -271,14 +318,17 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       const stored = Array.isArray(body) && body.length > 0 ? body[0].data : reg;
-      // Pending payment? Notify the organizer. Awaited for reliability
-      // (see header), but any failure is swallowed: email must never
-      // fail a registration, and free/instant registrations need no
-      // approval email at all.
-      if (stored && stored.status === 'pending') {
+      // Pending payment? Notify the organizer. Confirmed with a ticket
+      // code (a free instant registration)? Confirm to the attendee.
+      // Awaited for reliability (see header), but any failure is
+      // swallowed: email must never fail a registration.
+      if (stored) {
         try {
           const event = await loadEvent(stored.eventId);
-          if (event) await sendApprovalEmail(stored, event);
+          if (event) {
+            if (stored.status === 'pending') await sendApprovalEmail(stored, event);
+            else if (stored.status === 'confirmed') await sendAttendeeConfirmationEmail(stored, event);
+          }
         } catch {
           // Best-effort only.
         }
@@ -328,6 +378,17 @@ export default async function handler(req: any, res: any): Promise<void> {
       if (!ok) {
         sendJson(res, 500, { message: "Failed to update registration" });
         return;
+      }
+      // Approval: a pending registration just became confirmed with a
+      // pass — tell the attendee. Only the pending -> confirmed
+      // transition mails, so check-ins and re-saves stay silent.
+      if (existing.status === 'pending' && merged.status === 'confirmed' && merged.ticketCode) {
+        try {
+          const event = await loadEvent(merged.eventId);
+          if (event) await sendAttendeeConfirmationEmail(merged, event);
+        } catch {
+          // Best-effort only.
+        }
       }
       sendJson(res, 200, merged);
       return;
