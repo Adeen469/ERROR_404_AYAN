@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Search, SlidersHorizontal, X, RotateCcw, MapPin } from 'lucide-react';
 import { EventFilterOptions } from '../../types';
-import { DEMO_CATEGORIES, DEMO_NEIGHBORHOODS } from '../../mocks/demo-data';
+import { DEMO_CATEGORIES } from '../../mocks/demo-data';
 import { LocationPicker } from '../LocationPicker';
 
 interface EventFiltersProps {
@@ -98,20 +98,8 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
           )}
         </div>
 
-        {/* Desktop Dropdowns: Neighborhood & Date */}
+        {/* Desktop Dropdowns: Date, Price & Sort (location is the card below) */}
         <div className="hidden sm:flex items-center gap-3 shrink-0">
-          <select
-            value={filters.neighborhood || 'All'}
-            onChange={(e) => onChange({ ...filters, neighborhood: e.target.value })}
-            className="text-xs font-medium bg-white text-[#1E2320] border border-[#E2DFD8] rounded-xl px-3 py-2.5 shadow-2xs focus:border-[#1E3F35] cursor-pointer"
-          >
-            {DEMO_NEIGHBORHOODS.map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </select>
-
           <select
             value={filters.dateRange || 'all'}
             onChange={(e) =>
@@ -252,21 +240,6 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
               >
                 <X className="w-5 h-5" />
               </button>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">Neighborhood</label>
-              <select
-                value={filters.neighborhood || 'All'}
-                onChange={(e) => onChange({ ...filters, neighborhood: e.target.value })}
-                className="w-full text-sm bg-white text-[#1E2320] border border-[#E2DFD8] rounded-xl p-3"
-              >
-                {DEMO_NEIGHBORHOODS.map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
-              </select>
             </div>
 
             <div>
