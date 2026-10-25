@@ -4,6 +4,7 @@ import { ArrowLeft, Image, AlertCircle, Sparkles, Check } from 'lucide-react';
 import { EventCategory, EventItem } from '../types';
 import { DEMO_CATEGORIES } from '../mocks/demo-data';
 import { LocationPicker } from '../components/LocationPicker';
+import { ImageUploadField } from '../components/events/ImageUploadField';
 import { eventsService } from '../services/events-service';
 import { authService } from '../services/auth-service';
 import { useToast } from '../components/ui/Toast';
@@ -52,6 +53,10 @@ export function CreateEventPage() {
   const [category, setCategory] = useState<EventCategory>('Food & Community');
   const [coverImage, setCoverImage] = useState(PRESET_COVER_IMAGES[0].url);
   const [customImageUrl, setCustomImageUrl] = useState('');
+  // Uploaded cover (data URL from ImageUploadField). Only one cover source
+  // is active at a time: picking a preset, typing a URL, or uploading each
+  // clears the others.
+  const [uploadedImage, setUploadedImage] = useState<string | null>(null);
   const [startDate, setStartDate] = useState('2026-11-20T18:00');
   const [endDate, setEndDate] = useState('2026-11-20T21:00');
   const [venueName, setVenueName] = useState('');
@@ -116,7 +121,9 @@ export function CreateEventPage() {
 
     setSubmitting(true);
     try {
-      const activeImage = customImageUrl.trim() ? customImageUrl.trim() : coverImage;
+      const activeImage = customImageUrl.trim()
+        ? customImageUrl.trim()
+        : uploadedImage || coverImage;
       const tags = tagsInput
         .split(',')
         .map((t) => t.trim())
@@ -274,7 +281,8 @@ export function CreateEventPage() {
 
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
             {PRESET_COVER_IMAGES.map((preset) => {
-              const selected = coverImage === preset.url && !customImageUrl;
+              const selected =
+                coverImage === preset.url && !customImageUrl && !uploadedImage;
               return (
                 <button
                   key={preset.name}
@@ -282,6 +290,7 @@ export function CreateEventPage() {
                   onClick={() => {
                     setCoverImage(preset.url);
                     setCustomImageUrl('');
+                    setUploadedImage(null);
                   }}
                   className={`relative rounded-xl overflow-hidden aspect-[4/3] border-2 transition-all cursor-pointer ${
                     selected ? 'border-[#1E3F35] shadow-md ring-2 ring-[#D0E2D9]' : 'border-transparent opacity-80 hover:opacity-100'
@@ -308,12 +317,29 @@ export function CreateEventPage() {
 
           <div>
             <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+              Or Upload Your Own Image
+            </label>
+            <ImageUploadField
+              uploadedImage={uploadedImage}
+              onUpload={(dataUrl) => {
+                setUploadedImage(dataUrl);
+                setCustomImageUrl('');
+              }}
+              onRemove={() => setUploadedImage(null)}
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
               Or Custom Image URL
             </label>
             <input
               type="url"
               value={customImageUrl}
-              onChange={(e) => setCustomImageUrl(e.target.value)}
+              onChange={(e) => {
+                setCustomImageUrl(e.target.value);
+                if (e.target.value.trim()) setUploadedImage(null);
+              }}
               placeholder="https://example.com/photo.jpg"
               className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
             />
