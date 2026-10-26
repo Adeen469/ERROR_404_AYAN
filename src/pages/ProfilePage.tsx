@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { User, Check, AlertCircle, MapPin, Sparkles, LogOut } from 'lucide-react';
+import { User, Check, AlertCircle, Sparkles, LogOut } from 'lucide-react';
 import { authService } from '../services/auth-service';
 import { UserProfile, EventCategory } from '../types';
 import { DEMO_CATEGORIES } from '../mocks/demo-data';
@@ -320,6 +320,68 @@ export function ProfilePage() {
               <span className="text-[11px] text-[#8C887E]">
                 Shared with event organizers only, when you register for events that require attendee details.
               </span>
+              {/* Verification lives here now (was its own card below):
+                  same Telegram flow, just next to the number it
+                  verifies. type="button" matters — this sits inside
+                  the profile form, so it must not submit it. */}
+              <div className="mt-2 space-y-2">
+                {phoneVerified ? (
+                  <p className="text-[11px] leading-relaxed text-[#1E2320]">
+                    <span className="font-semibold text-[#1E3F35]">✓ {currentUser?.phone} is verified</span> via Telegram.
+                    Changing the number above and saving will remove verification until the new number is confirmed.
+                  </p>
+                ) : verifyWaiting ? (
+                  <div className="space-y-2">
+                    <p className="text-[11px] text-[#5F635D] leading-relaxed">
+                      Waiting for you to share your number in Telegram. Open the link, tap “Share my phone number”, and this updates automatically. The link lasts 15 minutes.
+                    </p>
+                    {verifyLink && (
+                      <a
+                        href={verifyLink}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-block px-4 py-2 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors"
+                      >
+                        Open Telegram
+                      </a>
+                    )}
+                    <div>
+                      <button
+                        type="button"
+                        onClick={handleCancelVerify}
+                        className="text-[11px] font-semibold text-[#5F635D] hover:text-[#1E2320] transition-colors cursor-pointer"
+                      >
+                        Cancel verification
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {!currentUser?.phone ? (
+                      <p className="text-[11px] text-[#8C887E] leading-relaxed">
+                        Save a mobile number first, then verify it here. Verification is free — it uses Telegram, not SMS.
+                      </p>
+                    ) : phone.trim() !== currentUser.phone ? (
+                      <p className="text-[11px] text-amber-700 leading-relaxed">
+                        You edited the number above but haven&apos;t saved it yet — save it first, then verify.
+                      </p>
+                    ) : (
+                      <p className="text-[11px] text-[#5F635D] leading-relaxed">
+                        Confirm this number is really yours — free, via Telegram. No SMS code, no cost.
+                      </p>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleStartVerify}
+                      disabled={verifyStarting || !currentUser?.phone || phone.trim() !== currentUser.phone}
+                      className="px-4 py-2 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-60 cursor-pointer"
+                    >
+                      {verifyStarting ? 'Starting…' : 'Verify via Telegram'}
+                    </button>
+                  </div>
+                )}
+                {verifyError && <p className="text-[11px] text-rose-600">{verifyError}</p>}
+              </div>
             </div>
           </div>
 
@@ -411,70 +473,6 @@ export function ProfilePage() {
           </button>
         </div>
       </form>
-
-      {/* Mobile verification (free via Telegram, no SMS) */}
-      <div className="bg-white p-6 sm:p-8 rounded-2xl border border-[#E5E1D8] shadow-xs space-y-4">
-        <h2 className="font-editorial text-base font-bold text-[#1E2320] pb-2 border-b border-[#EBE7DF]">
-          Mobile Verification
-        </h2>
-        {!currentUser?.phone ? (
-          <p className="text-xs text-[#5F635D] leading-relaxed">
-            Save a mobile number above first, then verify it here. Verification is free — it uses Telegram, not SMS.
-          </p>
-        ) : phoneVerified ? (
-          <p className="text-xs text-[#1E2320] leading-relaxed">
-            <span className="font-semibold text-[#1E3F35]">✓ {currentUser.phone} is verified</span> via Telegram.
-            Changing your number above and saving will remove verification until the new number is confirmed.
-          </p>
-        ) : verifyWaiting ? (
-          <div className="space-y-3">
-            <p className="text-xs text-[#5F635D] leading-relaxed">
-              Waiting for you to share your number in Telegram. Open the link below, tap “Share my phone number” in the
-              bot chat, and this page will update automatically. The link lasts 15 minutes.
-            </p>
-            {verifyLink && (
-              <a
-                href={verifyLink}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-block px-5 py-2.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors"
-              >
-                Open Telegram
-              </a>
-            )}
-            <div>
-              <button
-                type="button"
-                onClick={handleCancelVerify}
-                className="text-xs font-semibold text-[#5F635D] hover:text-[#1E2320] transition-colors"
-              >
-                Cancel verification
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            <p className="text-xs text-[#5F635D] leading-relaxed">
-              Confirm {currentUser.phone} is really yours — free, via Telegram. No SMS code, no cost: the bot asks you to
-              share the number Telegram already verified, and Locora matches it to this profile.
-            </p>
-            {phone.trim() !== currentUser.phone && (
-              <p className="text-[11px] text-amber-700">
-                You edited the number above but haven&apos;t saved it yet — save it first, then verify.
-              </p>
-            )}
-            <button
-              type="button"
-              onClick={handleStartVerify}
-              disabled={verifyStarting || phone.trim() !== currentUser.phone}
-              className="px-5 py-2.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-60"
-            >
-              {verifyStarting ? 'Starting…' : 'Verify via Telegram'}
-            </button>
-          </div>
-        )}
-        {verifyError && <p className="text-[11px] text-rose-600">{verifyError}</p>}
-      </div>
 
       {/* Organizer access */}
       <div className="bg-white p-6 sm:p-8 rounded-2xl border border-[#E5E1D8] shadow-xs space-y-4">

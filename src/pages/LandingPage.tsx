@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { eventsService } from '../services/events-service';
+import { authService } from '../services/auth-service';
 import { EventItem } from '../types';
 import { formatEventDate, formatEventTimeRange, formatPrice, getEventNeighborhood } from '../utils/formatters';
 import {
@@ -20,6 +21,11 @@ import heroGatheringImg from '../assets/images/hero_neighborhood_gathering_17928
 
 export function LandingPage() {
   const [activeFaq, setActiveFaq] = useState<number | null>(null);
+  // Guests must sign in before viewing an event from here: the same
+  // button goes to the event for signed-in visitors and to sign-in
+  // for everyone else. (Direct event links and Discover stay public;
+  // only this landing button is gated.)
+  const currentUser = authService.getCurrentUser();
 
   // Real platform stats, computed from the actual (shared) event list —
   // not hardcoded marketing numbers. While the list is loading the
@@ -224,7 +230,7 @@ export function LandingPage() {
                         </div>
                       </div>
                       <Link
-                        to={`/events/${nextEvent.id}`}
+                        to={currentUser ? `/events/${nextEvent.id}` : '/login'}
                         className="px-3.5 py-1.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors shrink-0"
                       >
                         View Event
