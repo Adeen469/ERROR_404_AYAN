@@ -392,7 +392,10 @@ export function MessagesPage() {
         file: sendingFile,
       });
       setPending((prev) => prev.filter((p) => p.id !== temp.id));
-      setMessages((prev) => [...prev, created]);
+      // Dedupe by id: the 5s poll can already have fetched this very
+      // message before the post's own response arrived — appending
+      // blindly showed it twice until the next poll.
+      setMessages((prev) => (prev.some((m) => m.id === created.id) ? prev : [...prev, created]));
       setPendingThread(null);
       await loadMessages(true);
     } catch (err: any) {
@@ -417,7 +420,7 @@ export function MessagesPage() {
         file: temp.localFile || null,
       });
       setPending((prev) => prev.filter((p) => p.id !== temp.id));
-      setMessages((prev) => [...prev, created]);
+      setMessages((prev) => (prev.some((m) => m.id === created.id) ? prev : [...prev, created]));
       await loadMessages(true);
     } catch (err: any) {
       setPending((prev) =>
@@ -477,15 +480,29 @@ export function MessagesPage() {
     const { message, scope } = confirmDelete;
     setConfirmDelete(null);
     setToastHiddenId(null);
-    const timer = window.setTimeout(() => {
-      setPendingDeletes((prev) => prev.filter((d) => d.id !== message.id));
-      const run =
-        scope === 'everyone'
-          ? messagesService.deleteForEveryone(message.id, message.senderEmail)
-          : messagesService.hideMessage(message.id, meEmail);
-      run.catch((err: any) => {
+    // BUG (fixed): the old code dropped the local hide filter FIRST
+    // and then fired the ~2s server call with no reload after it, so
+    // the "deleted" message popped back into view and lingered until
+    // a manual refresh (or a lucky poll) fetched the fresh list.
+    // Now the filter stays on until the server call succeeds AND the
+    // local list is updated — the message can never reappear.
+    const timer = window.setTimeout(async () => {
+      try {
+        if (scope === 'everyone') {
+          await messagesService.deleteForEveryone(message.id, message.senderEmail);
+        } else {
+          await messagesService.hideMessage(message.id, meEmail);
+        }
+        // Remove locally at once; the reload below is just consistency.
+        setMessages((prev) => prev.filter((m) => m.id !== message.id));
+        await loadMessages(true);
+      } catch (err: any) {
+        // Server delete failed: the filter drops below, so the message
+        // comes back and the failure is shown — never a silent
+        // pretend-delete.
         setSendError(err?.message || 'Could not delete the message. Please try again.');
-      });
+      }
+      setPendingDeletes((prev) => prev.filter((d) => d.id !== message.id));
     }, 5000);
     setPendingDeletes((prev) => [
       ...prev.filter((d) => d.id !== message.id),
@@ -911,7 +928,7 @@ export function MessagesPage() {
           Undo cancels it. Kept local to this page so the Undo action
           can never go stale by outliving the chat. */}
       {showDeleteToast && toastDelete && (
-        <div className="fixed bottom-4 right-4 z-50 flex items-center gap-3 p-4 bg-white rounded-xl border border-[#E5E1D8] shadow-lg max-w-sm w-full mx-4 sm:mx-0">
+        <div className="fixed bottom-4 left-4 right-4 z-50 flex items-center gap-3 p-4 bg-white rounded-xl border border-[#E5E1D8] shadow-lg sm:left-auto sm:right-4 sm:w-96">
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold text-[#1E2320] leading-tight">Message deleted</p>
             <p className="text-xs text-[#5F635D] mt-0.5">
