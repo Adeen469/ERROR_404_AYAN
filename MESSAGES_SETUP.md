@@ -52,16 +52,26 @@ no redeploy step beyond that.
 - Files never travel through Vercel (serverless payloads cap around
   4.5MB): the browser uploads straight to Storage with the signed URL,
   and only the file metadata reaches the API.
-- Sending feels instant: the bubble appears immediately (optimistic
-  UI) while the upload + post finish in the background, and the inbox
-  refreshes every 5 seconds while open. A failed send stays visible
-  with a Retry button instead of vanishing.
+- Sending feels instant: the bubble appears immediately as a normal
+  sent message (optimistic UI) — there is no "Sending…" state. When
+  the post returns, the server copy swaps in during the same render,
+  so there is no gap and no duplicate. A failed send stays visible
+  with a Retry button instead of vanishing. The inbox refreshes every
+  5 seconds while open.
 - Message actions (right-click / long-press on a bubble): Delete for
   everyone (sender only, any time — removes the row and, best effort,
   its Storage object), Delete for me (either side, any time — hides it
   for that user only via a hiddenFor list), Edit (own text only,
   within 1 hour of sending; the bubble then shows "edited"). Deletes
   have no time limit; the 1-hour limit applies to edits only.
+- Deletes are confirmed first (shared Modal dialog), then hidden
+  locally at once with a "Message deleted" toast and an Undo button.
+  The real server call only runs when the 5-second toast expires, so
+  Undo needs no server-side restore; leaving the page inside the
+  window flushes the pending deletes immediately. Dismissing the toast
+  (X) only hides it — the delete still runs; only Undo cancels it.
+  A full browser refresh inside the 5s window is the one exception:
+  the timers die with the page and the message comes back.
 - Honest limit, same as registrations: there is no session auth, so
   sender/recipient checks trust the signed-in email the app sends.
   They stop misuse through the API, but they are not proof of identity

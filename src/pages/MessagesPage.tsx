@@ -7,7 +7,9 @@ import {
   MessageCircle,
   Paperclip,
   Send,
+  X,
 } from 'lucide-react';
+import { Modal } from '../components/ui/Modal';
 import { authService } from '../services/auth-service';
 import { eventsService } from '../services/events-service';
 import {
@@ -55,6 +57,13 @@ interface MenuState {
   x: number;
   y: number;
   message: EventMessage;
+}
+
+interface PendingDelete {
+  id: string;
+  scope: 'everyone' | 'me';
+  message: EventMessage;
+  timer: number;
 }
 
 function AttachmentView({ m }: { m: EventMessage }) {
@@ -113,6 +122,19 @@ export function MessagesPage() {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
+  // Deletes awaiting their undo window: the message is hidden locally
+  // the moment you confirm, and the real server call only runs when
+  // the 5s toast expires (or immediately if you leave the page — see
+  // the unmount flush below). Undo inside the window cancels it, so
+  // no server-side restore is ever needed.
+  const [pendingDeletes, setPendingDeletes] = useState<PendingDelete[]>([]);
+  const pendingDeletesRef = useRef<PendingDelete[]>([]);
+  pendingDeletesRef.current = pendingDeletes;
+  const [confirmDelete, setConfirmDelete] = useState<{
+    message: EventMessage;
+    scope: 'everyone' | 'me';
+  } | null>(null);
+  const [toastHiddenId, setToastHiddenId] = useState<string | null>(null);
   const pressTimer = useRef<number | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
@@ -145,6 +167,27 @@ export function MessagesPage() {
     const timer = setInterval(() => loadMessages(true), 5000);
     return () => clearInterval(timer);
   }, [loadMessages]);
+
+  // Leaving the page inside an undo window must not resurrect a
+  // confirmed delete: flush any still-pending deletes immediately.
+  // (A full browser refresh inside the 5s window is the one exception
+  // — the timers die with the page and the message comes back.)
+  useEffect(() => {
+    return () => {
+      pendingDeletesRef.current.forEach((d) => {
+        window.clearTimeout(d.timer);
+        // 'everyone' deletes run as the sender; 'me' hides run as the
+        // current user (meEmail is fixed at mount, so capturing it
+        // in this mount-only effect is safe).
+        const run =
+          d.scope === 'everyone'
+            ? messagesService.deleteForEveryone(d.id, d.message.senderEmail)
+            : messagesService.hideMessage(d.id, meEmail);
+        run.catch(() => {});
+      });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Deep link from an event page: /messages?eventId=x&with=organizer@…
   // selects that thread, or prepares a fresh composer when no message
@@ -192,7 +235,13 @@ export function MessagesPage() {
     };
   }, [queryEventId, queryWith, currentUser?.email]);
 
-  const threads = groupThreads(messages, meEmail);
+  // Messages hidden by a confirmed (but not yet executed) delete stay
+  // hidden through reloads inside the undo window — otherwise the 5s
+  // poll would resurrect them before the toast expires.
+  const visibleServerMessages = messages.filter(
+    (m) => !pendingDeletes.some((d) => d.id === m.id),
+  );
+  const threads = groupThreads(visibleServerMessages, meEmail);
   const allThreads: MessageThread[] = pendingThread
     ? threads.some((t) => t.key === pendingThread.key)
       ? threads
@@ -201,13 +250,32 @@ export function MessagesPage() {
   const selected = allThreads.find((t) => t.key === selectedKey) || null;
 
   // Server messages plus in-flight ones for this thread, oldest
-  // first. Pending entries vanish on confirm (the reload brings the
-  // real copy with the server id and timestamp).
+  // first. A pending bubble is dropped once its server copy shows up
+  // (the 5s poll can beat the post's own response by a hair); the
+  // createdAt guard keeps a genuinely repeated message ("Hi", "Hi")
+  // from collapsing into the first copy.
   const visibleMessages: ChatMessage[] = selected
-    ? [...selected.messages, ...pending.filter((p) => p.threadKey === selected.key)].sort(
-        (a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''),
-      )
+    ? [
+        ...selected.messages,
+        ...pending.filter(
+          (p) =>
+            p.threadKey === selected.key &&
+            !selected.messages.some(
+              (s) =>
+                s.senderEmail === p.senderEmail &&
+                (s.text || '') === (p.text || '') &&
+                (s.attachment?.name || null) === (p.attachment?.name || null) &&
+                Date.parse(s.createdAt) >= Date.parse(p.createdAt) &&
+                Date.parse(s.createdAt) - Date.parse(p.createdAt) < 30000,
+            ),
+        ),
+      ].sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
     : [];
+
+  // The undo toast shows the most recent pending delete.
+  const toastDelete =
+    pendingDeletes.length > 0 ? pendingDeletes[pendingDeletes.length - 1] : null;
+  const showDeleteToast = !!toastDelete && toastHiddenId !== toastDelete.id;
 
   // Menu eligibility, computed once per render: Delete for everyone is
   // the sender's only (a recipient uses Delete for me); Edit is own
@@ -243,13 +311,15 @@ export function MessagesPage() {
   }
 
   // The actual network delivery, shared by fresh sends and retries:
-  // upload first (if a file), then post the message. Throws on failure.
+  // upload first (if a file), then post the message. Returns the
+  // created server copy so the caller can swap it in immediately.
+  // Throws on failure.
   async function deliver(input: {
     eventId: string;
     recipientEmail: string;
     text: string;
     file?: File | null;
-  }): Promise<void> {
+  }): Promise<EventMessage> {
     if (!currentUser?.email) throw new Error('Sign in to send messages.');
     let attachmentMeta: { name: string; size: number; type: string; path: string } | undefined;
     if (input.file) {
@@ -266,7 +336,7 @@ export function MessagesPage() {
       await messagesService.uploadFile(uploadUrl, input.file);
       attachmentMeta = { name: input.file.name, size: input.file.size, type: input.file.type, path };
     }
-    await messagesService.sendMessage({
+    return messagesService.sendMessage({
       eventId: input.eventId,
       senderEmail: currentUser.email,
       senderName: currentUser.name,
@@ -276,11 +346,14 @@ export function MessagesPage() {
     });
   }
 
-  // Optimistic send: the bubble appears instantly, then the server
-  // confirms it (and the reload swaps in the real copy). On failure
-  // the bubble stays with a Retry button — a failed send is never
-  // silently dropped, and the composer is never blocked waiting on
-  // the network (the old flow cost ~2s POST + ~2s reload per send).
+  // Optimistic send: the bubble appears instantly as a normal sent
+  // message — no "Sending…" limbo. On post success the server copy
+  // swaps in during the same render (no gap, no duplicate, and the
+  // message now has its real id, so menus work on it at once). The
+  // silent reload after that is just consistency — visually a no-op.
+  // On failure the bubble stays with a Retry button — a failed send
+  // is never silently dropped, and the composer is never blocked
+  // waiting on the network.
   async function handleSend() {
     if (!currentUser?.email || !selected) return;
     const text = draft.trim();
@@ -312,13 +385,14 @@ export function MessagesPage() {
     setFile(null);
     setSendError('');
     try {
-      await deliver({
+      const created = await deliver({
         eventId: selected.eventId,
         recipientEmail: selected.otherEmail,
         text,
         file: sendingFile,
       });
       setPending((prev) => prev.filter((p) => p.id !== temp.id));
+      setMessages((prev) => [...prev, created]);
       setPendingThread(null);
       await loadMessages(true);
     } catch (err: any) {
@@ -336,13 +410,14 @@ export function MessagesPage() {
     );
     setSendError('');
     try {
-      await deliver({
+      const created = await deliver({
         eventId: temp.eventId,
         recipientEmail: temp.recipientEmail,
         text: temp.text || '',
         file: temp.localFile || null,
       });
       setPending((prev) => prev.filter((p) => p.id !== temp.id));
+      setMessages((prev) => [...prev, created]);
       await loadMessages(true);
     } catch (err: any) {
       setPending((prev) =>
@@ -386,24 +461,46 @@ export function MessagesPage() {
     );
   }
 
-  async function handleDeleteForMe(m: EventMessage) {
+  // Menu actions only OPEN the confirm dialog; nothing is deleted yet.
+  function askDelete(m: EventMessage, scope: 'everyone' | 'me') {
     closeMenu();
-    try {
-      await messagesService.hideMessage(m.id, meEmail);
-      await loadMessages(true);
-    } catch (err: any) {
-      setSendError(err?.message || 'Could not delete the message.');
-    }
+    setConfirmDelete({ message: m, scope });
   }
 
-  async function handleDeleteForEveryone(m: EventMessage) {
-    closeMenu();
-    try {
-      await messagesService.deleteForEveryone(m.id, meEmail);
-      await loadMessages(true);
-    } catch (err: any) {
-      setSendError(err?.message || 'Could not delete the message.');
-    }
+  // Confirmed: hide locally at once, show the Undo toast, and only
+  // run the real server call when the 5s window expires. If that call
+  // then fails, the message is no longer hidden locally, so it comes
+  // back on the next reload and the failure is shown — never a silent
+  // pretend-delete.
+  function confirmDeleteNow() {
+    if (!confirmDelete) return;
+    const { message, scope } = confirmDelete;
+    setConfirmDelete(null);
+    setToastHiddenId(null);
+    const timer = window.setTimeout(() => {
+      setPendingDeletes((prev) => prev.filter((d) => d.id !== message.id));
+      const run =
+        scope === 'everyone'
+          ? messagesService.deleteForEveryone(message.id, message.senderEmail)
+          : messagesService.hideMessage(message.id, meEmail);
+      run.catch((err: any) => {
+        setSendError(err?.message || 'Could not delete the message. Please try again.');
+      });
+    }, 5000);
+    setPendingDeletes((prev) => [
+      ...prev.filter((d) => d.id !== message.id),
+      { id: message.id, scope, message, timer },
+    ]);
+  }
+
+  // Undo cancels the pending delete; the message was never removed
+  // server-side, so it simply reappears.
+  function undoDelete() {
+    const last = pendingDeletes[pendingDeletes.length - 1];
+    if (!last) return;
+    window.clearTimeout(last.timer);
+    setPendingDeletes((prev) => prev.filter((d) => d.id !== last.id));
+    setToastHiddenId(null);
   }
 
   async function handleSaveEdit() {
@@ -560,7 +657,7 @@ export function MessagesPage() {
                             mine
                               ? 'bg-[#1E3F35] text-white rounded-br-md'
                               : 'bg-[#F4F1EA] text-[#1E2320] rounded-bl-md'
-                          } ${m.pending ? 'opacity-70' : ''}`}
+                          }`}
                           style={{ WebkitTouchCallout: 'none' } as React.CSSProperties}
                           onContextMenu={(e) => {
                             e.preventDefault();
@@ -613,7 +710,7 @@ export function MessagesPage() {
                                 />
                               ) : m.pending && m.attachment ? (
                                 <span className="text-xs opacity-80">
-                                  {m.attachment.name} · {formatFileSize(m.attachment.size)} · Sending…
+                                  {m.attachment.name} · {formatFileSize(m.attachment.size)}
                                 </span>
                               ) : (
                                 <AttachmentView m={m} />
@@ -621,7 +718,6 @@ export function MessagesPage() {
                               <p className={`text-[10px] ${mine ? 'text-white/70' : 'text-[#8C887E]'}`}>
                                 {fmtTime(m.createdAt)}
                                 {m.edited ? ' · edited' : ''}
-                                {m.pending ? ' · Sending…' : ''}
                               </p>
                               {m.failed && (
                                 <span className="flex items-center gap-2">
@@ -743,7 +839,7 @@ export function MessagesPage() {
             {menuIsOwn && (
               <button
                 type="button"
-                onClick={() => handleDeleteForEveryone(menuMessage)}
+                onClick={() => askDelete(menuMessage, 'everyone')}
                 className="block w-full text-left px-4 py-2 text-xs font-medium text-red-700 hover:bg-[#F4F1EA]"
               >
                 Delete for everyone
@@ -751,7 +847,7 @@ export function MessagesPage() {
             )}
             <button
               type="button"
-              onClick={() => handleDeleteForMe(menuMessage)}
+              onClick={() => askDelete(menuMessage, 'me')}
               className="block w-full text-left px-4 py-2 text-xs text-[#1E2320] hover:bg-[#F4F1EA]"
             >
               Delete for me
@@ -778,6 +874,66 @@ export function MessagesPage() {
             </button>
           </div>
         </>
+      )}
+
+      {/* Delete confirmation: nothing is deleted until you confirm. */}
+      <Modal
+        isOpen={!!confirmDelete}
+        onClose={() => setConfirmDelete(null)}
+        title="Delete message?"
+        description={
+          confirmDelete?.scope === 'everyone'
+            ? 'This message will be deleted for everyone in this chat.'
+            : 'This message will be deleted for you. The other person will still see it.'
+        }
+        maxWidth="sm"
+      >
+        <div className="flex gap-2 justify-end">
+          <button
+            type="button"
+            onClick={() => setConfirmDelete(null)}
+            className="px-4 py-2 text-xs font-semibold text-[#1E2320] bg-[#F4F1EA] hover:bg-[#EBE7DF] rounded-lg transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={confirmDeleteNow}
+            className="px-4 py-2 text-xs font-semibold bg-red-700 hover:bg-red-800 text-white rounded-lg transition-colors"
+          >
+            Delete
+          </button>
+        </div>
+      </Modal>
+
+      {/* Deleted toast with Undo. Dismissing it (X) only hides the
+          toast — the delete still runs when the window expires; only
+          Undo cancels it. Kept local to this page so the Undo action
+          can never go stale by outliving the chat. */}
+      {showDeleteToast && toastDelete && (
+        <div className="fixed bottom-4 right-4 z-50 flex items-center gap-3 p-4 bg-white rounded-xl border border-[#E5E1D8] shadow-lg max-w-sm w-full mx-4 sm:mx-0">
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-[#1E2320] leading-tight">Message deleted</p>
+            <p className="text-xs text-[#5F635D] mt-0.5">
+              {toastDelete.scope === 'everyone' ? 'Deleted for everyone' : 'Deleted for you'}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={undoDelete}
+            className="text-xs font-bold text-[#1E3F35] hover:underline shrink-0"
+          >
+            Undo
+          </button>
+          <button
+            type="button"
+            onClick={() => setToastHiddenId(toastDelete.id)}
+            className="text-[#8C887E] hover:text-[#1E2320] p-1 rounded-md shrink-0"
+            aria-label="Dismiss notification"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
       )}
     </div>
   );
