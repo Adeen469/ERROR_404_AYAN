@@ -304,31 +304,16 @@ export function ProfilePage() {
                 value={email}
                 className="w-full text-xs bg-[#F4F1EA] border border-[#E2DFD8] rounded-lg p-2.5 text-[#8C887E] cursor-not-allowed"
               />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
-                Mobile Number
-              </label>
-              <input
-                type="tel"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                placeholder="e.g. 9876543210"
-                className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-2.5 text-[#1E2320] focus:border-[#1E3F35]"
-              />
-              <span className="text-[11px] text-[#8C887E]">
-                Shared with event organizers only, when you register for events that require attendee details.
-              </span>
-              {/* Verification lives here now (was its own card below):
-                  same Telegram flow, just next to the number it
-                  verifies. type="button" matters — this sits inside
-                  the profile form, so it must not submit it. */}
+              {/* Verification lives below the email field (was its own
+                  card, then under the mobile field). Same Telegram
+                  flow, only the placement moved. type="button"
+                  matters — this sits inside the profile form, so it
+                  must not submit it. */}
               <div className="mt-2 space-y-2">
                 {phoneVerified ? (
                   <p className="text-[11px] leading-relaxed text-[#1E2320]">
                     <span className="font-semibold text-[#1E3F35]">✓ {currentUser?.phone} is verified</span> via Telegram.
-                    Changing the number above and saving will remove verification until the new number is confirmed.
+                    Changing the number below and saving will remove verification until the new number is confirmed.
                   </p>
                 ) : verifyWaiting ? (
                   <div className="space-y-2">
@@ -363,7 +348,7 @@ export function ProfilePage() {
                       </p>
                     ) : phone.trim() !== currentUser.phone ? (
                       <p className="text-[11px] text-amber-700 leading-relaxed">
-                        You edited the number above but haven&apos;t saved it yet — save it first, then verify.
+                        You edited the number below but haven&apos;t saved it yet — save it first, then verify.
                       </p>
                     ) : (
                       <p className="text-[11px] text-[#5F635D] leading-relaxed">
@@ -382,6 +367,22 @@ export function ProfilePage() {
                 )}
                 {verifyError && <p className="text-[11px] text-rose-600">{verifyError}</p>}
               </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+                Mobile Number
+              </label>
+              <input
+                type="tel"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="e.g. 9876543210"
+                className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-2.5 text-[#1E2320] focus:border-[#1E3F35]"
+              />
+              <span className="text-[11px] text-[#8C887E]">
+                Shared with event organizers only, when you register for events that require attendee details.
+              </span>
             </div>
           </div>
 
