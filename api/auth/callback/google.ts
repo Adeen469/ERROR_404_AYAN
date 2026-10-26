@@ -477,6 +477,27 @@ export default async function handler(req: any, res: any) {
       `<p id="status">Signing you in…</p>
       <script>
         var profile = ${profileJson};
+        // Restore what the user saved on Profile (mobile number and its
+        // verification flag, home location, bio, interests). Google
+        // sign-in rebuilds the profile from Google's userinfo, which
+        // used to wipe all of that at the next login. The backup lives
+        // under 'locora_saved_profile_<email>' (see
+        // src/utils/saved-profile.ts — same field list, kept in sync);
+        // it survives logout by design. Name, avatar, role and
+        // authProvider always stay Google's — never restored here.
+        try {
+          var prev = null;
+          try { prev = JSON.parse(localStorage.getItem('locora_saved_profile_' + String(profile.email).toLowerCase()) || 'null'); } catch (e) { prev = null; }
+          if (prev && typeof prev === 'object') {
+            if (prev.phone !== undefined) profile.phone = prev.phone;
+            if (prev.phoneVerified !== undefined) profile.phoneVerified = prev.phoneVerified;
+            if (prev.bio !== undefined) profile.bio = prev.bio;
+            if (prev.country !== undefined) profile.country = prev.country;
+            if (prev.state !== undefined) profile.state = prev.state;
+            if (prev.city !== undefined) profile.city = prev.city;
+            if (Array.isArray(prev.interests)) profile.interests = prev.interests;
+          }
+        } catch (e) {}
         var saved = false;
         try {
           localStorage.setItem('locora_current_user', JSON.stringify(profile));

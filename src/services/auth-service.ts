@@ -2,6 +2,7 @@ import { UserProfile } from '../types';
 import { DEFAULT_DEMO_USER } from '../mocks/demo-data';
 import { isDemoMode, apiClient } from './api-client';
 import { ADMIN_EMAILS } from './roles-service';
+import { restoreSavedProfile, writeSavedProfile } from '../utils/saved-profile';
 
 // Roles are no longer self-selected. Everyone starts as an attendee;
 // organizer status comes only from an admin approval (see roles-service),
@@ -102,12 +103,18 @@ export const authService = {
 
     await new Promise((resolve) => setTimeout(resolve, 300));
 
-    const user: UserProfile = {
+    // Local sign-in rebuilds from a template every time, which used to
+    // silently drop anything saved on Profile (mobile number, home
+    // location, bio). Restore the per-email backup on top of it; the
+    // backup never carries role/authProvider/id/email (see
+    // utils/saved-profile.ts). The backend-success path above is left
+    // alone: a real server record would be authoritative.
+    const user: UserProfile = restoreSavedProfile(localStorage, {
       ...DEFAULT_DEMO_USER,
       email: email || DEFAULT_DEMO_USER.email,
       role: 'attendee',
       authProvider: 'local',
-    };
+    });
 
     localStorage.setItem(TOKEN_STORAGE_KEY, 'demo_jwt_token_locora_preview');
     localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
@@ -153,6 +160,9 @@ export const authService = {
 
     localStorage.setItem(TOKEN_STORAGE_KEY, 'demo_jwt_token_locora_preview');
     localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(newUser));
+    // Seed the backup with the sign-up name, so the next login restores
+    // it instead of the demo template's name.
+    writeSavedProfile(localStorage, newUser);
     notify(newUser);
     sendAccountEmail('welcome', newUser, email);
     return newUser;
@@ -161,6 +171,8 @@ export const authService = {
   async logout(): Promise<void> {
     localStorage.removeItem(USER_STORAGE_KEY);
     localStorage.removeItem(TOKEN_STORAGE_KEY);
+    // The per-email backup (utils/saved-profile.ts) intentionally stays:
+    // it is what the next login restores the saved number from.
     notify(null);
   },
 
@@ -172,6 +184,7 @@ export const authService = {
       try {
         const updated = await apiClient.patch<UserProfile>('/me', safeUpdates);
         localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(updated));
+        writeSavedProfile(localStorage, updated);
         notify(updated);
         return updated;
       } catch (err) {
@@ -184,6 +197,9 @@ export const authService = {
 
     const updated = { ...current, ...safeUpdates };
     localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(updated));
+    // Every profile save refreshes the backup, so the saved number (and
+    // its verification flag, home location, bio) survive the next login.
+    writeSavedProfile(localStorage, updated);
     notify(updated);
     return updated;
   },

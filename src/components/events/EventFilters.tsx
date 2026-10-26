@@ -3,8 +3,8 @@ import { Search, SlidersHorizontal, X, RotateCcw, MapPin, ChevronDown } from 'lu
 import { EventFilterOptions } from '../../types';
 import { DEMO_CATEGORIES } from '../../mocks/demo-data';
 import { LocationPicker } from '../LocationPicker';
+import { ThemedSelect } from '../ui/ThemedSelect';
 import { DateRangePicker } from './DateRangePicker';
-import { PriceFilter } from './PriceFilter';
 
 interface EventFiltersProps {
   filters: EventFilterOptions;
@@ -158,9 +158,20 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
             size="bar"
           />
 
-          <PriceFilter
-            priceType={filters.priceType}
-            onChange={(priceType) => onChange({ ...filters, priceType })}
+          <ThemedSelect
+            value={filters.priceType || 'all'}
+            options={[
+              { value: 'all', label: 'All prices' },
+              { value: 'free', label: 'Free' },
+              { value: 'paid', label: 'Paid' },
+            ]}
+            onChange={(v) =>
+              onChange({
+                ...filters,
+                priceType: v as EventFilterOptions['priceType'],
+              })
+            }
+            ariaLabel="Filter by price"
             size="bar"
           />
         </div>
@@ -298,9 +309,20 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
 
             <div>
               <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">Price</label>
-              <PriceFilter
-                priceType={filters.priceType}
-                onChange={(priceType) => onChange({ ...filters, priceType })}
+              <ThemedSelect
+                value={filters.priceType || 'all'}
+                options={[
+                  { value: 'all', label: 'All prices' },
+                  { value: 'free', label: 'Free' },
+                  { value: 'paid', label: 'Paid' },
+                ]}
+                onChange={(v) =>
+                  onChange({
+                    ...filters,
+                    priceType: v as EventFilterOptions['priceType'],
+                  })
+                }
+                ariaLabel="Filter by price"
                 size="drawer"
               />
             </div>
