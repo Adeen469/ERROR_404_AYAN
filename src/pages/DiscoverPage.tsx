@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { LayoutGrid, List } from 'lucide-react';
 import { EventItem, EventFilterOptions } from '../types';
 import { eventsService } from '../services/events-service';
 import { authService } from '../services/auth-service';
@@ -46,7 +45,6 @@ export function DiscoverPage() {
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
-  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
 
   // Sync state with URL params
   const updateFilters = useCallback(
@@ -114,42 +112,14 @@ export function DiscoverPage() {
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
       {/* Header Banner */}
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 pb-4 border-b border-[#E5E1D8]">
-        <div>
-          <h1 className="font-editorial text-3xl sm:text-4xl font-bold tracking-tight text-[#1E2320]">
-            Discover Local Events
-          </h1>
-          <p className="text-sm text-[#5F635D] mt-1">
-            Explore activities, gatherings, and workshops near you — or pick
-            any country, state, and city in the world.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-3">
-          {/* View Toggle */}
-          <div className="hidden sm:flex items-center gap-1 bg-white border border-[#E2DFD8] rounded-lg p-1 self-start md:self-auto shadow-2xs">
-            <button
-              type="button"
-              onClick={() => setViewMode('grid')}
-              className={`p-1.5 rounded-md transition-colors ${
-                viewMode === 'grid' ? 'bg-[#1E3F35] text-white' : 'text-[#8C887E] hover:text-[#1E2320]'
-              }`}
-              aria-label="Grid layout"
-            >
-              <LayoutGrid className="w-4 h-4" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewMode('list')}
-              className={`p-1.5 rounded-md transition-colors ${
-                viewMode === 'list' ? 'bg-[#1E3F35] text-white' : 'text-[#8C887E] hover:text-[#1E2320]'
-              }`}
-              aria-label="List layout"
-            >
-              <List className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
+      <div className="pb-4 border-b border-[#E5E1D8]">
+        <h1 className="font-editorial text-3xl sm:text-4xl font-bold tracking-tight text-[#1E2320]">
+          Discover Local Events
+        </h1>
+        <p className="text-sm text-[#5F635D] mt-1">
+          Explore activities, gatherings, and workshops near you — or pick
+          any country, state, and city in the world.
+        </p>
       </div>
 
       {/* Filter Toolbar */}
@@ -186,13 +156,7 @@ export function DiscoverPage() {
           }
         />
       ) : (
-        <div
-          className={
-            viewMode === 'grid'
-              ? 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6'
-              : 'flex flex-col gap-4'
-          }
-        >
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {events.map((event) => (
             <EventCard key={event.id} event={event} />
           ))}

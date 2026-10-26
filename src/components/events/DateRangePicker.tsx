@@ -98,12 +98,17 @@ export function DateRangePicker({
             : 'Any Date';
   const isActive = dateRange !== 'all' && !!dateRange;
 
+  // Past dates cannot be picked: the string compare works because all
+  // dates here are local YYYY-MM-DD.
+  const today = toISODate(new Date());
+
   const shiftMonth = (delta: number) => {
     const d = new Date(view.year, view.month + delta, 1);
     setView({ year: d.getFullYear(), month: d.getMonth() });
   };
 
   const handleDayClick = (date: string) => {
+    if (date < today) return;
     const m = monthOf(date);
     if (m.year !== view.year || m.month !== view.month) setView(m);
     if (!pickStart || pickEnd || date < pickStart) {
@@ -130,13 +135,12 @@ export function DateRangePicker({
     setOpen(false);
   };
 
-  const today = toISODate(new Date());
   const days = buildMonthGrid(view.year, view.month);
   const hint = pickStart && pickEnd
     ? `Selected: ${formatRangeLabel(pickStart, pickEnd)}`
     : pickStart
       ? `Start: ${formatDayLong(pickStart)} — now pick an end date`
-      : 'Pick a start date, then an end date (same day twice = one day)';
+      : 'Pick a start date, then an end date (same day twice = one day). Past dates can’t be selected.';
 
   const triggerSize =
     size === 'bar'
@@ -231,20 +235,28 @@ export function DateRangePicker({
               const inRange =
                 pickStart && pickEnd && cell.date > pickStart && cell.date < pickEnd;
               const isToday = cell.date === today;
+              // A selected day keeps its forest highlight even if it
+              // has since become past (an older shared range) — it is
+              // the active filter, just no longer pickable. Any other
+              // past day is muted and disabled.
+              const isPast = cell.date < today;
               return (
                 <button
                   key={cell.date}
                   type="button"
                   aria-label={formatDayLong(cell.date)}
+                  disabled={isPast && !isStart && !isEnd}
                   onClick={() => handleDayClick(cell.date)}
-                  className={`h-9 rounded-lg text-xs transition-colors cursor-pointer ${
+                  className={`h-9 rounded-lg text-xs transition-colors ${
                     isStart || isEnd
-                      ? 'bg-[#1E3F35] text-white font-semibold'
-                      : inRange
-                        ? 'bg-[#EAF1ED] text-[#1E2320]'
-                        : cell.inMonth
-                          ? 'text-[#1E2320] hover:bg-[#F4F1EA]'
-                          : 'text-[#C9C4B8] hover:bg-[#F4F1EA]'
+                      ? 'bg-[#1E3F35] text-white font-semibold cursor-pointer'
+                      : isPast
+                        ? 'text-[#C9C4B8] opacity-50 cursor-not-allowed'
+                        : inRange
+                          ? 'bg-[#EAF1ED] text-[#1E2320] cursor-pointer'
+                          : cell.inMonth
+                            ? 'text-[#1E2320] hover:bg-[#F4F1EA] cursor-pointer'
+                            : 'text-[#C9C4B8] hover:bg-[#F4F1EA] cursor-pointer'
                   } ${isToday && !isStart && !isEnd ? 'ring-1 ring-[#1E3F35]/40 font-semibold' : ''}`}
                 >
                   {cell.day}
