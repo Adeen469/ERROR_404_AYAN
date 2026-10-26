@@ -20,6 +20,8 @@ export function DiscoverPage() {
     state: searchParams.get('state') || '',
     city: searchParams.get('city') || '',
     dateRange: (searchParams.get('dateRange') as EventFilterOptions['dateRange']) || 'all',
+    startDate: searchParams.get('startDate') || '',
+    endDate: searchParams.get('endDate') || '',
     priceType: (searchParams.get('priceType') as EventFilterOptions['priceType']) || 'all',
     sortBy: (searchParams.get('sortBy') as EventFilterOptions['sortBy']) || 'relevance',
   });
@@ -59,6 +61,10 @@ export function DiscoverPage() {
       if (newFilters.state) params.set('state', newFilters.state);
       if (newFilters.city) params.set('city', newFilters.city);
       if (newFilters.dateRange && newFilters.dateRange !== 'all') params.set('dateRange', newFilters.dateRange);
+      if (newFilters.dateRange === 'custom' && newFilters.startDate && newFilters.endDate) {
+        params.set('startDate', newFilters.startDate);
+        params.set('endDate', newFilters.endDate);
+      }
       if (newFilters.priceType && newFilters.priceType !== 'all') params.set('priceType', newFilters.priceType);
       if (newFilters.sortBy && newFilters.sortBy !== 'relevance') params.set('sortBy', newFilters.sortBy);
 
@@ -172,6 +178,8 @@ export function DiscoverPage() {
               state: '',
               city: '',
               dateRange: 'all',
+              startDate: '',
+              endDate: '',
               priceType: 'all',
               sortBy: 'relevance',
             })

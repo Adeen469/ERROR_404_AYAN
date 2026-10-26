@@ -3,6 +3,8 @@ import { Search, SlidersHorizontal, X, RotateCcw, MapPin, ChevronDown } from 'lu
 import { EventFilterOptions } from '../../types';
 import { DEMO_CATEGORIES } from '../../mocks/demo-data';
 import { LocationPicker } from '../LocationPicker';
+import { ThemedSelect } from '../ui/ThemedSelect';
+import { DateRangePicker } from './DateRangePicker';
 
 interface EventFiltersProps {
   filters: EventFilterOptions;
@@ -64,6 +66,8 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
       state: '',
       city: '',
       dateRange: 'all',
+      startDate: '',
+      endDate: '',
       priceType: 'all',
       sortBy: 'relevance',
     });
@@ -144,53 +148,49 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
           )}
         </div>
 
-        {/* Desktop Dropdowns: Date, Price & Sort (location is the card below) */}
+        {/* Desktop Dropdowns: Date (calendar), Price & Sort (location is the card below) */}
         <div className="hidden sm:flex items-center gap-3 shrink-0">
-          <select
-            value={filters.dateRange || 'all'}
-            onChange={(e) =>
-              onChange({
-                ...filters,
-                dateRange: e.target.value as EventFilterOptions['dateRange'],
-              })
-            }
-            className="text-xs font-medium bg-white text-[#1E2320] border border-[#E2DFD8] rounded-xl px-3 py-2.5 shadow-2xs focus:border-[#1E3F35] cursor-pointer"
-          >
-            <option value="all">Any Date</option>
-            <option value="today">Today</option>
-            <option value="this_weekend">This Weekend</option>
-            <option value="this_month">This Month</option>
-          </select>
+          <DateRangePicker
+            dateRange={filters.dateRange}
+            startDate={filters.startDate}
+            endDate={filters.endDate}
+            onChange={(patch) => onChange({ ...filters, ...patch })}
+            size="bar"
+          />
 
-          <select
+          <ThemedSelect
             value={filters.priceType || 'all'}
-            onChange={(e) =>
+            options={[
+              { value: 'all', label: 'All Prices' },
+              { value: 'free', label: 'Free Admission' },
+              { value: 'paid', label: 'Ticketed' },
+            ]}
+            onChange={(v) =>
               onChange({
                 ...filters,
-                priceType: e.target.value as EventFilterOptions['priceType'],
+                priceType: v as EventFilterOptions['priceType'],
               })
             }
-            className="text-xs font-medium bg-white text-[#1E2320] border border-[#E2DFD8] rounded-xl px-3 py-2.5 shadow-2xs focus:border-[#1E3F35] cursor-pointer"
-          >
-            <option value="all">All Prices</option>
-            <option value="free">Free Admission</option>
-            <option value="paid">Ticketed</option>
-          </select>
+            ariaLabel="Filter by price"
+            size="bar"
+          />
 
-          <select
+          <ThemedSelect
             value={filters.sortBy || 'relevance'}
-            onChange={(e) =>
+            options={[
+              { value: 'relevance', label: 'Featured & Popular' },
+              { value: 'soonest', label: 'Soonest First' },
+              { value: 'capacity', label: 'Most Open Spots' },
+            ]}
+            onChange={(v) =>
               onChange({
                 ...filters,
-                sortBy: e.target.value as EventFilterOptions['sortBy'],
+                sortBy: v as EventFilterOptions['sortBy'],
               })
             }
-            className="text-xs font-medium bg-white text-[#1E2320] border border-[#E2DFD8] rounded-xl px-3 py-2.5 shadow-2xs focus:border-[#1E3F35] cursor-pointer"
-          >
-            <option value="relevance">Featured & Popular</option>
-            <option value="soonest">Soonest First</option>
-            <option value="capacity">Most Open Spots</option>
-          </select>
+            ariaLabel="Sort results"
+            size="bar"
+          />
         </div>
       </div>
 
@@ -315,57 +315,53 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
 
             <div>
               <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">Date Range</label>
-              <select
-                value={filters.dateRange || 'all'}
-                onChange={(e) =>
-                  onChange({
-                    ...filters,
-                    dateRange: e.target.value as EventFilterOptions['dateRange'],
-                  })
-                }
-                className="w-full text-sm bg-white text-[#1E2320] border border-[#E2DFD8] rounded-xl p-3"
-              >
-                <option value="all">Any Date</option>
-                <option value="today">Today</option>
-                <option value="this_weekend">This Weekend</option>
-                <option value="this_month">This Month</option>
-              </select>
+              <DateRangePicker
+                dateRange={filters.dateRange}
+                startDate={filters.startDate}
+                endDate={filters.endDate}
+                onChange={(patch) => onChange({ ...filters, ...patch })}
+                size="drawer"
+              />
             </div>
 
             <div>
               <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">Price</label>
-              <select
+              <ThemedSelect
                 value={filters.priceType || 'all'}
-                onChange={(e) =>
+                options={[
+                  { value: 'all', label: 'All Prices' },
+                  { value: 'free', label: 'Free Admission' },
+                  { value: 'paid', label: 'Ticketed' },
+                ]}
+                onChange={(v) =>
                   onChange({
                     ...filters,
-                    priceType: e.target.value as EventFilterOptions['priceType'],
+                    priceType: v as EventFilterOptions['priceType'],
                   })
                 }
-                className="w-full text-sm bg-white text-[#1E2320] border border-[#E2DFD8] rounded-xl p-3"
-              >
-                <option value="all">All Prices</option>
-                <option value="free">Free Admission</option>
-                <option value="paid">Ticketed</option>
-              </select>
+                ariaLabel="Filter by price"
+                size="drawer"
+              />
             </div>
 
             <div>
               <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">Sort Results By</label>
-              <select
+              <ThemedSelect
                 value={filters.sortBy || 'relevance'}
-                onChange={(e) =>
+                options={[
+                  { value: 'relevance', label: 'Featured & Popular' },
+                  { value: 'soonest', label: 'Soonest First' },
+                  { value: 'capacity', label: 'Most Open Spots' },
+                ]}
+                onChange={(v) =>
                   onChange({
                     ...filters,
-                    sortBy: e.target.value as EventFilterOptions['sortBy'],
+                    sortBy: v as EventFilterOptions['sortBy'],
                   })
                 }
-                className="w-full text-sm bg-white text-[#1E2320] border border-[#E2DFD8] rounded-xl p-3"
-              >
-                <option value="relevance">Featured & Popular</option>
-                <option value="soonest">Soonest First</option>
-                <option value="capacity">Most Open Spots</option>
-              </select>
+                ariaLabel="Sort results"
+                size="drawer"
+              />
             </div>
 
             <div className="pt-4 flex gap-3">

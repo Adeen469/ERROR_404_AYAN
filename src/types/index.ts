@@ -157,7 +157,12 @@ export interface EventFilterOptions {
   country?: string;
   state?: string;
   city?: string;
-  dateRange?: 'all' | 'today' | 'tomorrow' | 'this_weekend' | 'this_month';
+  dateRange?: 'all' | 'today' | 'tomorrow' | 'this_weekend' | 'this_month' | 'custom';
+  // Custom calendar range (Discover date picker). Only meaningful when
+  // dateRange is 'custom'; both are local calendar dates (YYYY-MM-DD).
+  // Empty means no custom range.
+  startDate?: string;
+  endDate?: string;
   priceType?: 'all' | 'free' | 'paid';
   sortBy?: 'soonest' | 'relevance' | 'capacity';
 }
