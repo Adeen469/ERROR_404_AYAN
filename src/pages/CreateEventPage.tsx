@@ -4,6 +4,7 @@ import { ArrowLeft, Image, AlertCircle, Sparkles, Check } from 'lucide-react';
 import { EventCategory, EventItem } from '../types';
 import { DEMO_CATEGORIES } from '../mocks/demo-data';
 import { LocationPicker } from '../components/LocationPicker';
+import { ThemedSelect } from '../components/ui/ThemedSelect';
 import { ImageUploadField } from '../components/events/ImageUploadField';
 import { eventsService } from '../services/events-service';
 import { authService } from '../services/auth-service';
@@ -242,17 +243,13 @@ export function CreateEventPage() {
               <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
                 Category *
               </label>
-              <select
+              <ThemedSelect
                 value={category}
-                onChange={(e) => setCategory(e.target.value as EventCategory)}
-                className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] cursor-pointer focus:border-[#1E3F35]"
-              >
-                {DEMO_CATEGORIES.map((cat) => (
-                  <option key={cat} value={cat}>
-                    {cat}
-                  </option>
-                ))}
-              </select>
+                options={DEMO_CATEGORIES.map((cat) => ({ value: cat, label: cat }))}
+                onChange={(v) => setCategory(v as EventCategory)}
+                ariaLabel="Category"
+                size="form"
+              />
             </div>
 
             <div>

@@ -7,6 +7,7 @@ import {
   detectLocation,
   WorldLocation,
 } from '../services/location-service';
+import { ThemedSelect } from './ui/ThemedSelect';
 
 interface LocationPickerProps {
   value: WorldLocation;
@@ -19,8 +20,6 @@ interface LocationPickerProps {
   showDetect?: boolean;
 }
 
-const selectClass =
-  'w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-2.5 text-[#1E2320] cursor-pointer focus:border-[#1E3F35] disabled:opacity-50 disabled:cursor-not-allowed';
 const inputClass =
   'w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-2.5 text-[#1E2320] focus:border-[#1E3F35]';
 
@@ -118,20 +117,16 @@ export function LocationPicker({
           <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
             Country
           </label>
-          <select
+          <ThemedSelect
             value={value.country}
-            onChange={(e) =>
-              onChange({ country: e.target.value, state: '', city: '' })
-            }
-            className={selectClass}
-          >
-            <option value="">{emptyLabel}</option>
-            {WORLD_COUNTRIES.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
+            options={[
+              { value: '', label: emptyLabel },
+              ...WORLD_COUNTRIES.map((c) => ({ value: c, label: c })),
+            ]}
+            onChange={(v) => onChange({ country: v, state: '', city: '' })}
+            ariaLabel="Country"
+            size="form"
+          />
         </div>
 
         <div>
@@ -151,21 +146,17 @@ export function LocationPicker({
               className={inputClass}
             />
           ) : (
-            <select
+            <ThemedSelect
               value={value.state}
-              onChange={(e) => onChange({ ...value, state: e.target.value, city: '' })}
+              options={[
+                { value: '', label: statesLoading ? 'Loading states…' : emptyStateLabel },
+                ...(states || []).map((s) => ({ value: s, label: s })),
+              ]}
+              onChange={(v) => onChange({ ...value, state: v, city: '' })}
+              ariaLabel="State"
               disabled={!value.country || statesLoading}
-              className={selectClass}
-            >
-              <option value="">
-                {statesLoading ? 'Loading states…' : emptyStateLabel}
-              </option>
-              {(states || []).map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
+              size="form"
+            />
           )}
         </div>
 
@@ -187,21 +178,17 @@ export function LocationPicker({
             />
           ) : cities && cities.length > 0 &&
             (value.city === '' || cities.includes(value.city)) ? (
-            <select
+            <ThemedSelect
               value={value.city}
-              onChange={(e) => onChange({ ...value, city: e.target.value })}
+              options={[
+                { value: '', label: citiesLoading ? 'Loading cities…' : emptyCityLabel },
+                ...cities.map((c) => ({ value: c, label: c })),
+              ]}
+              onChange={(v) => onChange({ ...value, city: v })}
+              ariaLabel="City"
               disabled={citiesLoading}
-              className={selectClass}
-            >
-              <option value="">
-                {citiesLoading ? 'Loading cities…' : emptyCityLabel}
-              </option>
-              {cities.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
+              size="form"
+            />
           ) : (
             <input
               type="text"

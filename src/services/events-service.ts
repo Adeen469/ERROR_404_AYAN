@@ -3,6 +3,7 @@ import { DEMO_EVENTS, DEMO_ORGANIZERS } from '../mocks/demo-data';
 import { apiClient, isDemoMode } from './api-client';
 import { authService } from './auth-service';
 import { getEventNeighborhood } from '../utils/formatters';
+import { eventDay } from '../utils/date-range';
 
 // Short-lived cache for shared event reads. Measured 2026-10-25:
 // every shared API call costs ~2s (five rapid calls to a tiny endpoint all
@@ -289,6 +290,14 @@ export const eventsService = {
         }
         if (filters.dateRange === 'this_month') {
           return eventDate.getMonth() === now.getMonth() && eventDate.getFullYear() === now.getFullYear();
+        }
+        if (filters.dateRange === 'custom') {
+          // Incomplete range (shouldn't happen — the picker only sets
+          // 'custom' with both dates) filters nothing, rather than
+          // hiding everything.
+          if (!filters.startDate || !filters.endDate) return true;
+          const day = eventDay(e.startDate);
+          return day >= filters.startDate && day <= filters.endDate;
         }
         return true;
       });

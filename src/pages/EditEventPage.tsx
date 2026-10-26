@@ -7,6 +7,7 @@ import { eventsService, isEventOwner } from '../services/events-service';
 import { authService } from '../services/auth-service';
 import { isAdminEmail } from '../services/roles-service';
 import { useToast } from '../components/ui/Toast';
+import { ThemedSelect } from '../components/ui/ThemedSelect';
 import { FormSkeleton } from '../components/ui/LoadingSkeleton';
 import { PRESET_COVER_IMAGES } from './CreateEventPage';
 
@@ -238,17 +239,13 @@ export function EditEventPage() {
               <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
                 Category *
               </label>
-              <select
+              <ThemedSelect
                 value={category}
-                onChange={(e) => setCategory(e.target.value as EventCategory)}
-                className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
-              >
-                {DEMO_CATEGORIES.map((cat) => (
-                  <option key={cat} value={cat}>
-                    {cat}
-                  </option>
-                ))}
-              </select>
+                options={DEMO_CATEGORIES.map((cat) => ({ value: cat, label: cat }))}
+                onChange={(v) => setCategory(v as EventCategory)}
+                ariaLabel="Category"
+                size="form"
+              />
             </div>
 
           </div>

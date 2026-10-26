@@ -183,6 +183,15 @@ function applyFilters(events: any[], query: any): any[] {
       if (query.dateRange === "this_month") {
         return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
       }
+      if (query.dateRange === "custom") {
+        // Calendar range from the Discover picker (YYYY-MM-DD, local
+        // days, same "viewer day" as the presets above). An incomplete
+        // range filters nothing rather than hiding everything.
+        if (!query.startDate || !query.endDate) return true;
+        const pad = (n: number) => String(n).padStart(2, "0");
+        const day = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+        return day >= query.startDate && day <= query.endDate;
+      }
       return true;
     });
   }
