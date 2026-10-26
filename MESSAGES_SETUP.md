@@ -66,11 +66,11 @@ no redeploy step beyond that.
   have no time limit; the 1-hour limit applies to edits only.
 - Deletes are confirmed first (shared Modal dialog), then hidden
   locally at once with a "Message deleted" toast and an Undo button.
-  The real server call only runs when the 5-second toast expires, so
+  The real server call only runs when the 3-second toast expires, so
   Undo needs no server-side restore; leaving the page inside the
   window flushes the pending deletes immediately. Dismissing the toast
   (X) only hides it — the delete still runs; only Undo cancels it.
-  A full browser refresh inside the 5s window is the one exception:
+  A full browser refresh inside the 3s window is the one exception:
   the timers die with the page and the message comes back.
 - Honest limit, same as registrations: there is no session auth, so
   sender/recipient checks trust the signed-in email the app sends.

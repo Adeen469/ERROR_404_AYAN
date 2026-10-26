@@ -124,7 +124,7 @@ export function MessagesPage() {
   const [editDraft, setEditDraft] = useState('');
   // Deletes awaiting their undo window: the message is hidden locally
   // the moment you confirm, and the real server call only runs when
-  // the 5s toast expires (or immediately if you leave the page — see
+  // the 3s toast expires (or immediately if you leave the page — see
   // the unmount flush below). Undo inside the window cancels it, so
   // no server-side restore is ever needed.
   const [pendingDeletes, setPendingDeletes] = useState<PendingDelete[]>([]);
@@ -136,6 +136,7 @@ export function MessagesPage() {
   } | null>(null);
   const [toastHiddenId, setToastHiddenId] = useState<string | null>(null);
   const pressTimer = useRef<number | null>(null);
+  const pollInFlight = useRef(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const meEmail = (currentUser?.email || '').toLowerCase();
@@ -161,16 +162,23 @@ export function MessagesPage() {
 
   useEffect(() => {
     loadMessages();
-    // 5s refresh while the inbox is open (was 30s): each poll costs
-    // one ~2s server call, so polling faster than this barely helps;
-    // the instant feel comes from the optimistic bubble below.
-    const timer = setInterval(() => loadMessages(true), 5000);
+    // 3s refresh while the inbox is open (was 30s, then 5s): each poll
+    // costs one ~2s server call, so polling faster than this would
+    // mostly overlap requests without fresher data — the in-flight
+    // guard skips a tick when the previous poll is still running.
+    const timer = setInterval(() => {
+      if (pollInFlight.current) return;
+      pollInFlight.current = true;
+      loadMessages(true).finally(() => {
+        pollInFlight.current = false;
+      });
+    }, 3000);
     return () => clearInterval(timer);
   }, [loadMessages]);
 
   // Leaving the page inside an undo window must not resurrect a
   // confirmed delete: flush any still-pending deletes immediately.
-  // (A full browser refresh inside the 5s window is the one exception
+  // (A full browser refresh inside the 3s window is the one exception
   // — the timers die with the page and the message comes back.)
   useEffect(() => {
     return () => {
@@ -236,7 +244,7 @@ export function MessagesPage() {
   }, [queryEventId, queryWith, currentUser?.email]);
 
   // Messages hidden by a confirmed (but not yet executed) delete stay
-  // hidden through reloads inside the undo window — otherwise the 5s
+  // hidden through reloads inside the undo window — otherwise the 3s
   // poll would resurrect them before the toast expires.
   const visibleServerMessages = messages.filter(
     (m) => !pendingDeletes.some((d) => d.id === m.id),
@@ -251,7 +259,7 @@ export function MessagesPage() {
 
   // Server messages plus in-flight ones for this thread, oldest
   // first. A pending bubble is dropped once its server copy shows up
-  // (the 5s poll can beat the post's own response by a hair); the
+  // (the 3s poll can beat the post's own response by a hair); the
   // createdAt guard keeps a genuinely repeated message ("Hi", "Hi")
   // from collapsing into the first copy.
   const visibleMessages: ChatMessage[] = selected
@@ -392,7 +400,7 @@ export function MessagesPage() {
         file: sendingFile,
       });
       setPending((prev) => prev.filter((p) => p.id !== temp.id));
-      // Dedupe by id: the 5s poll can already have fetched this very
+      // Dedupe by id: the 3s poll can already have fetched this very
       // message before the post's own response arrived — appending
       // blindly showed it twice until the next poll.
       setMessages((prev) => (prev.some((m) => m.id === created.id) ? prev : [...prev, created]));
@@ -471,7 +479,7 @@ export function MessagesPage() {
   }
 
   // Confirmed: hide locally at once, show the Undo toast, and only
-  // run the real server call when the 5s window expires. If that call
+  // run the real server call when the 3s window expires. If that call
   // then fails, the message is no longer hidden locally, so it comes
   // back on the next reload and the failure is shown — never a silent
   // pretend-delete.
@@ -503,7 +511,7 @@ export function MessagesPage() {
         setSendError(err?.message || 'Could not delete the message. Please try again.');
       }
       setPendingDeletes((prev) => prev.filter((d) => d.id !== message.id));
-    }, 5000);
+    }, 3000);
     setPendingDeletes((prev) => [
       ...prev.filter((d) => d.id !== message.id),
       { id: message.id, scope, message, timer },
@@ -524,12 +532,24 @@ export function MessagesPage() {
     if (!editingId || !currentUser?.email) return;
     const text = editDraft.trim();
     if (!text) return;
+    const id = editingId;
+    const original = messages.find((m) => m.id === id);
+    // Optimistic: the edited text shows at once instead of after the
+    // ~2s patch + ~2s reload round trip. On failure it reverts.
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === id ? { ...m, text, edited: true, editedAt: new Date().toISOString() } : m,
+      ),
+    );
+    setEditingId(null);
+    setEditDraft('');
     try {
-      await messagesService.editMessage(editingId, currentUser.email, text);
-      setEditingId(null);
-      setEditDraft('');
+      await messagesService.editMessage(id, currentUser.email, text);
       await loadMessages(true);
     } catch (err: any) {
+      if (original) {
+        setMessages((prev) => prev.map((m) => (m.id === id ? original : m)));
+      }
       setSendError(err?.message || 'Could not edit the message.');
     }
   }
