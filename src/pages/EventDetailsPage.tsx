@@ -771,9 +771,12 @@ export function EventDetailsPage() {
                         patterns are never clipped. The logo patch sits
                         centered over the code (pointer-events-none: it
                         is display only) with curvy corners on both the
-                        patch and the logo image. */}
-                    <div className="bg-white rounded-2xl border border-[#E2DFD8] p-2 shadow-sm">
-                      <div className="relative w-44 h-44">
+                        patch and the logo image. Fluid width: the frame
+                        caps at the old 194px but shrinks on narrow
+                        screens (aspect-square keeps the QR square), so
+                        the block can never push its card out of frame. */}
+                    <div className="bg-white rounded-2xl border border-[#E2DFD8] p-2 shadow-sm w-full max-w-[194px]">
+                      <div className="relative w-full aspect-square">
                         <img
                           src={upiQr}
                           alt={`QR code to pay ${formatPrice(event.price)} to ${event.upiId}`}

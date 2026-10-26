@@ -48,9 +48,15 @@ export function Modal({ isOpen, onClose, title, description, children, maxWidth 
         if (e.target === e.currentTarget) onClose();
       }}
     >
+      {/* Tall dialogs (e.g. Pay & Register with its QR block) used to
+          spill out of the screen frame on phones: the panel had
+          overflow-hidden and no height cap, so the title and the bottom
+          button were cut off with no way to reach them. The panel now
+          caps at the viewport (minus the overlay padding, dvh so mobile
+          browser chrome is accounted for) and scrolls internally. */}
       <div
         ref={modalRef}
-        className={`w-full ${maxWidthClasses} bg-white rounded-2xl border border-[#E5E1D8] shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150`}
+        className={`w-full ${maxWidthClasses} max-h-[calc(100dvh-2rem)] overflow-x-hidden overflow-y-auto bg-white rounded-2xl border border-[#E5E1D8] shadow-2xl animate-in fade-in zoom-in-95 duration-150`}
       >
         <div className="flex items-start justify-between p-5 border-b border-[#EBE7DF]">
           <div>
