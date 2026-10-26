@@ -417,13 +417,18 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       const path = `${sanitizePathSegment(eventId)}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
-      const { ok, body: signBody } = await fetchJson(
+      const { ok, status, body: signBody } = await fetchJson(
         `${supabaseBase()}/storage/v1/object/sign/${BUCKET}/${path}`,
         { method: "POST", headers: supabaseHeaders(), body: JSON.stringify({}) },
       );
       if (!ok || !signBody?.url) {
+        // Surface Storage's own reason instead of a generic guess: a
+        // 404 here means the bucket is not in this project, a 401/403
+        // means the key, and so on. No secret ever appears in these.
+        const detail =
+          signBody?.message || signBody?.error || `storage sign failed (${status})`;
         sendJson(res, 502, {
-          message: "Message attachments are not set up yet (Storage bucket missing)",
+          message: `Message attachments are not set up yet (${detail})`,
         });
         return;
       }
