@@ -26,6 +26,9 @@ export interface EventMessage {
   text?: string;
   attachment?: MessageAttachment | null;
   read?: boolean;
+  edited?: boolean;
+  editedAt?: string;
+  hiddenFor?: string[];
   createdAt: string;
 }
 
@@ -145,6 +148,33 @@ export const messagesService = {
     const data = await apiClient.request<{ message: EventMessage }>('/messages', {
       method: 'POST',
       body: JSON.stringify(input),
+    });
+    return data.message;
+  },
+
+  // "Delete for me": hides the message for this user only, any time.
+  async hideMessage(id: string, userEmail: string): Promise<void> {
+    await apiClient.request('/messages', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'hide', id, userEmail }),
+    });
+  },
+
+  // "Delete for everyone": permanently removes the row (server only
+  // allows the sender). Also removes the Storage object best-effort.
+  async deleteForEveryone(id: string, userEmail: string): Promise<void> {
+    await apiClient.request('/messages', {
+      params: { id, userEmail },
+      method: 'DELETE',
+    });
+  },
+
+  // Edit own text within 1 hour of sending (server enforces both).
+  async editMessage(id: string, editorEmail: string, text: string): Promise<EventMessage> {
+    const data = await apiClient.request<{ message: EventMessage }>('/messages', {
+      params: { id },
+      method: 'PATCH',
+      body: JSON.stringify({ editorEmail, text }),
     });
     return data.message;
   },

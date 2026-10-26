@@ -26,6 +26,18 @@
 //         to Storage with the signed URL and only the metadata comes here.
 // PATCH /api/messages?id=x { recipientEmail }
 //      -> marks that message read; only its recipient may do this.
+// PATCH /api/messages?id=x { editorEmail, text }
+//      -> edits the text of your OWN message within 1 hour of sending
+//         (sets edited: true + editedAt). Later edits, and edits by
+//         anyone else, are refused. The attachment is untouched.
+// POST /api/messages { action: "hide", id, userEmail }
+//      -> "Delete for me": hides that message for that user only, any
+//         time. The other side still sees it. Implemented as a hiddenFor
+//         list on the row; GET filters it out for the hider.
+// DELETE /api/messages?id=x&userEmail=y
+//      -> "Delete for everyone": permanently removes the row (and, best
+//         effort, its Storage object). Only the SENDER may do this, any
+//         time. A recipient who wants it gone uses "Delete for me".
 //
 // Authorization (same honesty note as registrations): there is no
 // session auth, so senderEmail / recipientEmail are caller-sent and
@@ -340,7 +352,12 @@ async function sendMail(
 
 export default async function handler(req: any, res: any): Promise<void> {
   try {
-    if (req.method !== "GET" && req.method !== "POST" && req.method !== "PATCH") {
+    if (
+      req.method !== "GET" &&
+      req.method !== "POST" &&
+      req.method !== "PATCH" &&
+      req.method !== "DELETE"
+    ) {
       sendJson(res, 405, { message: "Method not allowed" });
       return;
     }
@@ -363,8 +380,12 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
       }
+      // "Delete for me" hides via hiddenFor; old rows predate the field
+      // and are treated as hidden for nobody.
       const mine = all.filter(
-        (m: any) => m.senderEmail === userEmail || m.recipientEmail === userEmail,
+        (m: any) =>
+          (m.senderEmail === userEmail || m.recipientEmail === userEmail) &&
+          !((m.hiddenFor || []) as string[]).includes(userEmail),
       );
       if (req.query?.unreadCount === "1") {
         sendJson(res, 200, {
@@ -381,6 +402,77 @@ export default async function handler(req: any, res: any): Promise<void> {
     }
 
     const body = await readBody(req);
+
+    // ---- DELETE: delete for everyone (sender only) ----
+    if (req.method === "DELETE") {
+      const id = String(req.query?.id || "");
+      const userEmail = norm(req.query?.userEmail || "");
+      if (!id || !isEmail(userEmail)) {
+        sendJson(res, 400, { message: "id and userEmail are required" });
+        return;
+      }
+      const msg = await loadMessage(id);
+      if (!msg) {
+        sendJson(res, 404, { message: "Message not found" });
+        return;
+      }
+      if (msg.senderEmail !== userEmail) {
+        sendJson(res, 403, { message: "Only the sender can delete for everyone" });
+        return;
+      }
+      const { ok } = await fetchJson(
+        `${supabaseBase()}/rest/v1/messages?id=eq.${encodeURIComponent(id)}`,
+        { method: "DELETE", headers: supabaseHeaders() },
+      );
+      if (!ok) {
+        sendJson(res, 503, { message: "Messages are not set up yet" });
+        return;
+      }
+      // Best-effort: remove the attachment object too, so a deleted
+      // file does not linger in Storage under a guessable path.
+      if (msg.attachment?.path) {
+        try {
+          await fetchJson(
+            `${supabaseBase()}/storage/v1/object/${BUCKET}/${msg.attachment.path}`,
+            { method: "DELETE", headers: supabaseHeaders() },
+          );
+        } catch {
+          // Row is already gone; a leftover object is harmless clutter.
+        }
+      }
+      sendJson(res, 200, { deleted: true });
+      return;
+    }
+
+    // ---- POST: "Delete for me" (hide for one user) ----
+    if (req.method === "POST" && body.action === "hide") {
+      const id = String(body.id || "");
+      const userEmail = norm(body.userEmail || "");
+      if (!id || !isEmail(userEmail)) {
+        sendJson(res, 400, { message: "id and userEmail are required" });
+        return;
+      }
+      const msg = await loadMessage(id);
+      if (!msg) {
+        sendJson(res, 404, { message: "Message not found" });
+        return;
+      }
+      if (msg.senderEmail !== userEmail && msg.recipientEmail !== userEmail) {
+        sendJson(res, 403, { message: "You are not part of this conversation" });
+        return;
+      }
+      const hiddenFor: string[] = Array.isArray(msg.hiddenFor) ? msg.hiddenFor : [];
+      if (!hiddenFor.includes(userEmail)) hiddenFor.push(userEmail);
+      msg.hiddenFor = hiddenFor;
+      try {
+        await updateMessageData(msg);
+      } catch {
+        sendJson(res, 503, { message: "Messages are not set up yet" });
+        return;
+      }
+      sendJson(res, 200, { message: msg });
+      return;
+    }
 
     // ---- POST: signed upload URL ----
     if (req.method === "POST" && body.action === "upload-url") {
@@ -544,6 +636,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         text: text || "",
         attachment: cleanAttachment,
         read: false,
+        hiddenFor: [],
         createdAt: new Date().toISOString(),
       };
       try {
@@ -558,9 +651,42 @@ export default async function handler(req: any, res: any): Promise<void> {
       return;
     }
 
-    // ---- PATCH: mark read ----
+    // ---- PATCH: edit text (own message, within 1 hour) / mark read ----
     if (req.method === "PATCH") {
       const id = String(req.query?.id || "");
+      if (body.editorEmail) {
+        const editor = norm(body.editorEmail || "");
+        const text = String(body.text || "").trim().slice(0, MAX_TEXT_CHARS);
+        if (!id || !isEmail(editor) || !text) {
+          sendJson(res, 400, { message: "id, editorEmail and non-empty text are required" });
+          return;
+        }
+        const msg = await loadMessage(id);
+        if (!msg) {
+          sendJson(res, 404, { message: "Message not found" });
+          return;
+        }
+        if (msg.senderEmail !== editor) {
+          sendJson(res, 403, { message: "You can only edit your own messages" });
+          return;
+        }
+        const ageMs = Date.now() - Date.parse(msg.createdAt || "");
+        if (!Number.isFinite(ageMs) || ageMs > 60 * 60 * 1000) {
+          sendJson(res, 403, { message: "Messages can only be edited within 1 hour of sending" });
+          return;
+        }
+        msg.text = text;
+        msg.edited = true;
+        msg.editedAt = new Date().toISOString();
+        try {
+          await updateMessageData(msg);
+        } catch {
+          sendJson(res, 503, { message: "Messages are not set up yet" });
+          return;
+        }
+        sendJson(res, 200, { message: msg });
+        return;
+      }
       const recipient = norm(body.recipientEmail || "");
       if (!id || !isEmail(recipient)) {
         sendJson(res, 400, { message: "id and recipientEmail are required" });
