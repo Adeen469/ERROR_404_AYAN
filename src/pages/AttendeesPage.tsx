@@ -263,11 +263,9 @@ export function AttendeesPage() {
       </div>
 
       {/* Pending / approved / total split. */}
-      {evt && (
-        <p className="text-xs text-[#5F635D]">
-          {approvedCount} approved · {pendingRegs.length} pending · {evt.capacity} total spots
-        </p>
-      )}
+      <p className="text-xs text-[#5F635D]">
+        {approvedCount} approved · {pendingRegs.length} pending · {event.capacity} total spots
+      </p>
 
       {/* Pending payment approvals — manual-approval flow for paid events.
           Approve issues the pass and takes a spot; reject frees a held
@@ -308,10 +306,10 @@ export function AttendeesPage() {
                     type="button"
                     disabled={
                       busyId === reg.id ||
-                      (!!evt && evt.registeredCount >= evt.capacity && reg.holdsSpot === false)
+                      (event.registeredCount >= event.capacity && reg.holdsSpot === false)
                     }
                     title={
-                      !!evt && evt.registeredCount >= evt.capacity && reg.holdsSpot === false
+                      event.registeredCount >= event.capacity && reg.holdsSpot === false
                         ? 'Event is at full capacity — free a spot before approving'
                         : undefined
                     }

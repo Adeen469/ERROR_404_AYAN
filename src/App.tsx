@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { ToastProvider } from './components/ui/Toast';
+import { PageErrorBoundary } from './components/ui/ErrorBoundary';
 import { Navbar } from './components/layout/Navbar';
 import { Footer } from './components/layout/Footer';
 
@@ -64,6 +65,7 @@ export default function App() {
         <div className="min-h-screen flex flex-col bg-[#FAF8F5] text-[#1E2320] font-sans">
           <Navbar />
           <main className="flex-1">
+            <PageErrorBoundary>
             <Routes>
               {/* Root Route: Shows Landing Page if guest/logged out; shows Community HomePage if logged in */}
               <Route path="/" element={<HomeOrLanding />} />
@@ -102,6 +104,7 @@ export default function App() {
               {/* 404 Fallback */}
               <Route path="*" element={<NotFoundPage />} />
             </Routes>
+            </PageErrorBoundary>
           </main>
           <Footer />
         </div>
