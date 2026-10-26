@@ -417,9 +417,16 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       const path = `${sanitizePathSegment(eventId)}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
+      // expiresIn (seconds) is REQUIRED by the sign endpoint — without
+      // it Storage answers 400 "body must have required property
+      // 'expiresIn'". One hour is plenty for picking and uploading a file.
       const { ok, status, body: signBody } = await fetchJson(
         `${supabaseBase()}/storage/v1/object/sign/${BUCKET}/${path}`,
-        { method: "POST", headers: supabaseHeaders(), body: JSON.stringify({}) },
+        {
+          method: "POST",
+          headers: supabaseHeaders(),
+          body: JSON.stringify({ expiresIn: 3600 }),
+        },
       );
       if (!ok || !signBody?.url) {
         // Surface Storage's own reason instead of a generic guess: a
