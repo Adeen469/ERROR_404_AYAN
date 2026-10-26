@@ -427,6 +427,11 @@ export function MessagesPage() {
                       }}
                     />
                   </label>
+                  {/* Single-row box: text-xs line (16px) + p-2.5 + border
+                      = 38px, exactly the buttons' height (icon 16px +
+                      p-2.5 + border). The send button gets a matching
+                      border in its own colour so it is 38px too, not
+                      36px. Longer messages scroll inside the box. */}
                   <textarea
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
@@ -437,14 +442,14 @@ export function MessagesPage() {
                       }
                     }}
                     placeholder="Write a message…"
-                    rows={2}
+                    rows={1}
                     className="flex-1 min-w-0 text-xs bg-white border border-[#E2DFD8] rounded-lg p-2.5 text-[#1E2320] focus:border-[#1E3F35] resize-none"
                   />
                   <button
                     type="button"
                     onClick={handleSend}
                     disabled={sending || (!draft.trim() && !file)}
-                    className="p-2.5 rounded-lg bg-[#1E3F35] hover:bg-[#163028] text-white disabled:opacity-60 transition-colors shrink-0"
+                    className="p-2.5 rounded-lg border border-[#1E3F35] bg-[#1E3F35] hover:bg-[#163028] text-white disabled:opacity-60 transition-colors shrink-0"
                     aria-label="Send message"
                   >
                     <Send className="w-4 h-4" />
