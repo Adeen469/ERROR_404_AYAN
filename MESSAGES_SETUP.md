@@ -57,7 +57,8 @@ no redeploy step beyond that.
   the post returns, the server copy swaps in during the same render,
   so there is no gap and no duplicate. A failed send stays visible
   with a Retry button instead of vanishing. The inbox refreshes every
-  5 seconds while open.
+  3 seconds while open. Edits also apply optimistically: the edited
+  text shows at once and reverts only if the server patch fails.
 - Message actions (right-click / long-press on a bubble): Delete for
   everyone (sender only, any time — removes the row and, best effort,
   its Storage object), Delete for me (either side, any time — hides it
