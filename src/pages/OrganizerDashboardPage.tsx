@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { PlusCircle, Calendar, Users, Eye, BarChart2, Edit, ChevronRight, CheckCircle2 } from 'lucide-react';
+import { PlusCircle, Calendar, Users, Eye, BarChart2, Edit, ChevronRight, CheckCircle2, MessageCircle } from 'lucide-react';
 import { EventItem, Organizer } from '../types';
 import { eventsService, isEventOwner, canManageEvent } from '../services/events-service';
 import { organizersService, OrganizerStats } from '../services/organizers-service';
@@ -68,6 +68,13 @@ export function OrganizerDashboardPage() {
         </div>
 
         <div className="flex items-center gap-3">
+          <Link
+            to="/messages"
+            className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-[#1E2320] bg-[#F4F1EA] hover:bg-[#EBE7DF] border border-[#E2DFD8] rounded-lg transition-colors whitespace-nowrap"
+          >
+            <MessageCircle className="w-4 h-4" />
+            Messages
+          </Link>
           <Link
             to="/organizer/events"
             className="px-4 py-2 text-xs font-semibold text-[#1E2320] bg-[#F4F1EA] hover:bg-[#EBE7DF] border border-[#E2DFD8] rounded-lg transition-colors whitespace-nowrap"

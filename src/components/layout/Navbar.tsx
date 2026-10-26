@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Menu, X, PlusCircle, User, LogOut, Sparkles, ChevronDown } from 'lucide-react';
 import { authService } from '../../services/auth-service';
+import { messagesService } from '../../services/messages-service';
 import { UserProfile } from '../../types';
 import { isDemoMode } from '../../services/api-client';
 import {
@@ -14,6 +15,7 @@ export function Navbar() {
   const location = useLocation();
   const navigate = useNavigate();
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => authService.getCurrentUser());
+  const [unreadCount, setUnreadCount] = useState(0);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
   // Ref for the profile button + dropdown, used to close the dropdown on
@@ -58,6 +60,17 @@ export function Navbar() {
     // Re-checked on every route change too, so an organizer whose access
     // an admin just revoked loses the organizer links on their next
     // navigation instead of keeping them until they sign out and back in.
+  }, [currentUser?.email, location.pathname]);
+
+  // Unread message badge: refreshed on sign-in and on every route
+  // change (so reading a thread then navigating anywhere clears it).
+  // A failure here only hides the badge, never the Messages link.
+  useEffect(() => {
+    if (!currentUser?.email) {
+      setUnreadCount(0);
+      return;
+    }
+    messagesService.getUnreadCount(currentUser.email).then(setUnreadCount);
   }, [currentUser?.email, location.pathname]);
 
   const canPost =
@@ -209,6 +222,24 @@ export function Navbar() {
                   }`}
                 >
                   My Hub
+                </Link>
+              )}
+
+              {currentUser && (
+                <Link
+                  to="/messages"
+                  className={`inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 pb-1 ${
+                    isCurrent('/messages')
+                      ? 'text-[#1E2320] border-b-2 border-[#1E3F35] font-semibold'
+                      : 'hover:text-[#1E2320]'
+                  }`}
+                >
+                  Messages
+                  {unreadCount > 0 && (
+                    <span className="min-w-4 h-4 px-1 rounded-full bg-[#1E3F35] text-white text-[10px] font-bold inline-flex items-center justify-center">
+                      {unreadCount > 99 ? '99+' : unreadCount}
+                    </span>
+                  )}
                 </Link>
               )}
 
@@ -477,6 +508,17 @@ export function Navbar() {
                     className="block px-3 py-2.5 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50"
                   >
                     My Registrations
+                  </Link>
+                  <Link
+                    to="/messages"
+                    className="flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    Messages
+                    {unreadCount > 0 && (
+                      <span className="min-w-5 h-5 px-1 rounded-full bg-[#1E3F35] text-white text-[10px] font-bold inline-flex items-center justify-center">
+                        {unreadCount > 99 ? '99+' : unreadCount}
+                      </span>
+                    )}
                   </Link>
                   <Link
                     to="/saved"

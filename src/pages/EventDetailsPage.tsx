@@ -15,6 +15,7 @@ import {
   Shield,
   Copy,
   Check,
+  MessageCircle,
 } from 'lucide-react';
 import { EventItem, AttendeeRegistration } from '../types';
 import QRCode from 'qrcode';
@@ -480,6 +481,31 @@ export function EventDetailsPage() {
                 </p>
               </div>
             </div>
+
+            {/* Message the organizer: hidden when the organizer's email
+                is unknown (legacy demo-organizer events carry none) or
+                when viewing your own event. Guests go to sign-in first,
+                like the gated View Event button. */}
+            {(() => {
+              const organizerEmail = (
+                event.createdByEmail || event.organizer?.email || ''
+              ).toLowerCase();
+              const viewerEmail = (authService.getCurrentUser()?.email || '').toLowerCase();
+              if (!organizerEmail || viewerEmail === organizerEmail) return null;
+              return (
+                <Link
+                  to={
+                    viewerEmail
+                      ? `/messages?eventId=${event.id}&with=${encodeURIComponent(organizerEmail)}`
+                      : '/login'
+                  }
+                  className="flex items-center justify-center gap-2 w-full px-4 py-2.5 text-xs font-semibold text-[#1E3F35] bg-white hover:bg-[#F4F1EA] border border-[#1E3F35] rounded-lg transition-colors"
+                >
+                  <MessageCircle className="w-4 h-4" />
+                  Message organizer
+                </Link>
+              );
+            })()}
           </div>
         </div>
 

@@ -14,6 +14,7 @@ import { DashboardPage } from './pages/DashboardPage';
 import { RegistrationsPage } from './pages/RegistrationsPage';
 import { SavedEventsPage } from './pages/SavedEventsPage';
 import { ProfilePage } from './pages/ProfilePage';
+import { MessagesPage } from './pages/MessagesPage';
 import { OrganizerDashboardPage } from './pages/OrganizerDashboardPage';
 import { OrganizerEventsPage } from './pages/OrganizerEventsPage';
 import { CreateEventPage } from './pages/CreateEventPage';
@@ -81,6 +82,7 @@ export default function App() {
               <Route path="/my-registrations" element={<RegistrationsPage />} />
               <Route path="/saved" element={<SavedEventsPage />} />
               <Route path="/profile" element={<ProfilePage />} />
+              <Route path="/messages" element={<MessagesPage />} />
 
               {/* Organizer Hub — guarded: only approved organizers and
                   admins may open these pages. Attendees get a page that
