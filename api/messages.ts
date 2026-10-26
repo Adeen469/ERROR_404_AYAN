@@ -417,18 +417,33 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       const path = `${sanitizePathSegment(eventId)}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
-      // expiresIn (seconds) is REQUIRED by the sign endpoint — without
-      // it Storage answers 400 "body must have required property
-      // 'expiresIn'". One hour is plenty for picking and uploading a file.
+      // Upload signed URLs are a DIFFERENT endpoint from download
+      // signed URLs, and mixing them up fails in confusing ways:
+      //   - POST /object/sign/... signs a DOWNLOAD link, so it 404s
+      //     "Object not found" for a path that does not exist yet;
+      //   - POST /object/upload/sign/... signs an UPLOAD link for a
+      //     new object, which is what this is. It returns a token; the
+      //     browser PUTs the file to .../object/upload/sign/...?token=.
+      // expiresIn (seconds) is REQUIRED — without it Storage answers
+      // 400 "body must have required property 'expiresIn'". One hour
+      // is plenty for picking and uploading a file.
       const { ok, status, body: signBody } = await fetchJson(
-        `${supabaseBase()}/storage/v1/object/sign/${BUCKET}/${path}`,
+        `${supabaseBase()}/storage/v1/object/upload/sign/${BUCKET}/${path}`,
         {
           method: "POST",
           headers: supabaseHeaders(),
           body: JSON.stringify({ expiresIn: 3600 }),
         },
       );
-      if (!ok || !signBody?.url) {
+      let uploadUrl = "";
+      if (signBody?.token) {
+        uploadUrl = `${supabaseBase()}/storage/v1/object/upload/sign/${BUCKET}/${path}?token=${signBody.token}`;
+      } else if (signBody?.url) {
+        uploadUrl = signBody.url.startsWith("http")
+          ? signBody.url
+          : `${supabaseBase()}/storage/v1${signBody.url}`;
+      }
+      if (!ok || !uploadUrl) {
         // Surface Storage's own reason instead of a generic guess: a
         // 404 here means the bucket is not in this project, a 401/403
         // means the key, and so on. No secret ever appears in these.
@@ -440,7 +455,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       sendJson(res, 200, {
-        uploadUrl: `${supabaseBase()}/storage/v1${signBody.url}`,
+        uploadUrl,
         publicUrl: `${supabaseBase()}/storage/v1/object/public/${BUCKET}/${path}`,
         path,
       });
