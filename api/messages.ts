@@ -236,6 +236,15 @@ function isOrganizerOrAdmin(sender: string, organizerEmail: string): boolean {
 // Shared rule for sending a message AND for issuing an upload URL:
 // returns an error string, or null when the sender may contact the
 // recipient about this event.
+//
+// The check keys on the RECIPIENT, not on the sender's role — the
+// earlier version keyed on the sender and broke a real case: an admin
+// writing to an organizer for the first time was treated as "an
+// organizer cold-messaging" and blocked, when they were simply an
+// attendee starting a conversation. Now:
+//   - anyone may write TO the event's organizer (starting or continuing);
+//   - anyone else may only be written to by the organizer/admin, and
+//     only inside a thread the attendee already started.
 function authorizeContact(
   event: any,
   sender: string,
@@ -245,23 +254,21 @@ function authorizeContact(
   const organizerEmail = organizerEmailOf(event);
   if (!organizerEmail) return "This event has no organizer contact";
   if (sender === recipient) return "You cannot message yourself";
-  if (isOrganizerOrAdmin(sender, organizerEmail)) {
-    // Organizers reply; they never cold-message. A thread exists when
-    // either side has already written to the other about this event.
-    const threadExists = existing.some(
-      (m: any) =>
-        m.eventId === event.id &&
-        ((m.senderEmail === sender && m.recipientEmail === recipient) ||
-          (m.senderEmail === recipient && m.recipientEmail === sender)),
-    );
-    return threadExists
-      ? null
-      : "Reply inside a conversation the attendee started";
+  if (recipient === organizerEmail) return null;
+  if (!isOrganizerOrAdmin(sender, organizerEmail)) {
+    return "You can only message this event's organizer";
   }
-  // Attendees may only write to the event's organizer.
-  return recipient === organizerEmail
+  // Organizers reply; they never cold-message. A thread exists when
+  // either side has already written to the other about this event.
+  const threadExists = existing.some(
+    (m: any) =>
+      m.eventId === event.id &&
+      ((m.senderEmail === sender && m.recipientEmail === recipient) ||
+        (m.senderEmail === recipient && m.recipientEmail === sender)),
+  );
+  return threadExists
     ? null
-    : "You can only message this event's organizer";
+    : "Reply inside a conversation the attendee started";
 }
 
 function extensionOf(fileName: string): string {
