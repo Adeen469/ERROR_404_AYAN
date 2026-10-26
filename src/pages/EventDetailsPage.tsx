@@ -105,14 +105,22 @@ export function EventDetailsPage() {
     : '';
 
   // Render the QR code client-side (no third-party QR service sees the
-  // organizer's UPI ID or the amount).
+  // organizer's UPI ID or the amount). Themed to the site: Deep Forest
+  // modules on white. Error correction 'H' (~30% recoverable) is what
+  // lets the center logo overlay below stay scannable — it covers
+  // under a quarter of the width, well inside what 'H' recovers.
   useEffect(() => {
     if (!upiUri) {
       setUpiQr('');
       return;
     }
     let active = true;
-    QRCode.toDataURL(upiUri, { margin: 1, width: 220 })
+    QRCode.toDataURL(upiUri, {
+      margin: 2,
+      width: 440,
+      errorCorrectionLevel: 'H',
+      color: { dark: '#1E3F35', light: '#FFFFFF' },
+    })
       .then((url) => {
         if (active) setUpiQr(url);
       })
@@ -757,11 +765,34 @@ export function EventDetailsPage() {
                 </div>
                 {upiQr && (
                   <div className="pt-2 flex flex-col items-center gap-2">
-                    <img
-                      src={upiQr}
-                      alt={`QR code to pay ${formatPrice(event.price)} to ${event.upiId}`}
-                      className="w-44 h-44 rounded-lg border border-[#E2DFD8] bg-white"
-                    />
+                    {/* Themed frame: the rounded corners live on this card
+                        and on the logo patch, NOT on the QR image — the
+                        QR itself stays square so its corner finder
+                        patterns are never clipped. The logo patch sits
+                        centered over the code (pointer-events-none: it
+                        is display only) with curvy corners on both the
+                        patch and the logo image. */}
+                    <div className="bg-white rounded-2xl border border-[#E2DFD8] p-2 shadow-sm">
+                      <div className="relative w-44 h-44">
+                        <img
+                          src={upiQr}
+                          alt={`QR code to pay ${formatPrice(event.price)} to ${event.upiId}`}
+                          className="w-full h-full block"
+                        />
+                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                          <div
+                            className="bg-white rounded-2xl border border-[#E7E3DB] shadow-sm p-1 flex items-center justify-center"
+                            style={{ width: '24%', height: '24%' }}
+                          >
+                            <img
+                              src="/locora-logo.png"
+                              alt="Locora"
+                              className="w-full h-full object-contain rounded-xl"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
                     <p className="text-[11px] text-[#5F635D] text-center">
                       Scan with any UPI app — the amount is prefilled
                     </p>
