@@ -3,8 +3,8 @@ import { Search, SlidersHorizontal, X, RotateCcw, MapPin, ChevronDown } from 'lu
 import { EventFilterOptions } from '../../types';
 import { DEMO_CATEGORIES } from '../../mocks/demo-data';
 import { LocationPicker } from '../LocationPicker';
-import { ThemedSelect } from '../ui/ThemedSelect';
 import { DateRangePicker } from './DateRangePicker';
+import { PriceFilter } from './PriceFilter';
 
 interface EventFiltersProps {
   filters: EventFilterOptions;
@@ -131,7 +131,7 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
             className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-[#E2DFD8] rounded-xl text-xs font-medium text-[#1E2320] shadow-2xs"
           >
             <SlidersHorizontal className="w-4 h-4" />
-            <span>Filter & Sort</span>
+            <span>Filter</span>
             {hasActiveFilters && (
               <span className="w-2 h-2 rounded-full bg-[#1E3F35] ml-1" />
             )}
@@ -148,7 +148,7 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
           )}
         </div>
 
-        {/* Desktop Dropdowns: Date (calendar), Price & Sort (location is the card below) */}
+        {/* Desktop Dropdowns: Date (calendar) & Price (location is the card below) */}
         <div className="hidden sm:flex items-center gap-3 shrink-0">
           <DateRangePicker
             dateRange={filters.dateRange}
@@ -158,37 +158,9 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
             size="bar"
           />
 
-          <ThemedSelect
-            value={filters.priceType || 'all'}
-            options={[
-              { value: 'all', label: 'All Prices' },
-              { value: 'free', label: 'Free Admission' },
-              { value: 'paid', label: 'Ticketed' },
-            ]}
-            onChange={(v) =>
-              onChange({
-                ...filters,
-                priceType: v as EventFilterOptions['priceType'],
-              })
-            }
-            ariaLabel="Filter by price"
-            size="bar"
-          />
-
-          <ThemedSelect
-            value={filters.sortBy || 'relevance'}
-            options={[
-              { value: 'relevance', label: 'Featured & Popular' },
-              { value: 'soonest', label: 'Soonest First' },
-              { value: 'capacity', label: 'Most Open Spots' },
-            ]}
-            onChange={(v) =>
-              onChange({
-                ...filters,
-                sortBy: v as EventFilterOptions['sortBy'],
-              })
-            }
-            ariaLabel="Sort results"
+          <PriceFilter
+            priceType={filters.priceType}
+            onChange={(priceType) => onChange({ ...filters, priceType })}
             size="bar"
           />
         </div>
@@ -291,7 +263,7 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
         >
           <div className="bg-[#FAF8F5] rounded-t-2xl p-6 space-y-4 max-h-[85vh] overflow-y-auto border-t border-[#E2DFD8]">
             <div className="flex items-center justify-between pb-3 border-b border-[#E2DFD8]">
-              <h3 className="font-editorial text-lg font-bold text-[#1E2320]">Filters & Sorting</h3>
+              <h3 className="font-editorial text-lg font-bold text-[#1E2320]">Filters</h3>
               <button
                 onClick={() => setMobileDrawerOpen(false)}
                 className="p-1.5 text-[#8C887E] hover:text-[#1E2320]"
@@ -326,40 +298,9 @@ export function EventFilters({ filters, onChange, totalResults, onSavedLocation,
 
             <div>
               <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">Price</label>
-              <ThemedSelect
-                value={filters.priceType || 'all'}
-                options={[
-                  { value: 'all', label: 'All Prices' },
-                  { value: 'free', label: 'Free Admission' },
-                  { value: 'paid', label: 'Ticketed' },
-                ]}
-                onChange={(v) =>
-                  onChange({
-                    ...filters,
-                    priceType: v as EventFilterOptions['priceType'],
-                  })
-                }
-                ariaLabel="Filter by price"
-                size="drawer"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">Sort Results By</label>
-              <ThemedSelect
-                value={filters.sortBy || 'relevance'}
-                options={[
-                  { value: 'relevance', label: 'Featured & Popular' },
-                  { value: 'soonest', label: 'Soonest First' },
-                  { value: 'capacity', label: 'Most Open Spots' },
-                ]}
-                onChange={(v) =>
-                  onChange({
-                    ...filters,
-                    sortBy: v as EventFilterOptions['sortBy'],
-                  })
-                }
-                ariaLabel="Sort results"
+              <PriceFilter
+                priceType={filters.priceType}
+                onChange={(priceType) => onChange({ ...filters, priceType })}
                 size="drawer"
               />
             </div>
