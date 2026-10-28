@@ -1,3 +1,9 @@
+// SECURITY FIX — Phase 2 P2-2: after the existing Google ID-token
+// verification, this callback now also issues a server session cookie
+// (locora_session, HttpOnly, Secure, SameSite=Lax, 7 days) and records
+// the Google user in locora_users (no password row for Google accounts).
+// API identity comes from that cookie, never from localStorage.
+import { norm, signSession, sessionCookie, supabaseHeaders, supabaseBase, fetchJson, loadUserByEmail, getEnv as _getEnv } from "../../_lib/session";
 // GET /api/auth/callback/google — finishes the custom Google OAuth flow.
 //
 // Google redirects here with ?code=...&state=... after the user consents.
@@ -462,14 +468,45 @@ export default async function handler(req: any, res: any) {
     createdAt: new Date().toISOString(),
   };
 
-  // 4. Hand the profile back to the SPA, in the same localStorage shape
-  //    the app already uses, then send the user to their dashboard.
+  // 4. SECURITY FIX: issue a server session, then hand the profile
+  //    back to the SPA in the same localStorage shape the app uses.
+  //    The cookie is authoritative for the API; localStorage is UI only.
+  //    The stored sessionVersion (0 for a new user) is baked into the
+  //    token so a later password reset / version bump kills old tokens.
+  //    Record the Google user server-side (no password row). Best-effort:
+  //    a missing locora_users table must not break Google sign-in, but the
+  //    session cookie above is still required for every API call.
+  let existingGoogleUser: any = null;
+  try { existingGoogleUser = await loadUserByEmail(profile.email); } catch {}
+  const googleSessionVersion = existingGoogleUser && typeof existingGoogleUser.data?.sessionVersion === "number" ? existingGoogleUser.data.sessionVersion : 0;
+  let jwt = "";
+  try {
+    jwt = signSession(profile.email, profile.role, "google", googleSessionVersion);
+  } catch {
+    return errorPage(
+      res,
+      500,
+      "Sign-in is not configured",
+      "SESSION_SECRET is missing on the server. Set it in Vercel (Production, sensitive) and redeploy.",
+    );
+  }
+  try {
+    if (!existingGoogleUser) {
+      await fetchJson(`${supabaseBase()}/rest/v1/locora_users`, {
+        method: "POST", headers: supabaseHeaders(),
+        body: JSON.stringify({ id: profile.id, data: { email: norm(profile.email), name: profile.name, role: profile.role, authProvider: "google", sessionVersion: 0, createdAt: profile.createdAt } }),
+      });
+    }
+  } catch {}
   const profileJson = escapeForScript(JSON.stringify(profile));
   const tokenJson = escapeForScript(JSON.stringify(tokenData.id_token));
   const secure = redirectUri.startsWith("https://") ? "; Secure" : "";
   res.writeHead(200, {
     "Content-Type": "text/html; charset=utf-8",
-    "Set-Cookie": `locora_oauth_state=; Path=/api/auth; HttpOnly; SameSite=Lax; Max-Age=0${secure}`,
+    "Set-Cookie": [
+      `locora_oauth_state=; Path=/api/auth; HttpOnly; SameSite=Lax; Max-Age=0${secure}`,
+      sessionCookie(jwt, req),
+    ],
   });
   return res.end(
     htmlPage(
@@ -477,14 +514,6 @@ export default async function handler(req: any, res: any) {
       `<p id="status">Signing you in…</p>
       <script>
         var profile = ${profileJson};
-        // Restore what the user saved on Profile (mobile number and its
-        // verification flag, home location, bio, interests). Google
-        // sign-in rebuilds the profile from Google's userinfo, which
-        // used to wipe all of that at the next login. The backup lives
-        // under 'locora_saved_profile_<email>' (see
-        // src/utils/saved-profile.ts — same field list, kept in sync);
-        // it survives logout by design. Name, avatar, role and
-        // authProvider always stay Google's — never restored here.
         try {
           var prev = null;
           try { prev = JSON.parse(localStorage.getItem('locora_saved_profile_' + String(profile.email).toLowerCase()) || 'null'); } catch (e) { prev = null; }
@@ -508,10 +537,6 @@ export default async function handler(req: any, res: any) {
         if (saved) {
           status.textContent = 'Signed in as ' + (profile.name || 'you') + ' — taking you to your dashboard…';
           try {
-            // Account emails (fire-and-forget, keepalive so the redirect
-            // below cannot cancel them): a sign-in alert every time, and
-            // a welcome the first time. The /api/notify endpoint caps
-            // both, and failures here must never block sign-in.
             var notifyBody = function (a) { return JSON.stringify({ action: a, email: profile.email, name: profile.name }); };
             fetch('/api/notify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: notifyBody('login'), keepalive: true }).catch(function () {});
             fetch('/api/notify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: notifyBody('welcome'), keepalive: true }).catch(function () {});
@@ -520,7 +545,7 @@ export default async function handler(req: any, res: any) {
             window.location.replace(${escapeForScript(JSON.stringify(returnTo))});
           }, 900);
         } else {
-          status.textContent = 'Could not save your sign-in in this browser (site storage appears blocked). Please allow storage for this site and try again, or use the demo profile on the sign-in page.';
+          status.textContent = 'Could not save your sign-in in this browser (site storage appears blocked). Please allow storage for this site and try again.';
         }
       </script>
       <noscript><p>JavaScript is required to complete sign-in. <a href="/login">Back to sign in</a></p></noscript>`,
