@@ -1,3 +1,14 @@
+// SECURITY FIX — Phase 2 P2-3 (and P2-4, see below): every method now
+// requires a valid locora_session JWT. Identity comes ONLY from the JWT
+// email; userEmail / senderEmail / editorEmail / recipientEmail in the
+// query or body are never trusted as identity. GET ignores ?userEmail=
+// entirely and returns only the session user's messages. POST sender
+// must equal the session email. PATCH editor/recipient must equal the
+// session email. DELETE/hide use the session email as the actor.
+// Recipient resolution for a first message to an organiser is in P2-4
+// (organizerId -> stored event's organiser email).
+import { getEnv, norm, isEmail, sendJson, supabaseHeaders, supabaseBase, readBody, fetchJson, esc, loadEvent, organizerEmailOf, verifySession, checkRateLimit, getClientIp } from "./_lib/session";
+
 // Private attendee <-> organizer messages for an event.
 //
 // One thread per (event, attendee, organizer). The attendee starts it
@@ -63,20 +74,6 @@
 // SUPABASE_SERVICE_ROLE_KEY (already set); GMAIL_USER / GMAIL_APP_PASSWORD
 // for the new-message email (already set; best-effort, never blocks send).
 
-function getEnv(name: string): string {
-  try {
-    const env = (globalThis as any).process?.env;
-    return (env && env[name]) || "";
-  } catch {
-    return "";
-  }
-}
-
-function sendJson(res: any, status: number, obj: any): void {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(obj));
-}
-
 const ADMIN_EMAILS = ["mr.adeen946@gmail.com", "ayan.work937@gmail.com"];
 const SITE_URL = "https://locora-hyperlocal.vercel.app";
 const BUCKET = "message-attachments";
@@ -106,63 +103,6 @@ const ALLOWED_EXTENSIONS: Record<string, string[]> = {
   xlsm: ["application/vnd.ms-excel.sheet.macroEnabled.12"],
 };
 
-function norm(email: string): string {
-  return (email || "").trim().toLowerCase();
-}
-
-function isEmail(s: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s || "");
-}
-
-function supabaseHeaders(): Record<string, string> {
-  const key = getEnv("SUPABASE_SERVICE_ROLE_KEY");
-  return {
-    apikey: key,
-    Authorization: `Bearer ${key}`,
-    "Content-Type": "application/json",
-    Prefer: "return=representation",
-  };
-}
-
-function supabaseBase(): string {
-  return getEnv("SUPABASE_URL").replace(/\/$/, "");
-}
-
-function readBody(req: any): Promise<any> {
-  return new Promise((resolve) => {
-    try {
-      const b = (req as any).body;
-      if (b && typeof b === "object") return resolve(b);
-      if (typeof b === "string" && b.length > 0) {
-        try {
-          return resolve(JSON.parse(b));
-        } catch {
-          return resolve({});
-        }
-      }
-      let data = "";
-      const timer = setTimeout(() => resolve({}), 3000);
-      req.on("data", (chunk: any) => {
-        data += chunk;
-      });
-      req.on("end", () => {
-        clearTimeout(timer);
-        try {
-          resolve(data ? JSON.parse(data) : {});
-        } catch {
-          resolve({});
-        }
-      });
-      req.on("error", () => {
-        clearTimeout(timer);
-        resolve({});
-      });
-    } catch {
-      resolve({});
-    }
-  });
-}
-
 async function fetchJson(
   url: string,
   init?: any,
@@ -175,14 +115,6 @@ async function fetchJson(
     body = null;
   }
   return { ok: res.ok, status: res.status, body };
-}
-
-function esc(s: string): string {
-  return (s || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
 }
 
 async function loadEvent(eventId: string): Promise<any | null> {
@@ -237,10 +169,6 @@ async function updateMessageData(msg: any): Promise<void> {
 }
 
 // The organizer's email comes from the STORED event row only.
-function organizerEmailOf(event: any): string {
-  return norm(event?.createdByEmail || event?.organizer?.email || "");
-}
-
 function isOrganizerOrAdmin(sender: string, organizerEmail: string): boolean {
   return sender === organizerEmail || ADMIN_EMAILS.includes(sender);
 }
@@ -310,7 +238,9 @@ function buildMessageEmail(
         ? `Sent an attachment: ${msg.attachment.name}`
         : "Sent you a message";
   const subject = `New message about "${title}"`;
-  const link = `${SITE_URL}/messages?eventId=${encodeURIComponent(msg.eventId)}&with=${encodeURIComponent(msg.senderEmail)}`;
+  // P2-4: the email alert link carries only the eventId, never
+  // an email address, so no organiser/attendee email leaks via URL.
+  const link = `${SITE_URL}/messages?eventId=${encodeURIComponent(msg.eventId)}`;
   const text =
     `${senderName} sent you a message about "${title}":\n\n${snippet}\n\n` +
     `Reply in Locora: ${link}`;
@@ -365,12 +295,21 @@ export default async function handler(req: any, res: any): Promise<void> {
       sendJson(res, 503, { message: "Messages are not set up yet" });
       return;
     }
+    // P2-3: session first, for every method. No session -> 401, no data.
+    const session = await verifySession(req);
+    if (!session) {
+      sendJson(res, 401, { message: "Sign in required" });
+      return;
+    }
+    const me = session.email;
 
     // ---- GET: list / unread count ----
     if (req.method === "GET") {
-      const userEmail = norm(req.query?.userEmail || "");
-      if (!isEmail(userEmail)) {
-        sendJson(res, 400, { message: "A valid userEmail is required" });
+      // userEmail query param is IGNORED (it was the P2-3 trust vector).
+      const userEmail = me;
+      const rl = await checkRateLimit(`msg:get:${getClientIp(req)}:${me}`, 300, 10 * 60 * 1000);
+      if (!rl.allowed && !rl.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rl.retryAfter) });
         return;
       }
       let all: any[];
@@ -406,9 +345,9 @@ export default async function handler(req: any, res: any): Promise<void> {
     // ---- DELETE: delete for everyone (sender only) ----
     if (req.method === "DELETE") {
       const id = String(req.query?.id || "");
-      const userEmail = norm(req.query?.userEmail || "");
-      if (!id || !isEmail(userEmail)) {
-        sendJson(res, 400, { message: "id and userEmail are required" });
+      const userEmail = me;
+      if (!id) {
+        sendJson(res, 400, { message: "id is required" });
         return;
       }
       const msg = await loadMessage(id);
@@ -447,9 +386,9 @@ export default async function handler(req: any, res: any): Promise<void> {
     // ---- POST: "Delete for me" (hide for one user) ----
     if (req.method === "POST" && body.action === "hide") {
       const id = String(body.id || "");
-      const userEmail = norm(body.userEmail || "");
-      if (!id || !isEmail(userEmail)) {
-        sendJson(res, 400, { message: "id and userEmail are required" });
+      const userEmail = me;
+      if (!id) {
+        sendJson(res, 400, { message: "id is required" });
         return;
       }
       const msg = await loadMessage(id);
@@ -477,13 +416,25 @@ export default async function handler(req: any, res: any): Promise<void> {
     // ---- POST: signed upload URL ----
     if (req.method === "POST" && body.action === "upload-url") {
       const eventId = String(body.eventId || "");
-      const sender = norm(body.senderEmail || "");
-      const recipient = norm(body.recipientEmail || "");
+      const sender = me;
       const fileName = String(body.fileName || "");
       const fileSize = Number(body.fileSize || 0);
       const fileType = String(body.fileType || "");
-      if (!eventId || !isEmail(sender) || !isEmail(recipient) || !fileName) {
-        sendJson(res, 400, { message: "eventId, senderEmail, recipientEmail and fileName are required" });
+      if (!eventId || !fileName) {
+        sendJson(res, 400, { message: "eventId and fileName are required" });
+        return;
+      }
+      // Recipient: if organizerId is given, resolve it from the stored
+      // event (P2-4); otherwise fall back to a caller recipient that
+      // authorizeContact() still validates against the stored event.
+      const eventForRecipient = await loadEvent(eventId);
+      let recipient = norm(body.recipientEmail || "");
+      if (body.organizerId && eventForRecipient) {
+        const orgEmail = organizerEmailOf(eventForRecipient);
+        if (orgEmail) recipient = orgEmail;
+      }
+      if (!isEmail(recipient)) {
+        sendJson(res, 400, { message: "A valid recipient is required" });
         return;
       }
       if (!Number.isFinite(fileSize) || fileSize <= 0 || fileSize > MAX_ATTACHMENT_BYTES) {
@@ -564,13 +515,30 @@ export default async function handler(req: any, res: any): Promise<void> {
     // ---- POST: send a message ----
     if (req.method === "POST") {
       const eventId = String(body.eventId || "");
-      const sender = norm(body.senderEmail || "");
+      const sender = me;
       const senderName = String(body.senderName || "");
-      const recipient = norm(body.recipientEmail || "");
       const text = String(body.text || "").trim().slice(0, MAX_TEXT_CHARS);
       const attachment = body.attachment || null;
-      if (!eventId || !isEmail(sender) || !isEmail(recipient)) {
-        sendJson(res, 400, { message: "eventId, senderEmail and recipientEmail are required" });
+      if (!eventId) {
+        sendJson(res, 400, { message: "eventId is required" });
+        return;
+      }
+      // Recipient resolution (P2-4): organizerId -> stored event's
+      // organiser email. A caller-supplied recipientEmail is only used
+      // when no organizerId is given, and authorizeContact() below
+      // still validates it against the stored event.
+      const eventForRecipient = await loadEvent(eventId);
+      if (!eventForRecipient) {
+        sendJson(res, 404, { message: "Event not found" });
+        return;
+      }
+      let recipient = norm(body.recipientEmail || "");
+      if (body.organizerId) {
+        const orgEmail = organizerEmailOf(eventForRecipient);
+        if (orgEmail) recipient = orgEmail;
+      }
+      if (!isEmail(recipient)) {
+        sendJson(res, 400, { message: "A valid recipient is required" });
         return;
       }
       if (!text && !attachment) {
@@ -654,11 +622,11 @@ export default async function handler(req: any, res: any): Promise<void> {
     // ---- PATCH: edit text (own message, within 1 hour) / mark read ----
     if (req.method === "PATCH") {
       const id = String(req.query?.id || "");
-      if (body.editorEmail) {
-        const editor = norm(body.editorEmail || "");
+      if (body.text !== undefined) {
+        const editor = me;
         const text = String(body.text || "").trim().slice(0, MAX_TEXT_CHARS);
-        if (!id || !isEmail(editor) || !text) {
-          sendJson(res, 400, { message: "id, editorEmail and non-empty text are required" });
+        if (!id || !text) {
+          sendJson(res, 400, { message: "id and non-empty text are required" });
           return;
         }
         const msg = await loadMessage(id);
@@ -687,9 +655,9 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 200, { message: msg });
         return;
       }
-      const recipient = norm(body.recipientEmail || "");
-      if (!id || !isEmail(recipient)) {
-        sendJson(res, 400, { message: "id and recipientEmail are required" });
+      const recipient = me;
+      if (!id) {
+        sendJson(res, 400, { message: "id is required" });
         return;
       }
       const msg = await loadMessage(id);

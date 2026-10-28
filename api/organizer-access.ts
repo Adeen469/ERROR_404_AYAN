@@ -1,3 +1,9 @@
+// SECURITY FIX — session-gated: identity is the locora_session JWT.
+// GET ?email=, POST request ?email, and POST approve/reject/revoke
+// ?adminEmail are all IGNORED as identity; the session email is used.
+// Admin lists and decisions require a session admin.
+import { getEnv, sendJson, norm, isAdmin, supabaseHeaders, supabaseBase, readBody, verifySession } from "./_lib/session";
+
 // Organizer access API — who may post events, and admin approval.
 //
 // GET  /api/organizer-access?email=x
@@ -41,78 +47,7 @@
 // treated as an approved organizer from local data alone, except an admin
 // signed in with Google (see OrganizerGuard).
 
-function getEnv(name: string): string {
-  try {
-    const env = (globalThis as any).process?.env;
-    return (env && env[name]) || "";
-  } catch {
-    return "";
-  }
-}
-
-function sendJson(res: any, status: number, obj: any): void {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(obj));
-}
-
 const ADMIN_EMAILS = ["mr.adeen946@gmail.com", "ayan.work937@gmail.com"];
-
-function norm(email: string): string {
-  return (email || "").trim().toLowerCase();
-}
-
-function isAdmin(email: string): boolean {
-  return ADMIN_EMAILS.indexOf(norm(email)) !== -1;
-}
-
-function supabaseHeaders(): Record<string, string> {
-  const key = getEnv("SUPABASE_SERVICE_ROLE_KEY");
-  return {
-    apikey: key,
-    Authorization: "Bearer " + key,
-    "Content-Type": "application/json",
-    Prefer: "return=representation",
-  };
-}
-
-function supabaseBase(): string {
-  return getEnv("SUPABASE_URL").replace(/\/$/, "");
-}
-
-function readBody(req: any): Promise<any> {
-  return new Promise((resolve) => {
-    try {
-      const b = req.body;
-      if (b && typeof b === "object") return resolve(b);
-      if (typeof b === "string" && b.length > 0) {
-        try {
-          return resolve(JSON.parse(b));
-        } catch {
-          return resolve({});
-        }
-      }
-      let data = "";
-      const timer = setTimeout(() => resolve({}), 3000);
-      req.on("data", (chunk: any) => {
-        data += chunk;
-      });
-      req.on("end", () => {
-        clearTimeout(timer);
-        try {
-          resolve(data ? JSON.parse(data) : {});
-        } catch {
-          resolve({});
-        }
-      });
-      req.on("error", () => {
-        clearTimeout(timer);
-        resolve({});
-      });
-    } catch {
-      resolve({});
-    }
-  });
-}
 
 async function fetchRow(email: string): Promise<any | null> {
   const url =
@@ -174,15 +109,17 @@ export default async function handler(req: any, res: any): Promise<void> {
       return;
     }
 
+    const session = await verifySession(req);
+    if (!session) { sendJson(res, 401, { message: "Sign in required" }); return; }
     const url = new URL(req.url || "/api/organizer-access", "http://localhost");
-    const email = norm(url.searchParams.get("email") || "");
+    const email = session.email;
 
     if (
       req.method === "GET" &&
       (url.searchParams.get("pending") === "1" ||
         url.searchParams.get("organizers") === "1")
     ) {
-      const adminEmail = norm(url.searchParams.get("adminEmail") || "");
+      const adminEmail = session.email;
       if (!isAdmin(adminEmail)) {
         sendJson(res, 403, { message: "Only admins can list organizer requests." });
         return;
@@ -226,10 +163,7 @@ export default async function handler(req: any, res: any): Promise<void> {
     }
 
     if (req.method === "GET") {
-      if (!email) {
-        sendJson(res, 400, { message: "email is required." });
-        return;
-      }
+      // email is the session email; the query param is ignored.
       let row: any = null;
       try {
         row = await fetchRow(email);
@@ -251,11 +185,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       const action = body.action;
 
       if (action === "request") {
-        const reqEmail = norm(body.email || "");
-        if (!reqEmail) {
-          sendJson(res, 400, { message: "email is required." });
-          return;
-        }
+        const reqEmail = session.email;
         if (isAdmin(reqEmail)) {
           sendJson(res, 200, roleFor(reqEmail, null));
           return;
@@ -292,7 +222,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       }
 
       if (action === "approve" || action === "reject" || action === "revoke") {
-        const adminEmail = norm(body.adminEmail || "");
+        const adminEmail = session.email;
         const targetEmail = norm(body.targetEmail || "");
         if (!isAdmin(adminEmail)) {
           sendJson(res, 403, {

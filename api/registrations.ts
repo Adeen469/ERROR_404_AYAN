@@ -1,3 +1,13 @@
+// SECURITY FIX — Phase 1 Finding 1 (and Phase 2 P2-1): registrations are
+// now session-only. No valid locora_session JWT -> 401 with no data and
+// no parameter listing. With a session: own records only, or organiser/
+// admin records for that organiser's own events. Nested event objects
+// are always stripped of organiser.email, createdByEmail and upiId.
+// Identity comes ONLY from the JWT; body/query userEmail, approverEmail
+// and userId are never trusted as identity.
+// See SECURITY_FIX_SETUP.md (locora_users, rate_limits, SESSION_SECRET).
+import { getEnv, norm, isAdmin, sendJson, supabaseHeaders, supabaseBase, readBody, fetchJson, loadEvent, mayManageEvent, stripEventPublic, verifySession, checkRateLimit, getClientIp, esc } from "./_lib/session";
+
 // Shared registrations API — manual-approval payments.
 //
 // Registrations used to live only in each browser's localStorage, so an
@@ -57,79 +67,6 @@
 // guaranteed to run), but any mail failure is swallowed so it can never
 // fail a registration. Rejected payments mail nobody; the attendee sees
 // "Payment not approved" in the app.
-
-function getEnv(name: string): string {
-  try {
-    const env = (globalThis as any).process?.env;
-    return (env && env[name]) || "";
-  } catch {
-    return "";
-  }
-}
-
-function sendJson(res: any, status: number, obj: any): void {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(obj));
-}
-
-const ADMIN_EMAILS = ["mr.adeen946@gmail.com", "ayan.work937@gmail.com"];
-
-function norm(email: string): string {
-  return (email || "").trim().toLowerCase();
-}
-
-function isAdmin(email: string): boolean {
-  return ADMIN_EMAILS.indexOf(norm(email)) !== -1;
-}
-
-function supabaseHeaders(): Record<string, string> {
-  const key = getEnv("SUPABASE_SERVICE_ROLE_KEY");
-  return {
-    apikey: key,
-    Authorization: `Bearer ${key}`,
-    "Content-Type": "application/json",
-    Prefer: "return=representation",
-  };
-}
-
-function supabaseBase(): string {
-  return getEnv("SUPABASE_URL").replace(/\/$/, "");
-}
-
-function readBody(req: any): Promise<any> {
-  return new Promise((resolve) => {
-    try {
-      const b = (req as any).body;
-      if (b && typeof b === "object") return resolve(b);
-      if (typeof b === "string" && b.length > 0) {
-        try {
-          return resolve(JSON.parse(b));
-        } catch {
-          return resolve({});
-        }
-      }
-      let data = "";
-      const timer = setTimeout(() => resolve({}), 3000);
-      req.on("data", (chunk: any) => {
-        data += chunk;
-      });
-      req.on("end", () => {
-        clearTimeout(timer);
-        try {
-          resolve(data ? JSON.parse(data) : {});
-        } catch {
-          resolve({});
-        }
-      });
-      req.on("error", () => {
-        clearTimeout(timer);
-        resolve({});
-      });
-    } catch {
-      resolve({});
-    }
-  });
-}
 
 async function fetchJson(url: string, init?: any): Promise<{ ok: boolean; status: number; body: any }> {
   const res = await fetch(url, init);
@@ -194,14 +131,6 @@ async function loadEvent(eventId: string): Promise<any | null> {
 // loads from the live site; if an inbox blocks images, the "Locora"
 // wordmark beside it still reads.
 const SITE_URL = "https://locora-hyperlocal.vercel.app";
-
-function esc(s: string): string {
-  return (s || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
 
 function emailLayout(title: string, inner: string): string {
   return (
@@ -363,14 +292,16 @@ async function sendAttendeePendingEmail(reg: any, event: any): Promise<boolean> 
   return sendMail(buildAttendeePendingEmail(reg, event));
 }
 
-function mayManageEvent(event: any, approverEmail: string): boolean {
-  if (!event) return false;
-  if (isAdmin(approverEmail)) return true;
-  const email = norm(approverEmail);
-  if (!email) return false;
-  if (event.createdByEmail && norm(event.createdByEmail) === email) return true;
-  if (event.organizer && event.organizer.email && norm(event.organizer.email) === email) return true;
-  return false;
+function stripReg(reg: any, sessionEmail: string, isOrganiser: boolean): any {
+  const event = reg.event ? stripEventPublic(reg.event) : undefined;
+  // Organiser view keeps attendee fields needed for approval.
+  // Own view keeps the attendee's own fields (including their own ticketCode).
+  // In both cases the nested event is stripped. No other view is allowed.
+  return { ...reg, event };
+}
+
+function newTicketCode(): string {
+  return `LOC-${Math.floor(1000 + Math.random() * 9000)}-TK`;
 }
 
 export default async function handler(req: any, res: any): Promise<void> {
@@ -379,17 +310,35 @@ export default async function handler(req: any, res: any): Promise<void> {
       sendJson(res, 503, { message: "Shared registrations database is not configured" });
       return;
     }
+    // Finding 1 / P2-1: session first, for every method. No session ->
+    // 401, no data, no parameter listing, no hint about the query interface.
+    const session = await verifySession(req);
+    if (!session) {
+      sendJson(res, 401, { message: "Sign in required" });
+      return;
+    }
+    const me = session.email;
 
     const url = new URL(req.url || "/api/registrations", "http://localhost");
     const q = url.searchParams;
 
     if (req.method === "GET") {
+      // Rate limit (GETs: allow if the rate_limits table is missing,
+      // because the session check already protects the data).
+      const rl = await checkRateLimit(`reg:get:${getClientIp(req)}:${me}`, 300, 10 * 60 * 1000);
+      if (!rl.allowed && !rl.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rl.retryAfter) });
+        return;
+      }
       const all = await loadAllRegistrations();
       if (q.get("pendingCounts") === "1") {
+        // Only counts for events this caller organises (or admins).
+        const events = await loadAllEventsForCounts();
         const counts: Record<string, number> = {};
         for (const r of all) {
           if (r && r.status === "pending") {
-            counts[r.eventId] = (counts[r.eventId] || 0) + 1;
+            const ev = events[r.eventId];
+            if (ev && mayManageEvent(ev, me)) counts[r.eventId] = (counts[r.eventId] || 0) + 1;
           }
         }
         sendJson(res, 200, { counts });
@@ -397,22 +346,24 @@ export default async function handler(req: any, res: any): Promise<void> {
       }
       if (q.get("id")) {
         const reg = all.find((r: any) => r.id === q.get("id"));
-        if (!reg) {
-          sendJson(res, 404, { message: "Registration not found" });
-          return;
-        }
-        sendJson(res, 200, reg);
-        return;
-      }
-      if (q.get("userId")) {
-        sendJson(res, 200, all.filter((r: any) => r.userId === q.get("userId")));
+        if (!reg) { sendJson(res, 404, { message: "Registration not found" }); return; }
+        const event = await loadEvent(reg.eventId);
+        const isOrg = mayManageEvent(event, me);
+        if (norm(reg.userEmail) !== me && !isOrg) { sendJson(res, 403, { message: "Not allowed" }); return; }
+        sendJson(res, 200, stripReg(reg, me, isOrg));
         return;
       }
       if (q.get("eventId")) {
-        sendJson(res, 200, all.filter((r: any) => r.eventId === q.get("eventId")));
+        const event = await loadEvent(q.get("eventId") || "");
+        if (!event) { sendJson(res, 404, { message: "Event not found" }); return; }
+        if (!mayManageEvent(event, me)) { sendJson(res, 403, { message: "Not allowed" }); return; }
+        sendJson(res, 200, all.filter((r: any) => r.eventId === q.get("eventId")).map((r: any) => stripReg(r, me, true)));
         return;
       }
-      sendJson(res, 400, { message: "Pass userId, eventId, id, or pendingCounts=1" });
+      // userId is IGNORED as identity (it was the IDOR vector). Any
+      // other GET, including ?userId=someone-else, returns only the
+      // caller's own records, by JWT email.
+      sendJson(res, 200, all.filter((r: any) => norm(r.userEmail) === me).map((r: any) => stripReg(r, me, false)));
       return;
     }
 
@@ -422,119 +373,84 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 400, { message: "Registration needs id, eventId and userId" });
         return;
       }
-      // Server-attested phone verification: a client-sent phoneVerified
-      // flag is never trusted. Stamp it only when a verified Telegram
-      // row matches this registration's email + phone. If the table is
-      // missing (setup not done), the badge is dropped but the
-      // registration still succeeds.
-      try {
-        reg.phoneVerified = (await hasVerifiedPhone(reg.userEmail, reg.userPhone))
-          ? true
-          : undefined;
-      } catch {
-        reg.phoneVerified = undefined;
-      }
-      const { ok, body } = await fetchJson(`${supabaseBase()}/rest/v1/registrations`, {
-        method: "POST",
-        headers: supabaseHeaders(),
-        body: JSON.stringify({ id: reg.id, data: reg }),
-      });
-      if (!ok) {
-        sendJson(res, 500, { message: "Failed to store registration" });
+      // Identity is the JWT email, never the body email.
+      if (norm(reg.userEmail) !== me) {
+        sendJson(res, 403, { message: "You can only register yourself" });
         return;
       }
+      const event = await loadEvent(reg.eventId);
+      if (!event) { sendJson(res, 404, { message: "Event not found" }); return; }
+      // Server-side paid rule: a paid event never gets an instant pass.
+      if (Number(event.price) > 0 && reg.status === "confirmed") reg.status = "pending";
+      if (reg.status === "confirmed" && !reg.ticketCode) reg.ticketCode = newTicketCode();
+      if (reg.status === "pending") reg.ticketCode = "";
+      // Do not store a full nested event with organiser email/UPI.
+      // Store only the public snapshot the UI needs.
+      if (reg.event) reg.event = stripEventPublic(reg.event);
+      try {
+        reg.phoneVerified = (await hasVerifiedPhone(reg.userEmail, reg.userPhone)) ? true : undefined;
+      } catch { reg.phoneVerified = undefined; }
+      const { ok, body } = await fetchJson(`${supabaseBase()}/rest/v1/registrations`, {
+        method: "POST", headers: supabaseHeaders(), body: JSON.stringify({ id: reg.id, data: reg }),
+      });
+      if (!ok) { sendJson(res, 500, { message: "Failed to store registration" }); return; }
       const stored = Array.isArray(body) && body.length > 0 ? body[0].data : reg;
-      // Pending payment? Notify the organizer AND tell the attendee
-      // their payment was received and is awaiting approval. Confirmed
-      // with a ticket code (a free instant registration)? Confirm to
-      // the attendee. Awaited for reliability (see header), but any
-      // failure is swallowed: email must never fail a registration.
+      // Server-side count: a confirmed registration takes a slot now.
+      if (stored && stored.status === "confirmed") { try { await bumpEventCount(stored.eventId, 1); } catch {} }
       if (stored) {
         try {
-          const event = await loadEvent(stored.eventId);
-          if (event) {
-            if (stored.status === 'pending') {
-              await sendApprovalEmail(stored, event);
-              await sendAttendeePendingEmail(stored, event);
-            } else if (stored.status === 'confirmed') await sendAttendeeConfirmationEmail(stored, event);
-          }
-        } catch {
-          // Best-effort only.
-        }
+          if (stored.status === 'pending') { await sendApprovalEmail(stored, event); await sendAttendeePendingEmail(stored, event); }
+          else if (stored.status === 'confirmed') await sendAttendeeConfirmationEmail(stored, event);
+        } catch {}
       }
-      sendJson(res, 200, stored);
+      sendJson(res, 200, stripReg(stored, me, false));
       return;
     }
 
     if (req.method === "PATCH") {
       const id = q.get("id");
-      if (!id) {
-        sendJson(res, 400, { message: "Pass id" });
-        return;
-      }
+      if (!id) { sendJson(res, 400, { message: "Pass id" }); return; }
       const updates = await readBody(req);
       const all = await loadAllRegistrations();
       const existing = all.find((r: any) => r.id === id);
-      if (!existing) {
-        sendJson(res, 404, { message: "Registration not found" });
-        return;
-      }
+      if (!existing) { sendJson(res, 404, { message: "Registration not found" }); return; }
       const nextStatus = updates.status;
+      const event = await loadEvent(existing.eventId);
+      const isOrg = mayManageEvent(event, me);
+      const isOwner = norm(existing.userEmail) === me;
       if (nextStatus === "confirmed" || nextStatus === "rejected" || updates.checkedIn !== undefined) {
-        // Approve / reject / check-in: event owner or admin only.
-        const event = await loadEvent(existing.eventId);
-        if (!mayManageEvent(event, updates.approverEmail || "")) {
-          sendJson(res, 403, { message: "Only the event owner or an admin can do this" });
-          return;
-        }
-        // Capacity guard (server backstop for the client check): a
-        // pending -> confirmed approval takes a slot only when the
-        // registration holds none (holdsSpot: false, i.e. new ones).
-        // Legacy pending rows already hold their slot, so they are
-        // exempt. Without a free slot the approval is refused.
-        if (
-          nextStatus === "confirmed" &&
-          existing.status === "pending" &&
-          existing.holdsSpot === false &&
-          event &&
-          event.registeredCount >= event.capacity
-        ) {
+        if (!isOrg) { sendJson(res, 403, { message: "Only the event owner or an admin can do this" }); return; }
+        if (nextStatus === "confirmed" && existing.status === "pending" && existing.holdsSpot === false && event && event.registeredCount >= event.capacity) {
           sendJson(res, 409, { message: "This event is at full capacity. Free a spot before approving." });
           return;
         }
       } else if (nextStatus === "cancelled") {
-        // Attendee cancelling their own registration.
-        if (!updates.userId || updates.userId !== existing.userId) {
-          sendJson(res, 403, { message: "Only the registration owner can cancel it" });
-          return;
-        }
+        if (!isOwner) { sendJson(res, 403, { message: "Only the registration owner can cancel it" }); return; }
+      } else {
+        if (!isOwner && !isOrg) { sendJson(res, 403, { message: "Not allowed" }); return; }
       }
-      const { approverEmail: _a, userId: _u, ...storedUpdates } = updates;
-      const merged = { ...existing, ...storedUpdates, id: existing.id };
+      // Never let a PATCH rewrite identity, ownership or payment fields
+      // except through the approved transitions below. approverEmail /
+      // userId in the body are ignored entirely.
+      const { approverEmail: _a, userId: _u, userEmail: _e, eventId: _ev, utr: _ut, ...storedUpdates } = updates;
+      const merged: any = { ...existing, ...storedUpdates, id: existing.id, userEmail: existing.userEmail, userId: existing.userId, eventId: existing.eventId, utr: existing.utr };
+      if (existing.status === 'pending' && merged.status === 'confirmed') merged.ticketCode = newTicketCode();
+      if (merged.event) merged.event = stripEventPublic(merged.event);
       const { ok } = await fetchJson(
         `${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(id)}`,
-        {
-          method: "PATCH",
-          headers: supabaseHeaders(),
-          body: JSON.stringify({ data: merged }),
-        },
+        { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: merged }) },
       );
-      if (!ok) {
-        sendJson(res, 500, { message: "Failed to update registration" });
-        return;
-      }
-      // Approval: a pending registration just became confirmed with a
-      // pass — tell the attendee. Only the pending -> confirmed
-      // transition mails, so check-ins and re-saves stay silent.
+      if (!ok) { sendJson(res, 500, { message: "Failed to update registration" }); return; }
+      // Server-side counts: approval of a no-spot pending row takes a slot;
+      // cancelling a held slot releases one.
+      try {
+        if (existing.status === 'pending' && merged.status === 'confirmed' && existing.holdsSpot === false) await bumpEventCount(merged.eventId, 1);
+        if (merged.status === 'cancelled' && (existing.status === 'confirmed' || (existing.status === 'pending' && existing.holdsSpot !== false))) await bumpEventCount(merged.eventId, -1);
+      } catch {}
       if (existing.status === 'pending' && merged.status === 'confirmed' && merged.ticketCode) {
-        try {
-          const event = await loadEvent(merged.eventId);
-          if (event) await sendAttendeeConfirmationEmail(merged, event);
-        } catch {
-          // Best-effort only.
-        }
+        try { if (event) await sendAttendeeConfirmationEmail(merged, event); } catch {}
       }
-      sendJson(res, 200, merged);
+      sendJson(res, 200, stripReg(merged, me, isOrg));
       return;
     }
 
@@ -542,4 +458,21 @@ export default async function handler(req: any, res: any): Promise<void> {
   } catch (err) {
     sendJson(res, 500, { message: err instanceof Error ? err.message : "Registration API failed" });
   }
+}
+
+async function loadAllEventsForCounts(): Promise<Record<string, any>> {
+  const { ok, body } = await fetchJson(`${supabaseBase()}/rest/v1/events?select=data&limit=1000`, { headers: supabaseHeaders() });
+  const out: Record<string, any> = {};
+  if (ok && Array.isArray(body)) for (const row of body) if (row.data?.id) out[row.data.id] = row.data;
+  return out;
+}
+
+async function bumpEventCount(eventId: string, delta: number): Promise<void> {
+  const event = await loadEvent(eventId);
+  if (!event) return;
+  const next = Math.max(0, Number(event.registeredCount || 0) + delta);
+  if (next === Number(event.registeredCount || 0)) return;
+  await fetchJson(`${supabaseBase()}/rest/v1/events?id=eq.${encodeURIComponent(eventId)}`, {
+    method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: { ...event, registeredCount: next } }),
+  });
 }

@@ -12,13 +12,19 @@
 // answers 200 JSON { mailed: boolean, reason?: string } for a
 // well-formed request, and only 400/405 for a malformed one.
 //
-// Abuse guard: local accounts live only in the browser, so the server
-// cannot independently verify that a sign-in really happened. The caps
-// above (enforced in Supabase, see ACCOUNT_EMAILS_SETUP.md) bound what
-// an unauthenticated caller can trigger, and every template is fixed
+// SECURITY FIX (production hardening): this endpoint is now SESSION-
+// GATED. A valid locora_session cookie is required, and body.email
+// must equal the session email, otherwise 401 — an unauthenticated
+// caller can no longer trigger mail to any address. The caps above
+// (enforced in Supabase) still apply, and every template is fixed
 // (the only caller-controlled text is the display name, HTML-escaped
 // and length-limited). Without the email_log table this fails CLOSED:
 // no mail is sent, so a missing table can never become an open relay.
+// Callers (fire-and-forget, failures ignored, so a 401 never breaks
+// sign-in): src/services/auth-service.ts after a local sign-in/sign-up
+// (cookie already set by /api/auth/login or /api/auth/signup), and the
+// Google callback page after a Google sign-in (cookie set by the
+// callback response before its script runs).
 //
 // Location is best-effort: the sign-in IP is looked up via ip-api
 // (server-side, 3s timeout, private IPs skipped). If the lookup fails,
@@ -28,6 +34,8 @@
 // from api/_lib), following the same shape as api/registrations.ts.
 // Sending uses Gmail SMTP via nodemailer, dynamically imported only
 // when a send actually happens, gated on GMAIL_USER / GMAIL_APP_PASSWORD.
+
+import { verifySession } from "./_lib/session";
 
 function getEnv(name: string): string {
   try {
@@ -39,7 +47,12 @@ function getEnv(name: string): string {
 }
 
 function sendJson(res: any, status: number, obj: any): void {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Cache-Control": "no-store",
+  });
   res.end(JSON.stringify(obj));
 }
 
@@ -322,6 +335,11 @@ export default async function handler(req: any, res: any): Promise<void> {
       sendJson(res, 405, { message: "POST only" });
       return;
     }
+    const session = await verifySession(req);
+    if (!session) {
+      sendJson(res, 401, { message: "Sign in required" });
+      return;
+    }
     if (!getEnv("SUPABASE_URL") || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) {
       sendJson(res, 503, { message: "Shared email log is not configured. See ACCOUNT_EMAILS_SETUP.md." });
       return;
@@ -331,6 +349,10 @@ export default async function handler(req: any, res: any): Promise<void> {
     const email = norm(body?.email || "");
     if ((action !== "welcome" && action !== "login") || !validEmail(email)) {
       sendJson(res, 400, { message: "Pass action 'welcome' or 'login' and a valid email." });
+      return;
+    }
+    if (email !== session.email) {
+      sendJson(res, 401, { message: "Sign in required" });
       return;
     }
 
