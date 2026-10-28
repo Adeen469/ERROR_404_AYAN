@@ -141,7 +141,10 @@ export function MessagesPage() {
 
   const meEmail = (currentUser?.email || '').toLowerCase();
   const queryEventId = searchParams.get('eventId') || '';
-  const queryWith = searchParams.get('with') || '';
+  // SECURITY FIX (P2-4): the deep link is /messages?eventId=x&to=organizer
+  // — an opaque slug, never an email. The old ?with=<email> param is
+  // deliberately ignored, so an organiser email can never leak via URL.
+  const queryTo = searchParams.get('to') || '';
 
   const loadMessages = useCallback(
     async (silent = false) => {
@@ -197,12 +200,14 @@ export function MessagesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Deep link from an event page: /messages?eventId=x&with=organizer@…
-  // selects that thread, or prepares a fresh composer when no message
-  // exists yet (the first send creates the thread server-side).
+  // Deep link from an event page: /messages?eventId=x&to=organizer
+  // prepares a fresh composer when no message exists yet (the first
+  // send creates the thread server-side, with the server resolving the
+  // recipient from the stored event). The organiser email is never in
+  // the URL and never known to this page for a new thread.
   useEffect(() => {
-    if (!queryEventId || !queryWith || !currentUser?.email) return;
-    const key = `${queryEventId}|${[currentUser.email.toLowerCase(), queryWith.toLowerCase()].sort().join('|')}`;
+    if (!queryEventId || queryTo !== 'organizer' || !currentUser?.email) return;
+    const key = `${queryEventId}|organizer`;
     setSelectedKey(key);
     setMobileView('chat');
     let cancelled = false;
@@ -217,8 +222,8 @@ export function MessagesPage() {
                 key,
                 eventId: queryEventId,
                 eventTitle: event?.title || 'Event',
-                otherEmail: queryWith,
-                otherName: event?.organizer?.name || queryWith,
+                otherEmail: '',
+                otherName: event?.organizer?.name || 'Organizer',
                 messages: [],
                 lastAt: '',
                 unread: 0,
@@ -231,8 +236,8 @@ export function MessagesPage() {
           key,
           eventId: queryEventId,
           eventTitle: 'Event',
-          otherEmail: queryWith,
-          otherName: queryWith,
+          otherEmail: '',
+          otherName: 'Organizer',
           messages: [],
           lastAt: '',
           unread: 0,
@@ -241,7 +246,7 @@ export function MessagesPage() {
     return () => {
       cancelled = true;
     };
-  }, [queryEventId, queryWith, currentUser?.email]);
+  }, [queryEventId, queryTo, currentUser?.email]);
 
   // Messages hidden by a confirmed (but not yet executed) delete stay
   // hidden through reloads inside the undo window — otherwise the 3s
@@ -325,6 +330,7 @@ export function MessagesPage() {
   async function deliver(input: {
     eventId: string;
     recipientEmail: string;
+    organizerId?: string;
     text: string;
     file?: File | null;
   }): Promise<EventMessage> {
@@ -337,6 +343,7 @@ export function MessagesPage() {
         eventId: input.eventId,
         senderEmail: currentUser.email,
         recipientEmail: input.recipientEmail,
+        organizerId: input.organizerId,
         fileName: input.file.name,
         fileSize: input.file.size,
         fileType: input.file.type,
@@ -348,7 +355,8 @@ export function MessagesPage() {
       eventId: input.eventId,
       senderEmail: currentUser.email,
       senderName: currentUser.name,
-      recipientEmail: input.recipientEmail,
+      recipientEmail: input.recipientEmail || undefined,
+      organizerId: input.organizerId,
       text: input.text,
       attachment: attachmentMeta,
     });
@@ -396,6 +404,7 @@ export function MessagesPage() {
       const created = await deliver({
         eventId: selected.eventId,
         recipientEmail: selected.otherEmail,
+        organizerId: selected.otherEmail ? undefined : 'organizer',
         text,
         file: sendingFile,
       });

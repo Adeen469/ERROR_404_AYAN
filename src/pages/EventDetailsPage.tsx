@@ -42,6 +42,17 @@ function toGoogleTemplateDate(iso: string): string {
   return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
 }
 
+// SECURITY FIX — Phase 1 Finding 5: the calendar link no longer embeds
+// the full event description (which once contained pasted AI-conversation
+// text). It uses a plain-text summary only, HTML stripped, truncated to
+// 200 characters, so a long or pasted description can never leak into an
+// external Google Calendar URL.
+function calendarSummary(event: EventItem): string {
+  const raw = event.summary || event.description || '';
+  const plain = raw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  return plain.length > 200 ? plain.slice(0, 200).trimEnd() + '…' : plain;
+}
+
 function buildGoogleCalendarTemplateUrl(event: EventItem): string {
   const start = toGoogleTemplateDate(event.startDate);
   const end = event.endDate
@@ -53,7 +64,7 @@ function buildGoogleCalendarTemplateUrl(event: EventItem): string {
     action: 'TEMPLATE',
     text: event.title,
     dates: `${start}/${end}`,
-    details: [event.summary, event.description].filter(Boolean).join('\n\n'),
+    details: calendarSummary(event),
     location: [event.venueName, event.address, event.city].filter(Boolean).join(', '),
   });
   return `https://calendar.google.com/calendar/render?${params.toString()}`;
@@ -97,12 +108,32 @@ export function EventDetailsPage() {
   const [utrError, setUtrError] = useState('');
   const [copiedUpi, setCopiedUpi] = useState(false);
   const [upiQr, setUpiQr] = useState('');
+  // SECURITY FIX (Finding 2): UPI is no longer in the public event
+  // object. It is fetched, only when the paid checkout opens and only
+  // for a signed-in user, from /events?payment=1. On failure there is
+  // no fallback to a public UPI value — the dialog says unavailable.
+  const [paymentUpiId, setPaymentUpiId] = useState<string | null>(null);
+  const [paymentLoading, setPaymentLoading] = useState(false);
+  const [paymentError, setPaymentError] = useState('');
+
+  useEffect(() => {
+    if (!paymentOpen || !event || event.price <= 0) return;
+    let active = true;
+    setPaymentLoading(true);
+    setPaymentError('');
+    setPaymentUpiId(null);
+    eventsService.getEventPayment(event.id)
+      .then((info) => { if (active) setPaymentUpiId(info.upiId || null); })
+      .catch(() => { if (active) setPaymentError('Payment info is unavailable right now. Please try again, or pay the organizer directly and enter your UTR below.'); })
+      .finally(() => { if (active) setPaymentLoading(false); });
+    return () => { active = false; };
+  }, [paymentOpen, event?.id]);
 
   // UPI deep link: tapping it opens the user's UPI app with the payee,
   // amount and note prefilled. The same string is encoded in the QR
   // code below, so desktop users can scan it with their phone.
-  const upiUri = event && event.upiId
-    ? `upi://pay?pa=${encodeURIComponent(event.upiId)}&pn=${encodeURIComponent(event.organizer?.name || 'Locora Organizer')}&am=${event.price}&cu=INR&tn=${encodeURIComponent((event.title || 'Event payment').slice(0, 60))}`
+  const upiUri = event && paymentUpiId
+    ? `upi://pay?pa=${encodeURIComponent(paymentUpiId)}&pn=${encodeURIComponent(event.organizer?.name || 'Locora Organizer')}&am=${event.price}&cu=INR&tn=${encodeURIComponent((event.title || 'Event payment').slice(0, 60))}`
     : '';
 
   // Render the QR code client-side (no third-party QR service sees the
@@ -482,21 +513,21 @@ export function EventDetailsPage() {
               </div>
             </div>
 
-            {/* Message the organizer: hidden when the organizer's email
-                is unknown (legacy demo-organizer events carry none) or
-                when viewing your own event. Guests go to sign-in first,
-                like the gated View Event button. */}
+            {/* Message the organizer: SECURITY FIX (P2-4) — the link
+                is /messages?eventId=x&to=organizer, an opaque slug,
+                never an email. Public events no longer carry the
+                organiser email (Finding 2), so this page cannot know
+                whether the viewer IS the organiser; the server blocks
+                messaging yourself ("You cannot message yourself") if
+                they try. Guests go to sign-in first, like the gated
+                View Event button. */}
             {(() => {
-              const organizerEmail = (
-                event.createdByEmail || event.organizer?.email || ''
-              ).toLowerCase();
               const viewerEmail = (authService.getCurrentUser()?.email || '').toLowerCase();
-              if (!organizerEmail || viewerEmail === organizerEmail) return null;
               return (
                 <Link
                   to={
                     viewerEmail
-                      ? `/messages?eventId=${event.id}&with=${encodeURIComponent(organizerEmail)}`
+                      ? `/messages?eventId=${event.id}&to=organizer`
                       : '/login'
                   }
                   className="flex items-center justify-center gap-2 w-full px-4 py-2.5 text-xs font-semibold text-[#1E3F35] bg-white hover:bg-[#F4F1EA] border border-[#1E3F35] rounded-lg transition-colors"
@@ -769,16 +800,20 @@ export function EventDetailsPage() {
               <span className="text-[#5F635D]">Amount to pay</span>
               <span className="font-editorial text-lg font-bold text-[#1E2320]">{formatPrice(event.price)}</span>
             </div>
-            {event.upiId ? (
+            {paymentLoading ? (
+              <p className="text-xs text-[#5F635D]">Loading payment info…</p>
+            ) : paymentError ? (
+              <p className="text-xs text-rose-700">{paymentError}</p>
+            ) : paymentUpiId ? (
               <>
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-xs text-[#5F635D]">Pay to UPI ID</span>
                   <span className="flex items-center gap-1.5">
-                    <span className="font-mono text-xs font-semibold text-[#1E2320] break-all">{event.upiId}</span>
+                    <span className="font-mono text-xs font-semibold text-[#1E2320] break-all">{paymentUpiId}</span>
                     <button
                       type="button"
                       onClick={() => {
-                        navigator.clipboard.writeText(event.upiId || '');
+                        navigator.clipboard.writeText(paymentUpiId || '');
                         setCopiedUpi(true);
                         setTimeout(() => setCopiedUpi(false), 2000);
                       }}
@@ -805,7 +840,7 @@ export function EventDetailsPage() {
                       <div className="relative w-full aspect-square">
                         <img
                           src={upiQr}
-                          alt={`QR code to pay ${formatPrice(event.price)} to ${event.upiId}`}
+                          alt={`QR code to pay ${formatPrice(event.price)} to ${paymentUpiId}`}
                           className="w-full h-full block"
                         />
                         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">

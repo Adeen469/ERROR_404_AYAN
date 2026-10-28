@@ -59,6 +59,7 @@ export function LoginPage() {
       </div>
 
       {/* Login Form */}
+      <p className="p-3 bg-[#FFF8E6] border border-[#F0E3B8] rounded-xl text-xs text-[#5F4A00]">Security update: old demo accounts no longer work. If you signed up before this update, please sign up again with the same email — your new account starts as an attendee.</p>
       <form
         onSubmit={handleSubmit}
         className="bg-white p-6 sm:p-8 rounded-2xl border border-[#E5E1D8] shadow-xs space-y-4"

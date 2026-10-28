@@ -32,7 +32,7 @@ export function SignupPage() {
     try {
       // Every new account starts as an attendee. Organizer access is
       // requested from the profile page and granted by an admin.
-      const user = await authService.signup(name.trim(), email.trim());
+      const user = await authService.signup(name.trim(), email.trim(), password);
       toast({
         type: 'success',
         title: 'Account Created',
