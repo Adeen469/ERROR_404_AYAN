@@ -1,3 +1,7 @@
+// SECURITY FIX — Finding 2/1: getEventPayment() fetches UPI only via
+// the session-only /events?payment=1 endpoint; adjustRegisteredCount()
+// is now a cache-clear no-op because counts are owned server-side by
+// api/registrations.ts (direct count PATCHes are refused with 403).
 import { EventFilterOptions, EventItem, PaginatedResponse } from '../types';
 import { DEMO_EVENTS, DEMO_ORGANIZERS } from '../mocks/demo-data';
 import { apiClient, isDemoMode } from './api-client';
@@ -515,29 +519,20 @@ export const eventsService = {
     return true;
   },
 
-  // System-only count adjustment used by registration flows. This is NOT
-  // a user edit: it only moves registeredCount, and it is never exposed
-  // as an edit/delete affordance. It exists so updateEvent can require
-  // ownership proof from every caller without breaking registrations.
-  async adjustRegisteredCount(id: string, registeredCount: number): Promise<void> {
-    // The count shown on cards/details must not lag behind a registration.
+  // SECURITY FIX: counts are now updated server-side inside
+  // api/registrations.ts (POST confirmed / approval / cancellation).
+  // This method only clears the cache so the next fetch shows the
+  // server count. It no longer PATCHes /events, because a direct
+  // count PATCH is now refused (403) for every caller.
+  async adjustRegisteredCount(_id: string, _registeredCount: number): Promise<void> {
     clearEventsCache();
-    if (!isDemoMode()) {
-      try {
-        await apiClient.patch('/events', { registeredCount }, { id });
-        return;
-      } catch (err) {
-        console.warn('Backend API count update unavailable, falling back to local events store:', err);
-      }
-    }
+    return;
+  },
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    const events = getStoredEvents();
-    const index = events.findIndex((e) => e.id === id);
-    if (index !== -1) {
-      events[index] = { ...events[index], registeredCount };
-      saveStoredEvents(events);
-    }
+  // Session-only payment info for checkout (Finding 2). Returns only
+  // id/title/price/upiId, and only to a signed-in user; guests get 401.
+  async getEventPayment(id: string): Promise<{ id: string; title: string; price: number; upiId: string | null }> {
+    return apiClient.get<{ id: string; title: string; price: number; upiId: string | null }>('/events', { payment: '1', id });
   },
 
   async searchLiveRealEvents(city: string, query?: string): Promise<{ success: boolean; data: EventItem[]; count: number }> {

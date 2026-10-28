@@ -1,5 +1,11 @@
+// SECURITY FIX — Phase 2 P2-2: the demo-login fallback is GONE.
+// There is no DEFAULT_DEMO_USER session, no 'demo_jwt_token_locora_preview',
+// and no localStorage session on login/signup failure. Login and signup
+// call the server only; the server sets an HttpOnly locora_session cookie
+// (never returned in the JSON body, never stored by this file). A failed
+// server login throws — it never signs the user in. Existing local demo
+// accounts must re-sign up (see FIX_SUMMARY.md).
 import { UserProfile } from '../types';
-import { DEFAULT_DEMO_USER } from '../mocks/demo-data';
 import { isDemoMode, apiClient } from './api-client';
 import { ADMIN_EMAILS } from './roles-service';
 import { restoreSavedProfile, writeSavedProfile } from '../utils/saved-profile';
@@ -79,100 +85,41 @@ export const authService = {
     return new Promise<UserProfile>(() => {});
   },
 
-  async login(email: string, _password?: string): Promise<UserProfile> {
-    if (!isDemoMode()) {
-      try {
-        const res = await apiClient.post<{ user: UserProfile; token: string }>('/auth/login', {
-          email,
-          password: _password,
-        });
-        localStorage.setItem(TOKEN_STORAGE_KEY, res.token);
-        localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(res.user));
-        notify(res.user);
-        return res.user;
-      } catch (err) {
-        console.warn('Backend API login unavailable, falling back to local session:', err);
-      }
-    }
-
-    // Local fallback: attendees only. Admin emails must sign in with
-    // Google so their email is verified by Google, not self-asserted.
-    if (ADMIN_EMAILS.includes(email.trim().toLowerCase())) {
-      throw new Error('Admin accounts must sign in with Google.');
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 300));
-
-    // Local sign-in rebuilds from a template every time, which used to
-    // silently drop anything saved on Profile (mobile number, home
-    // location, bio). Restore the per-email backup on top of it; the
-    // backup never carries role/authProvider/id/email (see
-    // utils/saved-profile.ts). The backend-success path above is left
-    // alone: a real server record would be authoritative.
-    const user: UserProfile = restoreSavedProfile(localStorage, {
-      ...DEFAULT_DEMO_USER,
-      email: email || DEFAULT_DEMO_USER.email,
-      role: 'attendee',
-      authProvider: 'local',
-    });
-
-    localStorage.setItem(TOKEN_STORAGE_KEY, 'demo_jwt_token_locora_preview');
+  async login(email: string, password?: string): Promise<UserProfile> {
+    if (!password) throw new Error('Invalid credentials');
+    const res = await apiClient.post<{ user: UserProfile }>('/auth/login', { email, password });
+    const user = restoreSavedProfile(localStorage, res.user);
     localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
-    notify(user);
+    // Cookie was set by /api/auth/login, so the session-gated /api/notify
+    // call below passes; it is fire-and-forget and never blocks sign-in.
     sendAccountEmail('login', user, email);
+    notify(user);
     return user;
   },
 
-  async signup(name: string, email: string): Promise<UserProfile> {
+  async signup(name: string, email: string, password?: string): Promise<UserProfile> {
     // Every new account starts as an attendee. Organizer status is granted
     // later by an admin approval, never chosen at sign-up.
-    if (!isDemoMode()) {
-      try {
-        const res = await apiClient.post<{ user: UserProfile; token: string }>('/auth/signup', { name, email, role: 'attendee' });
-        localStorage.setItem(TOKEN_STORAGE_KEY, res.token);
-        localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(res.user));
-        notify(res.user);
-        return res.user;
-      } catch (err) {
-        console.warn('Backend API signup unavailable, falling back to local session:', err);
-      }
-    }
-
+    if (!password || password.length < 6) throw new Error('Password must be at least 6 characters');
     if (ADMIN_EMAILS.includes(email.trim().toLowerCase())) {
       throw new Error('Admin accounts must sign in with Google.');
     }
-
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    const newUser: UserProfile = {
-      id: `usr-${Date.now()}`,
-      name,
-      email,
-      avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
-      bio: 'Local resident and active event attendee.',
-      // No home neighborhood by default: the location rule derives it
-      // from a saved state/city, and new accounts have none yet.
-      neighborhood: '',
-      interests: ['Food & Community', 'Live Music & Culture'],
-      role: 'attendee',
-      authProvider: 'local',
-      createdAt: new Date().toISOString(),
-    };
-
-    localStorage.setItem(TOKEN_STORAGE_KEY, 'demo_jwt_token_locora_preview');
-    localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(newUser));
-    // Seed the backup with the sign-up name, so the next login restores
-    // it instead of the demo template's name.
-    writeSavedProfile(localStorage, newUser);
-    notify(newUser);
-    sendAccountEmail('welcome', newUser, email);
-    return newUser;
+    const res = await apiClient.post<{ user: UserProfile }>('/auth/signup', { name, email, password });
+    localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(res.user));
+    writeSavedProfile(localStorage, res.user);
+    sendAccountEmail('welcome', res.user, email);
+    notify(res.user);
+    return res.user;
   },
 
   async logout(): Promise<void> {
+    try { await apiClient.post('/auth/logout', {}); } catch { /* cookie clear is best-effort; local state still clears */ }
     localStorage.removeItem(USER_STORAGE_KEY);
     localStorage.removeItem(TOKEN_STORAGE_KEY);
     // The per-email backup (utils/saved-profile.ts) intentionally stays:
     // it is what the next login restores the saved number from.
+    // Limitation: the server JWT stays valid until expiry if copied —
+    // see FIX_SUMMARY.md (no revocation list yet).
     notify(null);
   },
 

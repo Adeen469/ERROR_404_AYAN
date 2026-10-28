@@ -1,3 +1,9 @@
+// SECURITY FIX — P2-2: this client no longer sends a Bearer token
+// from localStorage. The server session is an HttpOnly cookie
+// (locora_session), sent by the browser automatically on same-site
+// requests; the server ignores any Bearer value, so sending one only
+// leaked a (demo) token into requests. fetch calls below rely on the
+// cookie (credentials: 'same-origin' where applicable).
 /**
  * Centralized API Client for Locora.
  * Handles typed HTTP requests, baseUrl configuration, error formatting,
@@ -53,11 +59,11 @@ class ApiClient {
     const { params, headers = {}, ...customConfig } = options;
     const url = this.buildUrl(path, params);
 
-    const token = localStorage.getItem('locora_auth_token');
+    // No Bearer token: the HttpOnly locora_session cookie is sent by
+    // the browser automatically on same-site requests.
     const defaultHeaders: HeadersInit = {
       'Content-Type': 'application/json',
       Accept: 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...headers,
     };
 

@@ -1,3 +1,7 @@
+// SECURITY FIX — Phase 1 Finding 1: this service no longer sends userId /
+// approverEmail as identity. The server derives identity from the
+// locora_session JWT cookie only; those body/query fields are ignored
+// server-side. getMyRegistrations() calls /registrations with no params.
 import { AttendeeRegistration, EventItem } from '../types';
 import { DEMO_EVENTS } from '../mocks/demo-data';
 import { eventsService } from './events-service';
@@ -65,9 +69,7 @@ export const registrationsService = {
     const local = getStoredRegistrations().filter((r) => r.userId === user.id);
     if (isDemoMode()) return local;
     try {
-      const shared = await apiClient.get<AttendeeRegistration[]>('/registrations', {
-        userId: user.id,
-      });
+      const shared = await apiClient.get<AttendeeRegistration[]>('/registrations');
       return mergeRegistrations(Array.isArray(shared) ? shared : [], local);
     } catch (err) {
       // Shared registrations table not set up (or unreachable): fall back
@@ -281,7 +283,7 @@ export const registrationsService = {
 
     if (!isDemoMode()) {
       try {
-        await apiClient.patch('/registrations', { status: 'cancelled', userId: user?.id }, { id: registrationId });
+        await apiClient.patch('/registrations', { status: 'cancelled' }, { id: registrationId });
       } catch (err) {
         console.warn('Shared cancellation unavailable, cancelling locally:', err);
       }
@@ -333,7 +335,7 @@ export const registrationsService = {
         if (shared) current = shared.checkedIn;
         const updated = await apiClient.patch<AttendeeRegistration>(
           '/registrations',
-          { checkedIn: !current, approverEmail },
+          { checkedIn: !current },
           { id: registrationId },
         );
         if (localTarget) {
@@ -390,7 +392,7 @@ export const registrationsService = {
       try {
         const updated = await apiClient.patch<AttendeeRegistration>(
           '/registrations',
-          { status: 'confirmed', ticketCode, approverEmail },
+          { status: 'confirmed' },
           { id: registrationId },
         );
         const all = getStoredRegistrations();
@@ -448,7 +450,7 @@ export const registrationsService = {
       try {
         const updated = await apiClient.patch<AttendeeRegistration>(
           '/registrations',
-          { status: 'rejected', approverEmail },
+          { status: 'rejected' },
           { id: registrationId },
         );
         const all = getStoredRegistrations();

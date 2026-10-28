@@ -1,3 +1,9 @@
+// SECURITY FIX — P2-3/P2-4: this service no longer sends userEmail /
+// senderEmail / editorEmail / recipientEmail as identity. The server
+// derives identity from the locora_session cookie. Caller arguments
+// are kept for call-site compatibility but are NOT sent. For a first
+// message to an organiser, send organizerId (see MessagesPage) and let
+// the server resolve the recipient email from the stored event.
 import { apiClient, ApiError } from './api-client';
 
 // Private attendee <-> organizer messages (see api/messages.ts).
@@ -118,25 +124,24 @@ export function validateAttachment(file: File): string | null {
 
 export interface SendMessageInput {
   eventId: string;
-  senderEmail: string;
+  senderEmail?: string;
   senderName?: string;
-  recipientEmail: string;
+  recipientEmail?: string;
+  organizerId?: string;
   text?: string;
   attachment?: { name: string; size: number; type: string; path: string };
 }
 
 export const messagesService = {
-  async getMessages(userEmail: string): Promise<EventMessage[]> {
-    const data = await apiClient.request<{ messages: EventMessage[] }>('/messages', {
-      params: { userEmail },
-    });
+  async getMessages(_userEmail?: string): Promise<EventMessage[]> {
+    const data = await apiClient.request<{ messages: EventMessage[] }>('/messages');
     return Array.isArray(data.messages) ? data.messages : [];
   },
 
-  async getUnreadCount(userEmail: string): Promise<number> {
+  async getUnreadCount(_userEmail?: string): Promise<number> {
     try {
       const data = await apiClient.request<{ count: number }>('/messages', {
-        params: { userEmail, unreadCount: 1 },
+        params: { unreadCount: 1 },
       });
       return typeof data.count === 'number' ? data.count : 0;
     } catch {
@@ -145,46 +150,51 @@ export const messagesService = {
   },
 
   async sendMessage(input: SendMessageInput): Promise<EventMessage> {
+    // Identity (sender) is the session, never the input. organizerId,
+    // when present, lets the server resolve the recipient from the
+    // stored event (P2-4); recipientEmail is only sent as a fallback
+    // for existing threads, and the server still validates it.
+    const { senderEmail: _s, ...rest } = input as any;
     const data = await apiClient.request<{ message: EventMessage }>('/messages', {
       method: 'POST',
-      body: JSON.stringify(input),
+      body: JSON.stringify(rest),
     });
     return data.message;
   },
 
   // "Delete for me": hides the message for this user only, any time.
-  async hideMessage(id: string, userEmail: string): Promise<void> {
+  async hideMessage(id: string, _userEmail?: string): Promise<void> {
     await apiClient.request('/messages', {
       method: 'POST',
-      body: JSON.stringify({ action: 'hide', id, userEmail }),
+      body: JSON.stringify({ action: 'hide', id }),
     });
   },
 
   // "Delete for everyone": permanently removes the row (server only
   // allows the sender). Also removes the Storage object best-effort.
-  async deleteForEveryone(id: string, userEmail: string): Promise<void> {
+  async deleteForEveryone(id: string, _userEmail?: string): Promise<void> {
     await apiClient.request('/messages', {
-      params: { id, userEmail },
+      params: { id },
       method: 'DELETE',
     });
   },
 
   // Edit own text within 1 hour of sending (server enforces both).
-  async editMessage(id: string, editorEmail: string, text: string): Promise<EventMessage> {
+  async editMessage(id: string, _editorEmail: string, text: string): Promise<EventMessage> {
     const data = await apiClient.request<{ message: EventMessage }>('/messages', {
       params: { id },
       method: 'PATCH',
-      body: JSON.stringify({ editorEmail, text }),
+      body: JSON.stringify({ text }),
     });
     return data.message;
   },
 
-  async markAsRead(id: string, recipientEmail: string): Promise<void> {
+  async markAsRead(id: string, _recipientEmail?: string): Promise<void> {
     try {
       await apiClient.request('/messages', {
         params: { id },
         method: 'PATCH',
-        body: JSON.stringify({ recipientEmail }),
+        body: JSON.stringify({}),
       });
     } catch (err) {
       // Read receipts are cosmetic; a failure here must never break chat.
@@ -194,15 +204,17 @@ export const messagesService = {
 
   async requestUploadUrl(input: {
     eventId: string;
-    senderEmail: string;
-    recipientEmail: string;
+    senderEmail?: string;
+    recipientEmail?: string;
+    organizerId?: string;
     fileName: string;
     fileSize: number;
     fileType: string;
   }): Promise<{ uploadUrl: string; publicUrl: string; path: string }> {
+    const { senderEmail: _s, ...rest } = input as any;
     return apiClient.request('/messages', {
       method: 'POST',
-      body: JSON.stringify({ action: 'upload-url', ...input }),
+      body: JSON.stringify({ action: 'upload-url', ...rest }),
     });
   },
 
