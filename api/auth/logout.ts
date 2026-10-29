@@ -1,11 +1,13 @@
-import { createHmac, timingSafeEqual, scryptSync, randomBytes, createHash } from "crypto";
-// Shared server helpers for Locora security fix (Phase 1 Finding 1+).
-// Used by api/registrations.ts, api/events.ts, api/messages.ts,
-// api/auth/* and api/me.ts. No secrets are hardcoded here: SESSION_SECRET,
-// SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY come only from Vercel env vars.
-// If SESSION_SECRET is missing, session verification fails closed (null)
-// and login/signup/Google callback must refuse to issue a session.
-
+// Shared server helpers for Locora security fix — NO IMPORTS, NO node:crypto.
+// This file is inlined into each api/*.ts function because this project's
+// Vercel functions have historically been self-contained (no static imports:
+// the previous _lib import and the node:crypto import both failed live with
+// FUNCTION_INVOCATION_FAILED, while the import-free api/auth/google.ts worked).
+// Crypto uses only WebCrypto (globalThis.crypto.subtle) + btoa/atob, which
+// work in Node and Edge runtimes without any import. No secrets are hardcoded:
+// SESSION_SECRET, SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY come only from
+// Vercel env vars. If SESSION_SECRET is missing, session verification fails
+// closed (null) and login/signup/Google callback must refuse to issue a session.
 export const ADMIN_EMAILS = ["mr.adeen946@gmail.com", "ayan.work937@gmail.com"];
 
 export function getEnv(name: string): string {
@@ -22,7 +24,7 @@ export function norm(email: string): string {
 }
 
 export function isEmail(s: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s || "");
+  return /^[^\s@]+@[^\s@]+\.[^@\s@]+$/.test(s || "");
 }
 
 export function isAdmin(email: string): boolean {
@@ -56,76 +58,89 @@ export function getClientIp(req: any): string {
   return req.headers?.["x-real-ip"] || "unknown";
 }
 
+function bytesToB64url(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+function b64urlToBytes(text: string): Uint8Array {
+  const b64 = text.replace(/-/g, "+").replace(/_/g, "/") + "==".slice(0, (4 - (text.length % 4)) % 4);
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
 function b64urlEncode(text: string): string {
-  return Buffer.from(text, "utf8").toString("base64url");
+  return bytesToB64url(new TextEncoder().encode(text));
 }
 function b64urlDecode(text: string): string {
-  return Buffer.from(text, "base64url").toString("utf8");
+  return new TextDecoder().decode(b64urlToBytes(text));
+}
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+function randomBytes(n: number): Uint8Array {
+  const out = new Uint8Array(n);
+  (globalThis as any).crypto.getRandomValues(out);
+  return out;
+}
+function ctEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await (globalThis as any).crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return bytesToHex(new Uint8Array(digest));
+}
+async function hmacB64url(secret: string, data: string): Promise<string> {
+  const key = await (globalThis as any).crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await (globalThis as any).crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
+  return bytesToB64url(new Uint8Array(sig));
 }
 
 export interface SessionUser { email: string; role: string; authProvider: string; sessionVersion?: number; }
 
-export function signSession(email: string, role: string, authProvider: string, sessionVersion = 0): string {
+export async function signSession(email: string, role: string, authProvider: string, sessionVersion = 0): Promise<string> {
   const secret = getEnv("SESSION_SECRET");
   if (!secret) throw new Error("SESSION_SECRET is not configured");
   const header = b64urlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
   const now = Math.floor(Date.now() / 1000);
   const payload = b64urlEncode(JSON.stringify({
     email: norm(email), role: role || "attendee", authProvider: authProvider || "local",
-    v: sessionVersion || 0,
-    iat: now, exp: now + 7 * 24 * 3600,
+    v: sessionVersion || 0, iat: now, exp: now + 7 * 24 * 3600,
   }));
-  const sig = createHmac("sha256", secret).update(header + "." + payload).digest("base64url");
+  const sig = await hmacB64url(secret, header + "." + payload);
   return header + "." + payload + "." + sig;
 }
 
-export function sessionToken(req: any): string | null {
-  try { return parseCookies(req).locora_session || null; } catch { return null; }
-}
-
-// Async verifySession (revocation pass): signature + expiry, then
-// (a) revoked_tokens — a row for this token's SHA-256 hash, not yet
-// expired, rejects the token. If the table is missing/unreadable the
-// check is SKIPPED (allow), so a missing table can never lock everyone
-// out; logout revocation simply does not persist until the table
-// exists (see SECURITY_FIX_SETUP.md). This is honest fail-open for
-// revocation only — a missing SESSION_SECRET still fails closed.
-// (b) session version — if a locora_users row exists with a numeric
-// sessionVersion, the token's v must match it. A token with no v is
-// rejected only when the stored version is > 0 (so pre-version tokens
-// keep working until a password reset bumps the version). If no user
-// row exists (e.g. locora_users missing, Google sign-in recorded
-// best-effort), the version check is skipped, not failed.
 export async function verifySession(req: any): Promise<SessionUser | null> {
   try {
     const secret = getEnv("SESSION_SECRET");
     if (!secret) return null;
-    const token = sessionToken(req);
+    const token = parseCookies(req).locora_session;
     if (!token) return null;
     const parts = token.split(".");
     if (parts.length !== 3) return null;
-    const expected = createHmac("sha256", secret).update(parts[0] + "." + parts[1]).digest("base64url");
-    const a = Buffer.from(expected);
-    const b = Buffer.from(parts[2]);
-    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+    const expected = await hmacB64url(secret, parts[0] + "." + parts[1]);
+    if (!ctEqual(expected, parts[2])) return null;
     const payload = JSON.parse(b64urlDecode(parts[1]));
     if (!payload.email || !isEmail(payload.email) || !payload.exp || payload.exp * 1000 < Date.now()) return null;
     const email = norm(payload.email);
-    // (a) revocation check (best-effort, fail-open only on table errors).
     try {
-      if (supabaseBase() && getEnv("SUPABASE_SERVICE_ROLE_KEY")) {
-        const tokenHash = hashToken(token);
-        const { ok, body } = await fetchJson(
-          `${supabaseBase()}/rest/v1/revoked_tokens?id=eq.${encodeURIComponent(tokenHash)}&select=data`,
-          { headers: supabaseHeaders() },
-        );
-        if (ok && Array.isArray(body) && body.length > 0) {
-          const d = body[0].data || {};
-          if (!d.expiresAt || Date.parse(d.expiresAt) >= Date.now()) return null;
-        }
+      const tokenHash = await sha256Hex(token);
+      const rev = await fetchJson(`${supabaseBase()}/rest/v1/revoked_tokens?id=eq.${encodeURIComponent(tokenHash)}&select=data`, { headers: supabaseHeaders() });
+      if (rev.ok && Array.isArray(rev.body) && rev.body.length > 0) {
+        const exp = rev.body[0].data?.expiresAt;
+        if (!exp || new Date(exp).getTime() > Date.now()) return null;
       }
     } catch {}
-    // (b) session-version check (skipped when no user row is found).
     try {
       const userRow = await loadUserByEmail(email);
       if (userRow && userRow.data && typeof userRow.data.sessionVersion === "number") {
@@ -143,25 +158,19 @@ export async function verifySession(req: any): Promise<SessionUser | null> {
   }
 }
 
-// Insert the caller's current token into revoked_tokens (best-effort).
-// Returns true only if the row was written; a missing table / error
-// returns false and must never fail logout (the cookie is still cleared).
 export async function revokeSessionToken(req: any): Promise<boolean> {
   try {
-    const token = sessionToken(req);
-    if (!token || !supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return false;
+    const token = parseCookies(req).locora_session;
+    if (!token) return false;
     const parts = token.split(".");
-    let expMs = Date.now() + 7 * 24 * 3600 * 1000;
-    let email = "";
-    try {
-      const payload = JSON.parse(b64urlDecode(parts[1]));
-      if (payload.exp) expMs = payload.exp * 1000;
-      if (payload.email) email = norm(payload.email);
-    } catch {}
-    const tokenHash = hashToken(token);
+    if (parts.length !== 3) return false;
+    let expIso = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+    try { expIso = new Date(JSON.parse(b64urlDecode(parts[1])).exp * 1000).toISOString(); } catch {}
+    const tokenHash = await sha256Hex(token);
     const { ok } = await fetchJson(`${supabaseBase()}/rest/v1/revoked_tokens`, {
-      method: "POST", headers: supabaseHeaders(),
-      body: JSON.stringify({ id: tokenHash, data: { tokenHash, email, expiresAt: new Date(expMs).toISOString() } }),
+      method: "POST",
+      headers: { ...supabaseHeaders(), Prefer: "resolution=merge-duplicates,return=representation" },
+      body: JSON.stringify({ id: tokenHash, data: { tokenHash, email: norm(JSON.parse(b64urlDecode(parts[1])).email || ""), expiresAt: expIso } }),
     });
     return ok;
   } catch { return false; }
@@ -211,34 +220,32 @@ export function readBody(req: any): Promise<any> {
   });
 }
 
-// ---- Passwords (scrypt, per-user salt, timing-safe compare) ----
-export function hashPassword(password: string): string {
-  const salt = randomBytes(16).toString("hex");
-  const hash = scryptSync(password, salt, 64).toString("hex");
-  return `scrypt$${salt}$${hash}`;
+// ---- Passwords (PBKDF2-SHA256 via WebCrypto, per-user salt, constant-time compare) ----
+// Format: pbkdf2$<saltHex>$<hashHex>$100000. No live passwords exist yet
+// (locora_users table is new in this fix), so no scrypt migration is needed.
+export async function hashPassword(password: string): Promise<string> {
+  const salt = bytesToHex(randomBytes(16));
+  const key = await (globalThis as any).crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await (globalThis as any).crypto.subtle.deriveBits({ name: "PBKDF2", salt: hexToBytes(salt), iterations: 100000, hash: "SHA-256" }, key, 256);
+  return `pbkdf2$${salt}$${bytesToHex(new Uint8Array(bits))}$100000`;
 }
-export function verifyPassword(password: string, stored: string): boolean {
+export async function verifyPassword(password: string, stored: string): Promise<boolean> {
   try {
     const parts = (stored || "").split("$");
-    if (parts.length !== 3 || parts[0] !== "scrypt") return false;
-    const hash = scryptSync(password, parts[1], 64);
-    const expected = Buffer.from(parts[2], "hex");
-    return hash.length === expected.length && timingSafeEqual(hash, expected);
+    if (parts.length !== 4 || parts[0] !== "pbkdf2") return false;
+    const key = await (globalThis as any).crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+    const bits = await (globalThis as any).crypto.subtle.deriveBits({ name: "PBKDF2", salt: hexToBytes(parts[1]), iterations: parseInt(parts[3], 10) || 100000, hash: "SHA-256" }, key, 256);
+    return ctEqual(bytesToHex(new Uint8Array(bits)), parts[2]);
   } catch { return false; }
 }
-export function hashToken(raw: string): string {
-  return createHash("sha256").update(raw).digest("hex");
+export async function hashToken(raw: string): Promise<string> {
+  return sha256Hex(raw);
 }
 export function randomTokenHex(bytes = 32): string {
-  return randomBytes(bytes).toString("hex");
+  return bytesToHex(randomBytes(bytes));
 }
 
 // ---- Rate limiting (Supabase-backed counter, table rate_limits) ----
-// Returns { allowed, retryAfter, tableMissing }.
-// Auth callers must fail closed (503) when tableMissing is true.
-// Read (GET) callers may allow when tableMissing is true, because the
-// data itself is already protected by the session check; the table
-// must still be created (see SECURITY_FIX_SETUP.md).
 export async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
   try {
     if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
