@@ -177,11 +177,22 @@ export function CreateEventPage() {
         createdByEmail: currentUser.email,
       });
 
-      toast({
-        type: 'success',
-        title: 'Event Created Successfully',
-        description: `"${newEvent.title}" is now published and open for RSVPs.`,
-      });
+      if (newEvent._pendingSync) {
+        // The shared server did not take it: it lives only in this
+        // browser until the sync lands. Say so plainly instead of
+        // claiming it is published for everyone.
+        toast({
+          type: 'info',
+          title: 'Saved on this device only',
+          description: `"${newEvent.title}" could not reach the shared server, so other devices and users can't see it yet. It will sync automatically once the server is reachable.`,
+        });
+      } else {
+        toast({
+          type: 'success',
+          title: 'Event Created Successfully',
+          description: `"${newEvent.title}" is now published and open for RSVPs.`,
+        });
+      }
 
       navigate(`/events/${newEvent.id}`);
     } catch {

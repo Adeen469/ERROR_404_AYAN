@@ -41,6 +41,7 @@ export function DiscoverPage() {
   };
 
   const [events, setEvents] = useState<EventItem[]>([]);
+  const [showingLocalOnly, setShowingLocalOnly] = useState(false);
   const [totalResults, setTotalResults] = useState(0);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
@@ -94,6 +95,7 @@ export function DiscoverPage() {
         const response = await eventsService.getEvents(effectiveFilters, page, 9);
         if (active) {
           setEvents(response.data);
+          setShowingLocalOnly(eventsService.lastEventsFromLocal());
           setTotalResults(response.total);
           setTotalPages(response.totalPages);
         }
@@ -121,6 +123,17 @@ export function DiscoverPage() {
           any country, state, and city in the world.
         </p>
       </div>
+
+      {/* Local-only notice: when the shared API fails, this list is just
+          this browser's saved events — the reason another device can show
+          different results for the same email. */}
+      {!loading && showingLocalOnly && (
+        <div className="rounded-xl border border-[#E7C87A] bg-[#FDF6E3] px-4 py-3 text-sm text-[#5F635D]">
+          <span className="font-semibold text-[#1E2320]">Shared server unreachable — </span>
+          showing events saved on this device only. That is why another
+          device can show different results right now.
+        </div>
+      )}
 
       {/* Filter Toolbar */}
       <EventFilters

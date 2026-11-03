@@ -72,6 +72,10 @@ export interface EventItem {
   tags: string[];
   isFeatured?: boolean;
   ageRestriction?: string;
+  // Local-only marker (never stored on the server): the event was saved
+  // in this browser because the shared API was unreachable, and is
+  // queued to upload. Stripped before any server POST/PATCH.
+  _pendingSync?: boolean;
 }
 
 export interface AttendeeRegistration {

@@ -5,6 +5,12 @@
 import { EventFilterOptions, EventItem, PaginatedResponse } from '../types';
 import { DEMO_EVENTS, DEMO_ORGANIZERS } from '../mocks/demo-data';
 import { apiClient, isDemoMode } from './api-client';
+import {
+  addPendingOp,
+  applyPendingToPage,
+  flushPendingOps,
+  getPendingOps,
+} from './pending-events';
 import { authService } from './auth-service';
 import { getEventNeighborhood } from '../utils/formatters';
 import { eventDay } from '../utils/date-range';
@@ -88,6 +94,49 @@ function cachedFetch<T>(key: string, fetchFn: () => Promise<T>): Promise<T> {
 function clearEventsCache(): void {
   eventsCache.clear();
   ssClear();
+}
+
+// Pending-sync flush (see pending-events.ts). Runs in the background
+// after any successful shared read: the server answered, so anything this
+// browser saved locally while it was down gets a chance to upload. The
+// browser sends the user's session cookie automatically on these
+// same-origin calls, so a signed-in organizer's ops succeed once the
+// server accepts writes again. Overlapping runs are guarded; failures
+// simply leave ops pending for the next successful read.
+let flushInFlight = false;
+
+// Whether the most recent getEvents list came from this browser's local
+// store because the shared API failed (demo mode excluded: there the
+// local store is the intended source). Discover reads this to explain
+// why its results can differ from another device's.
+let lastListFromLocal = false;
+
+async function flushPending(): Promise<void> {
+  if (isDemoMode() || flushInFlight) return;
+  flushInFlight = true;
+  try {
+    const { flushed } = await flushPendingOps(localStorage, apiClient);
+    if (flushed.length > 0) {
+      // Flushed events stop being "pending" in the local copy too, so a
+      // later offline fallback doesn't show them as waiting to sync.
+      const events = getStoredEvents();
+      let changed = false;
+      const cleaned = events.map((e) => {
+        if (e._pendingSync && flushed.includes(e.id)) {
+          changed = true;
+          const { _pendingSync, ...rest } = e;
+          return rest;
+        }
+        return e;
+      });
+      if (changed) saveStoredEvents(cleaned);
+      clearEventsCache();
+    }
+  } catch {
+    // Flush failures leave ops pending; the next successful read retries.
+  } finally {
+    flushInFlight = false;
+  }
 }
 
 // Ownership rules for event management — the permission matrix:
@@ -215,7 +264,7 @@ export const eventsService = {
   async getEvents(filters: EventFilterOptions = {}, page = 1, pageSize = 12): Promise<PaginatedResponse<EventItem>> {
     if (!isDemoMode()) {
       try {
-        return await cachedFetch(
+        const shared = await cachedFetch(
           `list:${cacheKey({ ...filters, page, pageSize })}`,
           () => apiClient.get<PaginatedResponse<EventItem>>('/events', {
             ...filters,
@@ -223,7 +272,15 @@ export const eventsService = {
             pageSize,
           }),
         );
+        // The server answered, so anything this browser saved locally
+        // while it was down gets a chance to upload now (background).
+        lastListFromLocal = false;
+        void flushPending();
+        // Pending ops overlay the default first page only, flagged, so a
+        // not-yet-synced event never vanishes from its creator's view.
+        return applyPendingToPage(shared, page, filters, getPendingOps(localStorage));
       } catch (err) {
+        lastListFromLocal = true;
         console.warn('Backend API /events unavailable, falling back to local events store:', err);
       }
     }
@@ -395,7 +452,7 @@ export const eventsService = {
       try {
         return await apiClient.post<EventItem>('/events', payload);
       } catch (err) {
-        console.warn('Backend API /events post unavailable, falling back to local events store:', err);
+        console.warn('Backend API /events post unavailable, saving locally as pending-sync:', err);
       }
     }
 
@@ -439,9 +496,14 @@ export const eventsService = {
       isFeatured: false,
     };
 
-    events.unshift(newEvent);
+    // The server did not take it: keep it locally AND queue it for upload,
+    // so it is never silently trapped in this browser. The create page
+    // tells the user it is device-only until the sync lands.
+    const pendingEvent: EventItem = { ...newEvent, _pendingSync: true };
+    events.unshift(pendingEvent);
     saveStoredEvents(events);
-    return newEvent;
+    addPendingOp(localStorage, { op: 'create', event: pendingEvent });
+    return pendingEvent;
   },
 
   async updateEvent(id: string, updates: Partial<EventItem>, opts?: OwnershipOptions): Promise<EventItem> {
@@ -472,22 +534,21 @@ export const eventsService = {
       try {
         return await apiClient.patch<EventItem>('/events', updates, { id });
       } catch (err) {
-        // Registration increments the count via updateEvent; without a
-        // fallback that count would never persist on the live site.
-        console.warn('Backend API update event unavailable, falling back to local events store:', err);
+        console.warn('Backend API update event unavailable, saving locally as pending-sync:', err);
       }
     }
 
     await new Promise((resolve) => setTimeout(resolve, 200));
     const events = getStoredEvents();
     const index = events.findIndex((e) => e.id === id);
-    if (index === -1) {
-      throw new Error('Event not found');
-    }
-
-    const updated = { ...events[index], ...updates };
-    events[index] = updated;
+    // A shared event this browser never stored locally still gets its edit
+    // queued: without a local copy the edit would otherwise be lost.
+    const base = index === -1 ? existing : events[index];
+    const updated: EventItem = { ...base, ...updates, _pendingSync: true };
+    if (index === -1) events.unshift(updated);
+    else events[index] = updated;
     saveStoredEvents(events);
+    addPendingOp(localStorage, { op: 'update', id, updates });
     return updated;
   },
 
@@ -508,7 +569,7 @@ export const eventsService = {
         await apiClient.delete('/events', { id });
         return true;
       } catch (err) {
-        console.warn('Backend API delete event unavailable, falling back to local events store:', err);
+        console.warn('Backend API delete event unavailable, queuing the delete for sync:', err);
       }
     }
 
@@ -516,6 +577,9 @@ export const eventsService = {
     let events = getStoredEvents();
     events = events.filter((e) => e.id !== id);
     saveStoredEvents(events);
+    // Queued, unless the event itself never reached the server: a pending
+    // create for this id is simply cancelled by addPendingOp.
+    addPendingOp(localStorage, { op: 'delete', id });
     return true;
   },
 
@@ -527,6 +591,20 @@ export const eventsService = {
   async adjustRegisteredCount(_id: string, _registeredCount: number): Promise<void> {
     clearEventsCache();
     return;
+  },
+
+  // Upload anything this browser saved while the server was unreachable.
+  // Runs automatically after successful shared reads; exposed so a
+  // sign-in flow can also trigger it explicitly.
+  async syncPendingEvents(): Promise<void> {
+    await flushPending();
+  },
+
+  // True when the last getEvents list came from this browser's local
+  // store because the shared API failed. Lets pages explain device-only
+  // results instead of showing them as if they were the shared list.
+  lastEventsFromLocal(): boolean {
+    return lastListFromLocal;
   },
 
   // Session-only payment info for checkout (Finding 2). Returns only

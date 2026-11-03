@@ -86,6 +86,13 @@ export function EventCard({ event, isRegistered = false, onBookmarkChange }: Eve
 
       {/* Card Content & Zero-Pill Unboxed Metadata */}
       <div className="flex-1 flex flex-col p-5">
+        {/* Pending-sync marker: this event lives only in this browser
+            until its queued upload reaches the shared server. */}
+        {event._pendingSync && (
+          <div className="mb-2 text-[11px] font-medium text-[#C25E00]">
+            Only on this device — waiting to sync
+          </div>
+        )}
         {/* Category & Date Metadata with '·' separator */}
         <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-[#1E3F35] mb-2 truncate">
           <span>{event.category}</span>
