@@ -340,12 +340,17 @@ export function esc(s: string): string {
   return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-// SECURITY FIX — Phase 1 Finding 2: public /api/events responses never
-// include organiser.email, createdByEmail or upiId (list or single).
-// UPI is only available via the session-only ?payment=1&id= endpoint,
-// to a signed-in user, for that one event. Writes require a session and
-// server-side ownership (POST: approved organiser/admin; PATCH details:
-// owner only; PATCH status / DELETE: owner or admin).
+// SECURITY FIX — Phase 1 Finding 2: /api/events responses never include
+// organiser.email, createdByEmail or upiId for viewers who are NOT the
+// event's owner or an admin (list or single). The owner/admin exception
+// exists because the organizer hub and the edit page filter by exactly
+// those fields: stripping them for the owner too made every non-admin
+// organizer's hub come back empty after a fresh fetch (e.g. logout ->
+// login) while Discover still showed the events. UPI is only available
+// via the session-only ?payment=1&id= endpoint, to a signed-in user,
+// for that one event. Writes require a session and server-side ownership
+// (POST: approved organiser/admin; PATCH details: owner only; PATCH
+// status / DELETE: owner or admin).
 
 // GET /api/events — shared event list (all users, all devices).
 // POST /api/events — create a shared event.
@@ -515,6 +520,16 @@ export default async function handler(req: any, res: any) {
       if (!rl.allowed && !rl.tableMissing) {
         return sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rl.retryAfter) });
       }
+      // Ownership-aware reads: resolve the viewer from the session
+      // cookie (null for guests; verifySession never throws). The
+      // event's owner or an admin receives the unstripped record so
+      // the hub/edit owner filter can match; every other viewer still
+      // gets the stripped public shape, so no organiser email leaks to
+      // other users. Guests see exactly what they saw before.
+      const viewer = await verifySession(req);
+      const viewerEmail = viewer ? viewer.email : null;
+      const viewEvent = (e: any) =>
+        viewerEmail && mayManageEvent(e, viewerEmail) ? e : stripEventPublic(e);
       const singleId = firstQuery(req.query, "id");
       // Session-only payment endpoint: the ONLY place a UPI ID leaves
       // the server. Any signed-in user may fetch it for the event they
@@ -529,7 +544,7 @@ export default async function handler(req: any, res: any) {
       if (singleId) {
         const event = await fetchEvent(singleId);
         if (!event) return sendJson(res, 404, { message: "Event not found" });
-        return sendJson(res, 200, stripEventPublic(event));
+        return sendJson(res, 200, viewEvent(event));
       }
       const filtered = applyFilters(await fetchAllEvents(), req.query || {});
       const page = Math.max(1, parseInt(String(req.query?.page || "1"), 10) || 1);
@@ -538,7 +553,7 @@ export default async function handler(req: any, res: any) {
       const totalPages = Math.ceil(total / pageSize) || 1;
       const offset = (page - 1) * pageSize;
       return sendJson(res, 200, {
-        data: filtered.slice(offset, offset + pageSize).map((e: any) => stripEventPublic(e)),
+        data: filtered.slice(offset, offset + pageSize).map((e: any) => viewEvent(e)),
         total, page, pageSize, totalPages,
       });
     } catch (err: any) {

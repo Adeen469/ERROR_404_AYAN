@@ -264,8 +264,14 @@ export const eventsService = {
   async getEvents(filters: EventFilterOptions = {}, page = 1, pageSize = 12): Promise<PaginatedResponse<EventItem>> {
     if (!isDemoMode()) {
       try {
+        // Cache keys are viewer-aware: the server now returns ownership
+        // fields only to the event's owner/admin, so a list cached as a
+        // guest (stripped) must never serve a signed-in owner after
+        // login, and one owner's list must never serve another account
+        // on the same browser. Stale entries simply age out (60s TTL).
+        const viewer = authService.getCurrentUser()?.email?.trim().toLowerCase() || 'guest';
         const shared = await cachedFetch(
-          `list:${cacheKey({ ...filters, page, pageSize })}`,
+          `list:${viewer}:${cacheKey({ ...filters, page, pageSize })}`,
           () => apiClient.get<PaginatedResponse<EventItem>>('/events', {
             ...filters,
             page,
@@ -401,8 +407,13 @@ export const eventsService = {
         // HTML 404 page), which made every details page show
         // "Event Not Found" even though the event listed fine on
         // Discover. Fall back to the local store only if that fails too.
+        // Same viewer-aware rule as getEvents: a single event cached as
+        // a guest (stripped) must not serve a signed-in owner after
+        // login, or the edit page's owner check would fail on the
+        // cached copy.
+        const viewer = authService.getCurrentUser()?.email?.trim().toLowerCase() || 'guest';
         return await cachedFetch(
-          `one:${id}`,
+          `one:${viewer}:${id}`,
           () => apiClient.get<EventItem>('/events', { id }),
         );
       } catch (err) {
