@@ -126,6 +126,7 @@ export function LocationPicker({
             onChange={(v) => onChange({ country: v, state: '', city: '' })}
             ariaLabel="Country"
             size="form"
+            searchable
           />
         </div>
 
@@ -156,6 +157,7 @@ export function LocationPicker({
               ariaLabel="State"
               disabled={!value.country || statesLoading}
               size="form"
+              searchable
             />
           )}
         </div>
@@ -188,6 +190,7 @@ export function LocationPicker({
               ariaLabel="City"
               disabled={citiesLoading}
               size="form"
+              searchable
             />
           ) : (
             <input

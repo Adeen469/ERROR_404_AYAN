@@ -33,6 +33,12 @@ interface ThemedSelectProps {
   onCustomChange?: (value: string) => void;
   customPlaceholder?: string;
   customLabel?: string;
+  // Hidden type-to-search: when the popover is open, typing letters
+  // filters the option list, but the typed text is NEVER shown anywhere
+  // — there is no search box, and the trigger keeps showing only the
+  // selected result. Picking a result clears the search. Off by default,
+  // so every existing dropdown behaves exactly as before.
+  searchable?: boolean;
 }
 
 export function ThemedSelect({
@@ -46,9 +52,14 @@ export function ThemedSelect({
   onCustomChange,
   customPlaceholder,
   customLabel,
+  searchable,
 }: ThemedSelectProps) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+  // The typed search is held here only — it is never rendered, so the
+  // user sees only the filtered results, never their keystrokes.
+  const [searchQuery, setSearchQuery] = useState('');
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -68,8 +79,54 @@ export function ThemedSelect({
     };
   }, [open ]);
 
+  // Type-to-search capture: only while this popover is open, and never
+  // while typing in a real input (e.g. the custom-value box). One
+  // printable key appends to the hidden search; Backspace removes the
+  // last letter; pausing for ~1.2s resets it so a new search starts
+  // fresh. Closing the popover or picking a result also resets it.
+  useEffect(() => {
+    if (!open || !searchable) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.key === 'Backspace') {
+        setSearchQuery((q) => q.slice(0, -1));
+      } else if (e.key.length === 1) {
+        setSearchQuery((q) => q + e.key.toLowerCase());
+      } else {
+        return;
+      }
+      if (searchTimer.current) clearTimeout(searchTimer.current);
+      searchTimer.current = setTimeout(() => setSearchQuery(''), 1200);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      if (searchTimer.current) clearTimeout(searchTimer.current);
+    };
+  }, [open, searchable]);
+
+  useEffect(() => {
+    if (!open) setSearchQuery('');
+  }, [open ]);
+
   const selected = options.find((o) => o.value === value);
   const label = selected ? selected.label : value;
+
+  // The list the user actually sees: narrowed by the hidden search when
+  // one is in progress, full list otherwise.
+  const visibleOptions =
+    searchable && searchQuery
+      ? options.filter((o) => o.label.toLowerCase().includes(searchQuery))
+      : options;
 
   const triggerSize =
     size === 'bar'
@@ -106,7 +163,17 @@ export function ThemedSelect({
         <div
           className={`absolute z-30 mt-2 bg-white border border-[#E7E3DB] rounded-xl shadow-lg py-1 max-h-64 overflow-y-auto ${popoverSize}`}
         >
-          {options.map((opt) => {
+          {searchable && (
+            <p className="px-3 py-2 text-[11px] text-[#5F635D] border-b border-[#E7E3DB]">
+              Type to search
+            </p>
+          )}
+          {searchable && searchQuery && visibleOptions.length === 0 && (
+            <p className="px-3 py-2 text-xs text-[#5F635D]">
+              No matching results
+            </p>
+          )}
+          {visibleOptions.map((opt) => {
             const isSelected = opt.value === value;
             return (
               <button
@@ -116,6 +183,7 @@ export function ThemedSelect({
                 onClick={() => {
                   if (opt.disabled) return;
                   onChange(opt.value);
+                  setSearchQuery('');
                   setOpen(false);
                 }}
                 className={`w-full flex items-center justify-between gap-2 text-left px-3 py-2 transition-colors ${
