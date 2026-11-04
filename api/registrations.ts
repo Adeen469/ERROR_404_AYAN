@@ -722,7 +722,11 @@ export default async function handler(req: any, res: any): Promise<void> {
       if (stored && stored.status === "confirmed") { try { await bumpEventCount(stored.eventId, 1); } catch {} }
       if (stored) {
         try {
-          if (stored.status === 'pending') { await sendApprovalEmail(stored, event); await sendAttendeePendingEmail(stored, event); }
+          // Razorpay pending rows need no organizer approval: the
+          // organizer-approval email and the "awaiting approval"
+          // attendee email would both be wrong for them. The pass
+          // confirmation email is sent by api/payments.ts on verify.
+          if (stored.status === 'pending' && stored.paymentMethod !== 'razorpay') { await sendApprovalEmail(stored, event); await sendAttendeePendingEmail(stored, event); }
           else if (stored.status === 'confirmed') await sendAttendeeConfirmationEmail(stored, event);
         } catch {}
       }
