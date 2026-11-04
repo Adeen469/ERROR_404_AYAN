@@ -114,6 +114,153 @@ async function fetchJson(
 const TABLE = "phone_verifications";
 const TOKEN_TTL_MS = 15 * 60 * 1000;
 
+// ---- Session verification (audit fix) ----
+// The start action used to take any email/phone from the body with no
+// session check, so anyone could mint tokens for any address and —
+// because start deletes the victim's pending rows first — repeatedly
+// invalidate a victim's in-progress verification. Now start requires a
+// session whose email matches the body email, plus a per-email rate
+// limit. The Telegram webhook branch below stays session-free (Telegram
+// calls it, authenticated by the secret header instead).
+function norm(email: string): string {
+  return (email || "").trim().toLowerCase();
+}
+
+function isEmail(s: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s || "");
+}
+
+function parseCookies(req: any): Record<string, string> {
+  const out: Record<string, string> = {};
+  const header = req.headers?.cookie || "";
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx > -1) out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
+  }
+  return out;
+}
+
+// Last x-forwarded-for entry (Vercel appends the real IP last; the
+// first entry is client-spoofable).
+function getClientIp(req: any): string {
+  const fwd = req.headers?.["x-forwarded-for"] || "";
+  if (typeof fwd === "string" && fwd.trim()) {
+    const parts = fwd.split(",").map((s: string) => s.trim()).filter(Boolean);
+    if (parts.length) return parts[parts.length - 1];
+  }
+  return req.headers?.["x-real-ip"] || "unknown";
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function bytesToB64url(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+function b64urlToBytes(text: string): Uint8Array {
+  const b64 = text.replace(/-/g, "+").replace(/_/g, "/") + "==".slice(0, (4 - (text.length % 4)) % 4);
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function b64urlDecode(text: string): string {
+  return new TextDecoder().decode(b64urlToBytes(text));
+}
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await (globalThis as any).crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return bytesToHex(new Uint8Array(digest));
+}
+async function hmacB64url(secret: string, data: string): Promise<string> {
+  const key = await (globalThis as any).crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await (globalThis as any).crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
+  return bytesToB64url(new Uint8Array(sig));
+}
+function ctEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+async function loadUserByEmail(email: string): Promise<{ id: string; data: any } | null> {
+  const { ok, body } = await fetchJson(
+    `${supabaseBase()}/rest/v1/locora_users?select=id,data&data->>email=eq.${encodeURIComponent(norm(email))}`,
+    { headers: supabaseHeaders() },
+  );
+  if (!ok || !Array.isArray(body) || body.length === 0) return null;
+  return body[0];
+}
+
+async function verifySession(req: any): Promise<{ email: string } | null> {
+  try {
+    const secret = getEnv("SESSION_SECRET");
+    if (!secret) return null;
+    const token = parseCookies(req).locora_session;
+    if (!token) return null;
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const expected = await hmacB64url(secret, parts[0] + "." + parts[1]);
+    if (!ctEqual(expected, parts[2])) return null;
+    const payload = JSON.parse(b64urlDecode(parts[1]));
+    if (!payload.email || !isEmail(payload.email) || !payload.exp || payload.exp * 1000 < Date.now()) return null;
+    const email = norm(payload.email);
+    try {
+      const tokenHash = await sha256Hex(token);
+      const rev = await fetchJson(`${supabaseBase()}/rest/v1/revoked_tokens?id=eq.${encodeURIComponent(tokenHash)}&select=data`, { headers: supabaseHeaders() });
+      if (rev.ok && Array.isArray(rev.body) && rev.body.length > 0) {
+        const exp = rev.body[0].data?.expiresAt;
+        if (!exp || new Date(exp).getTime() > Date.now()) return null;
+      }
+    } catch {}
+    try {
+      const userRow = await loadUserByEmail(email);
+      if (userRow && userRow.data && typeof userRow.data.sessionVersion === "number") {
+        const stored = userRow.data.sessionVersion;
+        if (payload.v === undefined) {
+          if (stored > 0) return null;
+        } else if (payload.v !== stored) {
+          return null;
+        }
+      }
+    } catch {}
+    return { email };
+  } catch {
+    return null;
+  }
+}
+
+async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
+  try {
+    if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
+    const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
+    const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
+    if (!ok) {
+      if (status === 404 || status === 400) return { allowed: false, retryAfter: 0, tableMissing: true };
+      return { allowed: true, retryAfter: 0, tableMissing: false };
+    }
+    const now = Date.now();
+    const row = Array.isArray(body) && body.length > 0 ? body[0].data : null;
+    const windowStart = row && typeof row.windowStart === "number" ? row.windowStart : 0;
+    const count = row && typeof row.count === "number" ? row.count : 0;
+    if (windowStart && now - windowStart < windowMs && count >= limit) {
+      return { allowed: false, retryAfter: Math.ceil((windowStart + windowMs - now) / 1000), tableMissing: false };
+    }
+    const fresh = !windowStart || now - windowStart >= windowMs;
+    const next = { count: fresh ? 1 : count + 1, windowStart: fresh ? now : windowStart };
+    await fetchJson(`${supabaseBase()}/rest/v1/rate_limits`, {
+      method: "POST",
+      headers: { ...supabaseHeaders(), Prefer: "resolution=merge-duplicates,return=representation", "Content-Type": "application/json" },
+      body: JSON.stringify({ id: key, data: next }),
+    });
+    return { allowed: true, retryAfter: 0, tableMissing: false };
+  } catch {
+    return { allowed: true, retryAfter: 0, tableMissing: false };
+  }
+}
+
 async function loadRows(): Promise<any[]> {
   const { ok, body } = await fetchJson(
     `${supabaseBase()}/rest/v1/${TABLE}?select=token,data`,
@@ -334,10 +481,24 @@ export default async function handler(req: any, res: any): Promise<void> {
     }
 
     if (body.action === "start") {
+      const session = await verifySession(req);
+      if (!session) {
+        sendJson(res, 401, { message: "Sign in required" });
+        return;
+      }
       const email = typeof body.email === "string" ? body.email.trim() : "";
       const phone = typeof body.phone === "string" ? body.phone.trim() : "";
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         sendJson(res, 400, { message: "A valid email is required" });
+        return;
+      }
+      if (norm(email) !== session.email) {
+        sendJson(res, 403, { message: "You can only verify your own email" });
+        return;
+      }
+      const rl = await checkRateLimit(`telegram:start:${session.email}`, 5, 60 * 60 * 1000);
+      if (!rl.allowed && !rl.tableMissing) {
+        sendJson(res, 429, { message: "Too many verification attempts. Try again later." });
         return;
       }
       const d = digits(phone);
@@ -432,8 +593,7 @@ export default async function handler(req: any, res: any): Promise<void> {
 
     sendJson(res, 400, { message: "Unknown request" });
   } catch (err) {
-    sendJson(res, 500, {
-      message: err instanceof Error ? err.message : "Verification failed",
-    });
+    try { console.error("Telegram verify failed:", err instanceof Error ? err.message : err); } catch {}
+    sendJson(res, 500, { message: "Verification failed" });
   }
 }

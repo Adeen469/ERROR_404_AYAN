@@ -53,8 +53,14 @@ export function parseCookies(req: any): Record<string, string> {
 }
 
 export function getClientIp(req: any): string {
+  // Last entry, not first: the first x-forwarded-for entry is
+  // client-controlled and trivially spoofed to dodge per-IP limits;
+  // Vercel appends the real connecting IP last.
   const fwd = req.headers?.["x-forwarded-for"] || "";
-  if (typeof fwd === "string" && fwd.trim()) return fwd.split(",")[0].trim();
+  if (typeof fwd === "string" && fwd.trim()) {
+    const parts = fwd.split(",").map((s: string) => s.trim()).filter(Boolean);
+    if (parts.length) return parts[parts.length - 1];
+  }
   return req.headers?.["x-real-ip"] || "unknown";
 }
 
@@ -411,12 +417,21 @@ export function esc(s: string): string {
 
 
 async function loadAllRegistrations(): Promise<any[]> {
-  const { ok, body } = await fetchJson(
-    `${supabaseBase()}/rest/v1/registrations?select=id,data`,
-    { headers: supabaseHeaders() },
-  );
-  if (!ok) throw new Error("registrations table read failed");
-  return Array.isArray(body) ? body.map((row: any) => row.data) : [];
+  // Paginated: PostgREST's default cap is 1,000 rows, so an unpaged
+  // read silently dropped older registrations as the table grew.
+  const out: any[] = [];
+  for (let page = 0; page < 10; page++) {
+    const offset = page * 1000;
+    const { ok, body } = await fetchJson(
+      `${supabaseBase()}/rest/v1/registrations?select=id,data&limit=1000&offset=${offset}`,
+      { headers: supabaseHeaders() },
+    );
+    if (!ok) throw new Error("registrations table read failed");
+    const rows = Array.isArray(body) ? body.map((row: any) => row.data) : [];
+    out.push(...rows);
+    if (rows.length < 1000) break;
+  }
+  return out;
 }
 
 // True when a Telegram-verified row matches this email + phone
@@ -619,12 +634,66 @@ function stripReg(reg: any, sessionEmail: string, isOrganiser: boolean): any {
   const event = reg.event ? stripEventPublic(reg.event) : undefined;
   // Organiser view keeps attendee fields needed for approval.
   // Own view keeps the attendee's own fields (including their own ticketCode).
-  // In both cases the nested event is stripped. No other view is allowed.
-  return { ...reg, event };
+  // In both cases the nested event is stripped. Any other view (which
+  // callers must 403 first) is defence-in-depth stripped of phone/UTR:
+  // this function used to be a no-op spread, so a future caller passing
+  // the flag wrong would have silently leaked attendee phones and UTRs.
+  if (isOrganiser) return { ...reg, event };
+  if (norm(reg.userEmail) === norm(sessionEmail)) return { ...reg, event };
+  const { userPhone: _p, utr: _u, ...rest } = reg;
+  return { ...rest, event };
 }
 
+// 6 crypto-random characters (no lookalikes), server-generated only.
+// The old LOC-<1000..9999>-TK via Math.random had only 9,000 values.
 function newTicketCode(): string {
-  return `LOC-${Math.floor(1000 + Math.random() * 9000)}-TK`;
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let out = "";
+  try {
+    const bytes = new Uint8Array(6);
+    (globalThis as any).crypto.getRandomValues(bytes);
+    for (const b of bytes) out += chars[b % chars.length];
+  } catch {
+    for (let i = 0; i < 6; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return `LOC-${out}-TK`;
+}
+
+// Full refund of a captured Razorpay payment (attendee-cancelled paid
+// passes). The organizer's dashboard is the fallback when this fails.
+async function refundRazorpayPayment(paymentId: string): Promise<{ ok: boolean; refundId?: string }> {
+  try {
+    const keyId = getEnv("RAZORPAY_KEY_ID");
+    const secret = getEnv("RAZORPAY_KEY_SECRET");
+    if (!keyId || !secret) return { ok: false };
+    const raw = `${keyId}:${secret}`;
+    let auth = "";
+    try { auth = `Basic ${(globalThis as any).btoa(raw)}`; } catch {
+      const Buf = (globalThis as any).Buffer;
+      if (Buf) auth = `Basic ${Buf.from(raw, "utf-8").toString("base64")}`;
+    }
+    if (!auth) return { ok: false };
+    const res = await fetchJson(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}/refund`, {
+      method: "POST",
+      headers: { Authorization: auth, "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (res.ok && res.body?.id) return { ok: true, refundId: res.body.id };
+    return { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+// Management (approve/reject/check-in, attendee roster) requires the
+// organizer to STILL be approved, not just to have created the event:
+// revocation previously left old-event management and attendee phones
+// fully open to a removed organizer's still-valid session. Admins pass
+// (isApprovedOrganizer already returns true for them).
+async function mayManageEventActive(event: any, email: string): Promise<boolean> {
+  if (!event || !email) return false;
+  if (!mayManageEvent(event, email)) return false;
+  return isApprovedOrganizer(email);
 }
 
 export default async function handler(req: any, res: any): Promise<void> {
@@ -671,7 +740,9 @@ export default async function handler(req: any, res: any): Promise<void> {
         const reg = all.find((r: any) => r.id === q.get("id"));
         if (!reg) { sendJson(res, 404, { message: "Registration not found" }); return; }
         const event = await loadEvent(reg.eventId);
-        const isOrg = mayManageEvent(event, me);
+        // Roster views require STILL-approved management (revocation
+        // must also close attendee phone/UTR access, not just the hub).
+        const isOrg = await mayManageEventActive(event, me);
         if (norm(reg.userEmail) !== me && !isOrg) { sendJson(res, 403, { message: "Not allowed" }); return; }
         sendJson(res, 200, stripReg(reg, me, isOrg));
         return;
@@ -679,7 +750,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       if (q.get("eventId")) {
         const event = await loadEvent(q.get("eventId") || "");
         if (!event) { sendJson(res, 404, { message: "Event not found" }); return; }
-        if (!mayManageEvent(event, me)) { sendJson(res, 403, { message: "Not allowed" }); return; }
+        if (!(await mayManageEventActive(event, me))) { sendJson(res, 403, { message: "Not allowed" }); return; }
         sendJson(res, 200, all.filter((r: any) => r.eventId === q.get("eventId")).map((r: any) => stripReg(r, me, true)));
         return;
       }
@@ -691,6 +762,13 @@ export default async function handler(req: any, res: any): Promise<void> {
     }
 
     if (req.method === "POST") {
+      // Rate limit: every pending row emails the organizer, so an
+      // unlimited POST was an organizer-inbox spam vector.
+      const rlPost = await checkRateLimit(`reg:post:${me}`, 30, 60 * 60 * 1000);
+      if (!rlPost.allowed && !rlPost.tableMissing) {
+        sendJson(res, 429, { message: "Too many registrations. Try again shortly." }, { "Retry-After": String(rlPost.retryAfter) });
+        return;
+      }
       const reg = await readBody(req);
       if (!reg || !reg.id || !reg.eventId || !reg.userId) {
         sendJson(res, 400, { message: "Registration needs id, eventId and userId" });
@@ -703,21 +781,95 @@ export default async function handler(req: any, res: any): Promise<void> {
       }
       const event = await loadEvent(reg.eventId);
       if (!event) { sendJson(res, 404, { message: "Event not found" }); return; }
+      // The event must be open: published and not ended. (Status is
+      // enforced only when present, so legacy rows without a status
+      // field keep working.)
+      if (event.status && event.status !== "published") {
+        sendJson(res, 409, { message: "This event is not open for registration" });
+        return;
+      }
+      if (event.endDate && !Number.isNaN(Date.parse(event.endDate)) && new Date(event.endDate).getTime() < Date.now()) {
+        sendJson(res, 409, { message: "This event has ended" });
+        return;
+      }
+      // Organizers cannot take a seat at their own event: they would
+      // inflate the count, occupy a real attendee's seat, and could
+      // approve their own payment. (Admins attending others' events
+      // are unaffected — they are not the event owner.)
+      if (isEventOwner(event, me)) {
+        sendJson(res, 403, { message: "Organizers cannot register for their own event" });
+        return;
+      }
+      const allRegs = await loadAllRegistrations();
+      // Server-side dedupe (the client check was local-storage only, so
+      // a second device or tab created a second pass and a second
+      // count bump). An active row is returned as-is, never duplicated.
+      const existingActive = allRegs.find((r: any) => r.eventId === reg.eventId && norm(r.userEmail) === me && (r.status === "pending" || r.status === "confirmed"));
+      if (existingActive) {
+        sendJson(res, 200, stripReg(existingActive, me, false));
+        return;
+      }
+      // Re-registering after a cancel reactivates the SAME row instead
+      // of inserting a second one: the old plain insert conflicted
+      // with the cancelled server row while the client still showed a
+      // confirmed pass — a phantom pass the organizer never saw.
+      const existingCancelled = allRegs.find((r: any) => r.eventId === reg.eventId && norm(r.userEmail) === me && r.status === "cancelled");
+      const reactivating = Boolean(existingCancelled);
+      if (reactivating) reg.id = existingCancelled.id;
       // Server-side paid rule: a paid event never gets an instant pass.
       if (Number(event.price) > 0 && reg.status === "confirmed") reg.status = "pending";
-      if (reg.status === "confirmed" && !reg.ticketCode) reg.ticketCode = newTicketCode();
+      // Server-owned fields are never caller-writable: a crafted row
+      // must not smuggle holdsSpot=true (a free seat on approval), a
+      // chosen ticket code, or payment markers past the guards. Ticket
+      // codes are always generated here, never kept from the client.
+      reg.holdsSpot = false;
+      reg.userEmail = me;
+      if (reg.status === "confirmed") reg.ticketCode = newTicketCode();
       if (reg.status === "pending") reg.ticketCode = "";
+      // Capacity is enforced here, not just in the UI: a confirmed row
+      // past capacity is refused instead of overbooking the event.
+      if (reg.status === "confirmed" && event.capacity && Number(event.registeredCount || 0) >= Number(event.capacity)) {
+        sendJson(res, 409, { message: "This event is at full capacity" });
+        return;
+      }
+      // Manual paid rows need a real 12-digit UTR (previously the
+      // format check lived only in the browser, so direct API calls
+      // could flood the organizer queue with empty/garbage UTRs).
+      // A duplicate UTR is NOT hard-rejected — a retry after a
+      // rejection legitimately reuses the same payment — but the
+      // Attendees queue flags duplicates for the organizer to spot.
+      if (Number(event.price) > 0 && reg.paymentMethod !== "razorpay" && reg.status === "pending") {
+        if (typeof reg.utr !== "string" || !/^\d{12}$/.test(reg.utr.trim())) {
+          sendJson(res, 400, { message: "A 12-digit UTR is required for manual payments" });
+          return;
+        }
+        reg.utr = reg.utr.trim();
+      }
+      // Expected-amount snapshot so the organizer can compare what was
+      // claimed against what the event costs.
+      if (Number(event.price) > 0) reg.amountPaise = Math.round(Number(event.price) * 100);
+      reg.registeredAt = reg.registeredAt || new Date().toISOString();
       // Do not store a full nested event with organiser email/UPI.
       // Store only the public snapshot the UI needs.
       if (reg.event) reg.event = stripEventPublic(reg.event);
       try {
         reg.phoneVerified = (await hasVerifiedPhone(reg.userEmail, reg.userPhone)) ? true : undefined;
       } catch { reg.phoneVerified = undefined; }
-      const { ok, body } = await fetchJson(`${supabaseBase()}/rest/v1/registrations`, {
-        method: "POST", headers: supabaseHeaders(), body: JSON.stringify({ id: reg.id, data: reg }),
-      });
-      if (!ok) { sendJson(res, 500, { message: "Failed to store registration" }); return; }
-      const stored = Array.isArray(body) && body.length > 0 ? body[0].data : reg;
+      let stored: any = null;
+      if (reactivating) {
+        const merged = { ...existingCancelled, ...reg, id: existingCancelled.id };
+        const { ok: patchOk, body: patchBody } = await fetchJson(`${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(reg.id)}`, {
+          method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: merged }),
+        });
+        if (!patchOk) { sendJson(res, 500, { message: "Failed to store registration" }); return; }
+        stored = Array.isArray(patchBody) && patchBody.length > 0 ? patchBody[0].data : merged;
+      } else {
+        const { ok, body } = await fetchJson(`${supabaseBase()}/rest/v1/registrations`, {
+          method: "POST", headers: supabaseHeaders(), body: JSON.stringify({ id: reg.id, data: reg }),
+        });
+        if (!ok) { sendJson(res, 500, { message: "Failed to store registration" }); return; }
+        stored = Array.isArray(body) && body.length > 0 ? body[0].data : reg;
+      }
       // Server-side count: a confirmed registration takes a slot now.
       if (stored && stored.status === "confirmed") { try { await bumpEventCount(stored.eventId, 1); } catch {} }
       if (stored) {
@@ -744,46 +896,101 @@ export default async function handler(req: any, res: any): Promise<void> {
       const nextStatus = updates.status;
       const event = await loadEvent(existing.eventId);
       const isOrg = mayManageEvent(event, me);
+      // Organizer actions require STILL-approved management (see
+      // mayManageEventActive): a revoked organizer's session no longer
+      // approves, rejects, checks in, or reads this roster.
+      const isOrgActive = isOrg ? await mayManageEventActive(event, me) : false;
       const isOwner = norm(existing.userEmail) === me;
       if (nextStatus === "confirmed" || nextStatus === "rejected" || updates.checkedIn !== undefined) {
-        if (!isOrg) { sendJson(res, 403, { message: "Only the event owner or an admin can do this" }); return; }
+        if (!isOrgActive) { sendJson(res, 403, { message: "Only the event owner or an admin can do this" }); return; }
+        // Razorpay rows are confirmed by payment verification ONLY.
+        // Letting an organizer approve one manually minted free passes
+        // for people who never paid (the queue used to show them
+        // alongside UTR rows with no distinction).
+        if (nextStatus === "confirmed" && existing.paymentMethod === "razorpay" && !existing.razorpayPaymentId) {
+          sendJson(res, 409, { message: "Awaiting Razorpay payment — this registration cannot be approved manually" });
+          return;
+        }
+        // Approvals only for open events.
+        if (nextStatus === "confirmed" && event) {
+          if (event.status && event.status !== "published") { sendJson(res, 409, { message: "This event is not open for approval" }); return; }
+          if (event.endDate && !Number.isNaN(Date.parse(event.endDate)) && new Date(event.endDate).getTime() < Date.now()) { sendJson(res, 409, { message: "This event has ended" }); return; }
+        }
         if (nextStatus === "confirmed" && existing.status === "pending" && existing.holdsSpot === false && event && event.registeredCount >= event.capacity) {
           sendJson(res, 409, { message: "This event is at full capacity. Free a spot before approving." });
+          return;
+        }
+        // Check-in only makes sense on a confirmed pass.
+        if (updates.checkedIn !== undefined && existing.status !== "confirmed" && nextStatus !== "confirmed") {
+          sendJson(res, 400, { message: "Only confirmed registrations can be checked in" });
           return;
         }
       } else if (nextStatus === "cancelled") {
         if (!isOwner) { sendJson(res, 403, { message: "Only the registration owner can cancel it" }); return; }
       } else {
-        if (!isOwner && !isOrg) { sendJson(res, 403, { message: "Not allowed" }); return; }
+        if (!isOwner && !isOrgActive) { sendJson(res, 403, { message: "Not allowed" }); return; }
       }
-      // Never let a PATCH rewrite identity, ownership or payment fields
-      // except through the approved transitions below. approverEmail /
-      // userId in the body are ignored entirely.
-      const { approverEmail: _a, userId: _u, userEmail: _e, eventId: _ev, utr: _ut, ...storedUpdates } = updates;
-      const merged: any = { ...existing, ...storedUpdates, id: existing.id, userEmail: existing.userEmail, userId: existing.userId, eventId: existing.eventId, utr: existing.utr };
+      // Field allowlist by role — the old code stripped only five
+      // fields, so attendees could rewrite ticketCode, holdsSpot,
+      // payment markers and userPhone, and reopen rejected rows, by
+      // direct API call. Now: attendees may only cancel their own row;
+      // organizers/admins may only change status (confirm/reject) and
+      // checkedIn. Ticket codes, holdsSpot, and every payment field
+      // are server-only, always.
+      let allowedUpdates: any = null;
+      if (nextStatus === "cancelled" && isOwner) {
+        allowedUpdates = { status: "cancelled" };
+      } else if (isOrgActive && (nextStatus === "confirmed" || nextStatus === "rejected")) {
+        allowedUpdates = { status: nextStatus };
+        if (updates.checkedIn !== undefined && nextStatus === "confirmed") allowedUpdates.checkedIn = Boolean(updates.checkedIn);
+      } else if (isOrgActive && updates.checkedIn !== undefined && nextStatus === undefined) {
+        allowedUpdates = { checkedIn: Boolean(updates.checkedIn) };
+      }
+      if (!allowedUpdates) {
+        sendJson(res, 400, { message: "This update is not allowed" });
+        return;
+      }
+      const merged: any = { ...existing, ...allowedUpdates, id: existing.id, userEmail: existing.userEmail, userId: existing.userId, eventId: existing.eventId, utr: existing.utr };
       if (existing.status === 'pending' && merged.status === 'confirmed') merged.ticketCode = newTicketCode();
       if (merged.event) merged.event = stripEventPublic(merged.event);
+      // Cancelling a confirmed Razorpay pass refunds it automatically:
+      // previously the pass vanished but the money stayed with the
+      // organizer and nothing recorded that a refund was owed. If the
+      // refund call fails, the cancel still proceeds (the attendee
+      // asked to leave) but refundStatus "failed" stays on the row for
+      // the organizer to resolve in the Razorpay dashboard.
+      if (merged.status === 'cancelled' && existing.status === 'confirmed' && existing.paymentMethod === 'razorpay' && existing.razorpayPaymentId && !existing.refundId) {
+        const rf = await refundRazorpayPayment(existing.razorpayPaymentId);
+        merged.refundStatus = rf.ok ? "initiated" : "failed";
+        if (rf.refundId) merged.refundId = rf.refundId;
+      }
       const { ok } = await fetchJson(
         `${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(id)}`,
         { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: merged }) },
       );
       if (!ok) { sendJson(res, 500, { message: "Failed to update registration" }); return; }
-      // Server-side counts: approval of a no-spot pending row takes a slot;
-      // cancelling a held slot releases one.
+      // Server-side counts: approval of a no-spot pending row takes a
+      // slot; cancelling a held slot releases one; rejecting a held
+      // legacy pending row releases its seat too (previously a
+      // rejected legacy row kept its seat consumed forever).
       try {
         if (existing.status === 'pending' && merged.status === 'confirmed' && existing.holdsSpot === false) await bumpEventCount(merged.eventId, 1);
         if (merged.status === 'cancelled' && (existing.status === 'confirmed' || (existing.status === 'pending' && existing.holdsSpot !== false))) await bumpEventCount(merged.eventId, -1);
+        if (existing.status === 'pending' && merged.status === 'rejected' && existing.holdsSpot !== false) await bumpEventCount(merged.eventId, -1);
       } catch {}
       if (existing.status === 'pending' && merged.status === 'confirmed' && merged.ticketCode) {
         try { if (event) await sendAttendeeConfirmationEmail(merged, event); } catch {}
       }
-      sendJson(res, 200, stripReg(merged, me, isOrg));
+      sendJson(res, 200, stripReg(merged, me, isOrgActive));
       return;
     }
 
     sendJson(res, 405, { message: "Method not allowed" });
   } catch (err) {
-    sendJson(res, 500, { message: err instanceof Error ? err.message : "Registration API failed" });
+    // Generic message to the client; the detail stays in server logs
+    // (previously Supabase internals leaked through error text).
+    try { console.error("Registration API failed:", err instanceof Error ? err.message : err); } catch {}
+    sendJson(res, 500, { message: "Registration API failed" });
   }
 }
 
@@ -795,9 +1002,21 @@ async function loadAllEventsForCounts(): Promise<Record<string, any>> {
 }
 
 async function bumpEventCount(eventId: string, delta: number): Promise<void> {
+  // Atomic RPC first (see SUPABASE_RPC_SETUP.md): increments only when
+  // a seat is free, never past capacity, in one statement. Until that
+  // function exists in Supabase, fall back to a capped read-modify-write.
+  try {
+    const rpc = await fetchJson(`${supabaseBase()}/rest/v1/rpc/adjust_event_count`, {
+      method: "POST", headers: supabaseHeaders(),
+      body: JSON.stringify({ p_event_id: eventId, p_delta: delta }),
+    });
+    if (rpc.ok) return;
+  } catch { /* fall through to capped bump */ }
   const event = await loadEvent(eventId);
   if (!event) return;
-  const next = Math.max(0, Number(event.registeredCount || 0) + delta);
+  const capacity = Number(event.capacity || 0);
+  const cap = capacity > 0 ? capacity : Number.MAX_SAFE_INTEGER;
+  const next = Math.min(cap, Math.max(0, Number(event.registeredCount || 0) + delta));
   if (next === Number(event.registeredCount || 0)) return;
   await fetchJson(`${supabaseBase()}/rest/v1/events?id=eq.${encodeURIComponent(eventId)}`, {
     method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: { ...event, registeredCount: next } }),

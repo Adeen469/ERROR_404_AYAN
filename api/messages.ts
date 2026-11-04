@@ -53,8 +53,14 @@ export function parseCookies(req: any): Record<string, string> {
 }
 
 export function getClientIp(req: any): string {
+  // Last entry, not first: the first x-forwarded-for entry is
+  // client-controlled and trivially spoofed to dodge per-IP limits;
+  // Vercel appends the real connecting IP last.
   const fwd = req.headers?.["x-forwarded-for"] || "";
-  if (typeof fwd === "string" && fwd.trim()) return fwd.split(",")[0].trim();
+  if (typeof fwd === "string" && fwd.trim()) {
+    const parts = fwd.split(",").map((s: string) => s.trim()).filter(Boolean);
+    if (parts.length) return parts[parts.length - 1];
+  }
   return req.headers?.["x-real-ip"] || "unknown";
 }
 
@@ -391,10 +397,10 @@ export function esc(s: string): string {
 //         effort, its Storage object). Only the SENDER may do this, any
 //         time. A recipient who wants it gone uses "Delete for me".
 //
-// Authorization (same honesty note as registrations): there is no
-// session auth, so senderEmail / recipientEmail are caller-sent and
-// trusted the way the app's own UI sends them. The rules below still
-// stop misuse through the API itself:
+// Authorization: every method requires a valid locora_session JWT
+// (P2-3) and identity comes only from it; senderEmail / recipientEmail
+// in the body are never trusted as identity. The rules below stop
+// misuse through the API itself:
 //   - an attendee may only message the event's organizer (taken from
 //     the STORED event row, never the caller's claim);
 //   - an organizer (or admin) may only reply inside a thread the
@@ -447,11 +453,105 @@ const ALLOWED_EXTENSIONS: Record<string, string[]> = {
 
 async function loadAllMessages(): Promise<any[]> {
   const { ok, body } = await fetchJson(
-    `${supabaseBase()}/rest/v1/messages?select=id,data`,
+    `${supabaseBase()}/rest/v1/messages?select=id,data&limit=1000`,
     { headers: supabaseHeaders() },
   );
   if (!ok) throw new Error("messages table read failed");
   return Array.isArray(body) ? body.map((row: any) => row.data) : [];
+}
+
+// Per-user read: only rows where the caller is sender or recipient,
+// server-side filtered (the old code fetched the WHOLE table every 3
+// seconds per polling tab and relied on PostgREST's 1,000-row default
+// cap, so old conversations silently vanished past 1,000 rows site-wide
+// and server cost grew with total usage). Falls back to the full read
+// (callers filter by participant) if the jsonb filter is ever rejected.
+async function loadMessagesFor(email: string): Promise<any[]> {
+  const out = new Map<string, any>();
+  try {
+    for (const field of ["senderEmail", "recipientEmail"]) {
+      const { ok, body } = await fetchJson(
+        `${supabaseBase()}/rest/v1/messages?select=id,data&data->>${field}=eq.${encodeURIComponent(norm(email))}&limit=1000`,
+        { headers: supabaseHeaders() },
+      );
+      if (!ok) throw new Error("filtered messages read failed");
+      if (Array.isArray(body)) for (const row of body) if (row.data?.id) out.set(row.data.id, row.data);
+    }
+    return [...out.values()];
+  } catch {
+    return loadAllMessages();
+  }
+}
+
+async function deleteAttachmentObject(path: string): Promise<void> {
+  try {
+    await fetchJson(
+      `${supabaseBase()}/storage/v1/object/${BUCKET}/${path}`,
+      { method: "DELETE", headers: supabaseHeaders() },
+    );
+  } catch { /* best-effort */ }
+}
+
+// Verify an uploaded attachment against its REAL bytes, not the
+// metadata the uploader declared: upload-url and send used to trust
+// declared size/type/extension, while the browser PUTs straight to
+// Storage — so the 20MB/type limits were bypassable via direct API.
+// This fetches only the first bytes (Range request, reader cancelled
+// after the first chunk — never a 20MB download) and checks the magic
+// bytes against the extension, plus the stored total size. Returns an
+// error string, or null when the attachment checks out. A mismatched
+// object is deleted so it does not linger publicly.
+async function verifyAttachment(path: string, ext: string): Promise<string | null> {
+  const url = `${supabaseBase()}/storage/v1/object/public/${BUCKET}/${path}`;
+  let res: any;
+  try {
+    res = await fetch(url, { headers: { Range: "bytes=0-15" } });
+  } catch {
+    return "Could not verify the attachment — please try again";
+  }
+  if (res.status === 404) return "Attachment was not uploaded — please upload it again";
+  if (!res.ok && res.status !== 206) return "Could not verify the attachment — please try again";
+  const range = res.headers.get("content-range") || "";
+  const totalMatch = range.match(/\/(\d+)\s*$/);
+  if (totalMatch && Number(totalMatch[1]) > MAX_ATTACHMENT_BYTES) {
+    await deleteAttachmentObject(path);
+    return "Attachment exceeds the 20MB limit";
+  }
+  let head = new Uint8Array(0);
+  try {
+    const reader = (res.body as any)?.getReader?.();
+    if (reader) {
+      const { value } = await reader.read();
+      try { await reader.cancel(); } catch {}
+      head = value || new Uint8Array(0);
+    } else {
+      const buf = await res.arrayBuffer();
+      head = new Uint8Array(buf).slice(0, 16);
+    }
+  } catch {
+    return "Could not verify the attachment — please try again";
+  }
+  const starts = (...bytes: number[]) => bytes.every((b, i) => head[i] === b);
+  const at = (off: number, ...bytes: number[]) => bytes.every((b, i) => head[off + i] === b);
+  let ok = true;
+  if (ext === "png") ok = starts(0x89, 0x50, 0x4e, 0x47);
+  else if (ext === "jpg" || ext === "jpeg") ok = starts(0xff, 0xd8, 0xff);
+  else if (ext === "gif") ok = starts(0x47, 0x49, 0x46, 0x38);
+  else if (ext === "webp") ok = starts(0x52, 0x49, 0x46, 0x46) && at(8, 0x57, 0x45, 0x42, 0x50);
+  else if (ext === "pdf") ok = starts(0x25, 0x50, 0x44, 0x46);
+  else if (ext === "docx" || ext === "xlsx" || ext === "xlsm") ok = starts(0x50, 0x4b, 0x03, 0x04);
+  else if (ext === "doc" || ext === "xls") ok = starts(0xd0, 0xcf, 0x11, 0xe0);
+  else if (ext === "mp4" || ext === "mov") ok = at(4, 0x66, 0x74, 0x79, 0x70);
+  else if (ext === "webm") ok = starts(0x1a, 0x45, 0xdf, 0xa3);
+  else {
+    const ct = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    ok = (ALLOWED_EXTENSIONS[ext] || []).includes(ct);
+  }
+  if (!ok) {
+    await deleteAttachmentObject(path);
+    return "Attachment contents do not match its file type";
+  }
+  return null;
 }
 
 async function loadMessage(id: string): Promise<any | null> {
@@ -504,6 +604,29 @@ function isOrganizerOrAdmin(sender: string, organizerEmail: string): boolean {
 //   - anyone may write TO the event's organizer (starting or continuing);
 //   - anyone else may only be written to by the organizer/admin, and
 //     only inside a thread the attendee already started.
+function threadPairExists(existing: any[], eventId: string, a: string, b: string): boolean {
+  return existing.some(
+    (m: any) =>
+      m.eventId === eventId &&
+      m.type !== "block" &&
+      ((m.senderEmail === a && m.recipientEmail === b) ||
+        (m.senderEmail === b && m.recipientEmail === a)) &&
+      // A thread both sides deleted for themselves is dead: replies
+      // into it would resurrect a conversation both people removed.
+      !(((m.hiddenFor || []) as string[]).includes(a) && ((m.hiddenFor || []) as string[]).includes(b)),
+  );
+}
+
+function findBlock(existing: any[], eventId: string, a: string, b: string): any | null {
+  return existing.find(
+    (m: any) =>
+      m.type === "block" &&
+      m.eventId === eventId &&
+      ((m.blockerEmail === a && m.blockedEmail === b) ||
+        (m.blockerEmail === b && m.blockedEmail === a)),
+  ) || null;
+}
+
 function authorizeContact(
   event: any,
   sender: string,
@@ -513,18 +636,14 @@ function authorizeContact(
   const organizerEmail = organizerEmailOf(event);
   if (!organizerEmail) return "This event has no organizer contact";
   if (sender === recipient) return "You cannot message yourself";
+  if (findBlock(existing, event.id, sender, recipient)) return "This conversation is blocked";
   if (recipient === organizerEmail) return null;
   if (!isOrganizerOrAdmin(sender, organizerEmail)) {
     return "You can only message this event's organizer";
   }
   // Organizers reply; they never cold-message. A thread exists when
   // either side has already written to the other about this event.
-  const threadExists = existing.some(
-    (m: any) =>
-      m.eventId === event.id &&
-      ((m.senderEmail === sender && m.recipientEmail === recipient) ||
-        (m.senderEmail === recipient && m.recipientEmail === sender)),
-  );
+  const threadExists = threadPairExists(existing, event.id, sender, recipient);
   return threadExists
     ? null
     : "Reply inside a conversation the attendee started";
@@ -633,15 +752,17 @@ export default async function handler(req: any, res: any): Promise<void> {
       }
       let all: any[];
       try {
-        all = await loadAllMessages();
+        all = await loadMessagesFor(userEmail);
       } catch {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
       }
       // "Delete for me" hides via hiddenFor; old rows predate the field
-      // and are treated as hidden for nobody.
+      // and are treated as hidden for nobody. Block rows are internal
+      // state and never listed as messages.
       const mine = all.filter(
         (m: any) =>
+          m.type !== "block" &&
           (m.senderEmail === userEmail || m.recipientEmail === userEmail) &&
           !((m.hiddenFor || []) as string[]).includes(userEmail),
       );
@@ -652,8 +773,11 @@ export default async function handler(req: any, res: any): Promise<void> {
         });
         return;
       }
+      // Same-millisecond messages used to flip order (createdAt-only
+      // sort); id breaks ties deterministically.
       mine.sort((a: any, b: any) =>
-        (a.createdAt || "").localeCompare(b.createdAt || ""),
+        (a.createdAt || "").localeCompare(b.createdAt || "") ||
+        (a.id || "").localeCompare(b.id || ""),
       );
       sendJson(res, 200, { messages: mine });
       return;
@@ -663,6 +787,11 @@ export default async function handler(req: any, res: any): Promise<void> {
 
     // ---- DELETE: delete for everyone (sender only) ----
     if (req.method === "DELETE") {
+      const rlDel = await checkRateLimit(`msg:delete:${me}`, 60, 10 * 60 * 1000);
+      if (!rlDel.allowed && !rlDel.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlDel.retryAfter) });
+        return;
+      }
       const id = String(req.query?.id || "");
       const userEmail = me;
       if (!id) {
@@ -678,32 +807,74 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 403, { message: "Only the sender can delete for everyone" });
         return;
       }
-      const { ok } = await fetchJson(
-        `${supabaseBase()}/rest/v1/messages?id=eq.${encodeURIComponent(id)}`,
-        { method: "DELETE", headers: supabaseHeaders() },
-      );
-      if (!ok) {
-        sendJson(res, 503, { message: "Messages are not set up yet" });
+      // A delete-for-everyone window: after 24 hours the message is
+      // part of the other side's history and only "delete for me"
+      // remains. (Previously there was no window at all, and no
+      // tombstone — the other side's conversation just lost messages
+      // without explanation.)
+      const ageMs = Date.now() - Date.parse(msg.createdAt || "");
+      if (Number.isFinite(ageMs) && ageMs > 24 * 60 * 60 * 1000) {
+        sendJson(res, 403, { message: "Messages can only be deleted for everyone within 24 hours of sending" });
         return;
       }
-      // Best-effort: remove the attachment object too, so a deleted
-      // file does not linger in Storage under a guessable path.
+      // Storage first: if the attachment cannot be removed, the row
+      // stays — previously the row was deleted and the public URL kept
+      // serving the file, which is the opposite of a deletion.
       if (msg.attachment?.path) {
         try {
           await fetchJson(
             `${supabaseBase()}/storage/v1/object/${BUCKET}/${msg.attachment.path}`,
             { method: "DELETE", headers: supabaseHeaders() },
           );
-        } catch {
-          // Row is already gone; a leftover object is harmless clutter.
-        }
+        } catch { /* fall through: row is still intact below */ }
+        // Verify the object is actually gone before tombstoning.
+        try {
+          const check = await fetch(`${supabaseBase()}/storage/v1/object/public/${BUCKET}/${msg.attachment.path}`, { method: "HEAD" });
+          if (check.ok || check.status === 200) {
+            sendJson(res, 502, { message: "Could not delete the attachment. Nothing was deleted." });
+            return;
+          }
+        } catch { /* HEAD failure is not proof the object survived; continue */ }
       }
-      sendJson(res, 200, { deleted: true });
+      // Tombstone, not row deletion: the other side sees "This message
+      // was deleted" instead of a silently shifting conversation, and
+      // thread grouping (which keys on message rows) stays stable.
+      const tombstoned: any = {
+        ...msg,
+        text: "",
+        attachment: null,
+        deletedForEveryone: true,
+        deletedAt: new Date().toISOString(),
+      };
+      try {
+        await updateMessageData(tombstoned);
+      } catch {
+        sendJson(res, 503, { message: "Messages are not set up yet" });
+        return;
+      }
+      // Scrub quotes of this message in the same threads (the reply
+      // feature freezes a quote snapshot at send time; a deleted
+      // message must not survive inside someone else's quote).
+      try {
+        const mine = await loadMessagesFor(userEmail);
+        for (const m of mine) {
+          if (m.replyToId === id && m.replySnapshot) {
+            m.replySnapshot = { ...m.replySnapshot, text: "", deleted: true };
+            try { await updateMessageData(m); } catch { /* best-effort */ }
+          }
+        }
+      } catch { /* best-effort */ }
+      sendJson(res, 200, { deleted: true, message: tombstoned });
       return;
     }
 
     // ---- POST: "Delete for me" (hide for one user) ----
     if (req.method === "POST" && body.action === "hide") {
+      const rlHide = await checkRateLimit(`msg:hide:${me}`, 60, 10 * 60 * 1000);
+      if (!rlHide.allowed && !rlHide.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlHide.retryAfter) });
+        return;
+      }
       const id = String(body.id || "");
       const userEmail = me;
       if (!id) {
@@ -732,8 +903,101 @@ export default async function handler(req: any, res: any): Promise<void> {
       return;
     }
 
+    // ---- POST: block / unblock a conversation ----
+    // Blocks live as rows in the messages table (no new table needed):
+    // { type: "block", eventId, blockerEmail, blockedEmail }. GET
+    // never lists them; authorizeContact refuses both directions while
+    // one exists. Only someone with an actual thread with the target
+    // may block them; only the blocker may lift their own block.
+    if (req.method === "POST" && (body.action === "block" || body.action === "unblock")) {
+      const rlBlock = await checkRateLimit(`msg:block:${me}`, 20, 10 * 60 * 1000);
+      if (!rlBlock.allowed && !rlBlock.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlBlock.retryAfter) });
+        return;
+      }
+      const eventId = String(body.eventId || "");
+      const target = norm(body.blockedEmail || body.recipientEmail || "");
+      if (!eventId || !isEmail(target)) {
+        sendJson(res, 400, { message: "eventId and a valid blockedEmail are required" });
+        return;
+      }
+      if (target === me) {
+        sendJson(res, 400, { message: "You cannot block yourself" });
+        return;
+      }
+      const event = await loadEvent(eventId);
+      if (!event) {
+        sendJson(res, 404, { message: "Event not found" });
+        return;
+      }
+      let existing: any[] = [];
+      try {
+        existing = await loadMessagesFor(me);
+      } catch {
+        sendJson(res, 503, { message: "Messages are not set up yet" });
+        return;
+      }
+      if (body.action === "block") {
+        if (!threadPairExists(existing, eventId, me, target)) {
+          sendJson(res, 403, { message: "You can only block someone you have a conversation with" });
+          return;
+        }
+        if (!findBlock(existing, eventId, me, target)) {
+          try {
+            await storeMessage({
+              id: `block-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              type: "block",
+              eventId,
+              blockerEmail: me,
+              blockedEmail: target,
+              createdAt: new Date().toISOString(),
+            });
+          } catch {
+            sendJson(res, 503, { message: "Messages are not set up yet" });
+            return;
+          }
+        }
+        sendJson(res, 200, { blocked: true });
+        return;
+      }
+      const mine = existing.filter((m: any) => m.type === "block" && m.eventId === eventId && m.blockerEmail === me && m.blockedEmail === target);
+      for (const row of mine) {
+        try {
+          await fetchJson(
+            `${supabaseBase()}/rest/v1/messages?id=eq.${encodeURIComponent(row.id)}`,
+            { method: "DELETE", headers: supabaseHeaders() },
+          );
+        } catch { /* best-effort */ }
+      }
+      sendJson(res, 200, { blocked: false });
+      return;
+    }
+
+    // ---- POST: delete an orphaned upload (send failed after upload) ----
+    // Uploads happen before the send, so a failed send (or a retry that
+    // uploads again) used to leave unreferenced public objects in the
+    // bucket forever. The client calls this best-effort on send failure.
+    // The path pattern is the same one send() enforces, and the random
+    // suffix makes other users' paths unguessable.
+    if (req.method === "POST" && body.action === "delete-upload") {
+      const path = String(body.path || "");
+      const pathOk = /^[A-Za-z0-9_-]+\/[0-9]+-[a-z0-9]+\.[A-Za-z0-9]+$/.test(path);
+      if (!pathOk) {
+        sendJson(res, 400, { message: "Invalid attachment path" });
+        return;
+      }
+      await deleteAttachmentObject(path);
+      sendJson(res, 200, { deleted: true });
+      return;
+    }
+
     // ---- POST: signed upload URL ----
     if (req.method === "POST" && body.action === "upload-url") {
+      const rlUpload = await checkRateLimit(`msg:upload:${me}`, 20, 10 * 60 * 1000);
+      if (!rlUpload.allowed && !rlUpload.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlUpload.retryAfter) });
+        return;
+      }
       const eventId = String(body.eventId || "");
       const sender = me;
       const fileName = String(body.fileName || "");
@@ -775,7 +1039,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       }
       let existing: any[] = [];
       try {
-        existing = await loadAllMessages();
+        existing = await loadMessagesFor(sender);
       } catch {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
@@ -783,6 +1047,13 @@ export default async function handler(req: any, res: any): Promise<void> {
       const denied = authorizeContact(event, sender, recipient, existing);
       if (denied) {
         sendJson(res, 403, { message: denied });
+        return;
+      }
+      // First messages need a published event; replies in an existing
+      // thread keep working even if the event is later cancelled, so a
+      // conversation is not cut off mid-discussion.
+      if (event.status && event.status !== "published" && !threadPairExists(existing, eventId, sender, recipient)) {
+        sendJson(res, 409, { message: "This event is not open for new messages" });
         return;
       }
       const path = `${sanitizePathSegment(eventId)}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
@@ -833,9 +1104,23 @@ export default async function handler(req: any, res: any): Promise<void> {
 
     // ---- POST: send a message ----
     if (req.method === "POST") {
+      const rlSend = await checkRateLimit(`msg:send:${me}`, 60, 60 * 60 * 1000);
+      if (!rlSend.allowed && !rlSend.tableMissing) {
+        sendJson(res, 429, { message: "Too many messages. Try again shortly." }, { "Retry-After": String(rlSend.retryAfter) });
+        return;
+      }
       const eventId = String(body.eventId || "");
       const sender = me;
-      const senderName = String(body.senderName || "");
+      // Display names are server-derived, never caller-supplied: the
+      // old code stored body.senderName verbatim (spoofable, and the
+      // same spoofed name went out in the email alert).
+      let senderName = sender;
+      try {
+        const profile = await loadUserByEmail(sender);
+        if (profile && typeof profile.data?.name === "string" && profile.data.name.trim()) {
+          senderName = profile.data.name.trim().slice(0, 80);
+        }
+      } catch { /* fall back to the email address */ }
       const text = String(body.text || "").trim().slice(0, MAX_TEXT_CHARS);
       const attachment = body.attachment || null;
       if (!eventId) {
@@ -903,7 +1188,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       }
       let existing: any[] = [];
       try {
-        existing = await loadAllMessages();
+        existing = await loadMessagesFor(sender);
       } catch {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
@@ -913,19 +1198,66 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 403, { message: denied });
         return;
       }
+      // First messages need a published event (replies keep working
+      // after a later cancellation — see upload-url for the same rule).
+      if (event.status && event.status !== "published" && !threadPairExists(existing, eventId, sender, recipient)) {
+        sendJson(res, 409, { message: "This event is not open for new messages" });
+        return;
+      }
+      // Send idempotency: a lost response + Retry used to create a
+      // duplicate message (the client cleared the draft before the send
+      // completed). A retry carrying the same key returns the original
+      // row instead of storing a second one.
+      const idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.slice(0, 100) : "";
+      if (idempotencyKey) {
+        const prior = existing.find((m: any) => m.idempotencyKey === idempotencyKey && m.senderEmail === sender);
+        if (prior) {
+          sendJson(res, 200, { message: prior, mailed: false, idempotent: true });
+          return;
+        }
+      }
+      // Attachments are verified against their real bytes here (see
+      // verifyAttachment): declared size/type/extension alone were
+      // bypassable, because the browser uploads straight to Storage.
+      if (cleanAttachment) {
+        const sniffError = await verifyAttachment(cleanAttachment.path, extensionOf(cleanAttachment.name));
+        if (sniffError) {
+          sendJson(res, 400, { message: sniffError });
+          return;
+        }
+      }
+      // Recipient display name (the old thread list showed the viewer's
+      // OWN name for sender-side threads, because no recipient name was
+      // ever stored): the organizer's name from the stored event, or
+      // the attendee's profile name.
+      let recipientName = recipient;
+      try {
+        if (recipient === organizerEmailOf(event)) {
+          if (event.organizer && typeof event.organizer.name === "string" && event.organizer.name.trim()) {
+            recipientName = event.organizer.name.trim().slice(0, 80);
+          }
+        } else {
+          const profile = await loadUserByEmail(recipient);
+          if (profile && typeof profile.data?.name === "string" && profile.data.name.trim()) {
+            recipientName = profile.data.name.trim().slice(0, 80);
+          }
+        }
+      } catch { /* fall back to the email address */ }
       const msg: any = {
         id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         eventId,
         eventTitle: event.title || "",
         senderEmail: sender,
-        senderName: senderName || sender,
+        senderName,
         recipientEmail: recipient,
+        recipientName,
         text: text || "",
         attachment: cleanAttachment,
         read: false,
         hiddenFor: [],
         createdAt: new Date().toISOString(),
       };
+      if (idempotencyKey) msg.idempotencyKey = idempotencyKey;
       try {
         await storeMessage(msg);
       } catch {
@@ -940,6 +1272,11 @@ export default async function handler(req: any, res: any): Promise<void> {
 
     // ---- PATCH: edit text (own message, within 1 hour) / mark read ----
     if (req.method === "PATCH") {
+      const rlPatch = await checkRateLimit(`msg:patch:${me}`, 60, 10 * 60 * 1000);
+      if (!rlPatch.allowed && !rlPatch.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlPatch.retryAfter) });
+        return;
+      }
       const id = String(req.query?.id || "");
       if (body.text !== undefined) {
         const editor = me;
@@ -957,11 +1294,20 @@ export default async function handler(req: any, res: any): Promise<void> {
           sendJson(res, 403, { message: "You can only edit your own messages" });
           return;
         }
+        if (msg.deletedForEveryone) {
+          sendJson(res, 403, { message: "A deleted message cannot be edited" });
+          return;
+        }
         const ageMs = Date.now() - Date.parse(msg.createdAt || "");
         if (!Number.isFinite(ageMs) || ageMs > 60 * 60 * 1000) {
           sendJson(res, 403, { message: "Messages can only be edited within 1 hour of sending" });
           return;
         }
+        // Edits used to leave no history: the previous text vanished.
+        // Keep the last few versions on the row (cap 5).
+        const history: any[] = Array.isArray(msg.editHistory) ? msg.editHistory : [];
+        history.push({ text: msg.text || "", at: msg.editedAt || msg.createdAt || null });
+        msg.editHistory = history.slice(-5);
         msg.text = text;
         msg.edited = true;
         msg.editedAt = new Date().toISOString();

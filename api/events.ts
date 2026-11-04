@@ -53,8 +53,14 @@ export function parseCookies(req: any): Record<string, string> {
 }
 
 export function getClientIp(req: any): string {
+  // Last entry, not first: the first x-forwarded-for entry is
+  // client-controlled and trivially spoofed to dodge per-IP limits;
+  // Vercel appends the real connecting IP last.
   const fwd = req.headers?.["x-forwarded-for"] || "";
-  if (typeof fwd === "string" && fwd.trim()) return fwd.split(",")[0].trim();
+  if (typeof fwd === "string" && fwd.trim()) {
+    const parts = fwd.split(",").map((s: string) => s.trim()).filter(Boolean);
+    if (parts.length) return parts[parts.length - 1];
+  }
   return req.headers?.["x-real-ip"] || "unknown";
 }
 
@@ -290,6 +296,69 @@ export function mayManageEvent(event: any, email: string): boolean {
   if (!event || !email) return false;
   if (isAdmin(email)) return true;
   return isEventOwner(event, email);
+}
+// Management requires the organizer to STILL be approved: revocation
+// must also close edits, status changes, and deletes of old events,
+// not just new posts (see api/registrations.ts).
+async function mayManageEventActive(event: any, email: string): Promise<boolean> {
+  if (!event || !email) return false;
+  if (!mayManageEvent(event, email)) return false;
+  return isApprovedOrganizer(email);
+}
+
+// Full refund of a captured Razorpay payment (used by DELETE for
+// confirmed paid passes). Mirrors api/payments.ts (import-free files
+// cannot share code).
+async function refundRazorpayPayment(paymentId: string): Promise<{ ok: boolean; refundId?: string }> {
+  try {
+    const keyId = getEnv("RAZORPAY_KEY_ID");
+    const secret = getEnv("RAZORPAY_KEY_SECRET");
+    if (!keyId || !secret) return { ok: false };
+    const raw = `${keyId}:${secret}`;
+    let auth = "";
+    try { auth = `Basic ${btoa(raw)}`; } catch {
+      const Buf = (globalThis as any).Buffer;
+      if (Buf) auth = `Basic ${Buf.from(raw, "utf-8").toString("base64")}`;
+    }
+    if (!auth) return { ok: false };
+    const res = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}/refund`, {
+      method: "POST",
+      headers: { Authorization: auth, "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const body = await res.json().catch(() => null);
+    if (res.ok && body?.id) return { ok: true, refundId: body.id };
+    return { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+// Best-effort cancellation email (event deleted). Email must never
+// fail the delete itself: every failure returns false and is swallowed.
+async function sendEventCancelledEmail(to: string, event: any, refunded: boolean): Promise<boolean> {
+  try {
+    const user = getEnv("GMAIL_USER");
+    const pass = getEnv("GMAIL_APP_PASSWORD");
+    if (!user || !pass || !to) return false;
+    const nodemailer = (await import("nodemailer")).default;
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user, pass: pass.replace(/\s+/g, "") },
+    });
+    const title = event?.title || "your event";
+    const when = event?.startDate ? new Date(event.startDate).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "";
+    await transporter.sendMail({
+      from: user,
+      to,
+      subject: `Event cancelled: ${title}`,
+      text: `The event "${title}"${when ? ` scheduled for ${when}` : ""} has been cancelled by the organizer.${refunded ? " If you paid via Razorpay, your refund has been initiated." : ""} We are sorry for the inconvenience.`,
+      html: `<div style="font-family:Georgia,serif;max-width:560px;margin:0 auto;background:#FAF8F5;padding:24px;"><div style="background:#fff;border:1px solid #E7E3DB;border-radius:16px;padding:24px;"><h2 style="color:#1E3F35;">Event cancelled: ${esc(title)}</h2><p style="color:#1E2320;">The organizer has cancelled this event${when ? `, which was scheduled for ${esc(when)}` : ""}.${refunded ? " If you paid via Razorpay, your refund has been initiated." : ""}</p><p style="color:#5F635D;">We are sorry for the inconvenience.</p></div></div>`,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 export function stripEventPublic(event: any): any {
   if (!event) return event;
@@ -537,6 +606,12 @@ export default async function handler(req: any, res: any) {
       if (singleId && firstQuery(req.query, "payment") === "1") {
         const session = await verifySession(req);
         if (!session) return sendJson(res, 401, { message: "Sign in required" });
+        // The UPI endpoint used to be harvestable without limit: any
+        // signed-in user could collect every organizer's UPI id.
+        const rlPay = await checkRateLimit(`events:payment:${session.email}`, 30, 10 * 60 * 1000);
+        if (!rlPay.allowed && !rlPay.tableMissing) {
+          return sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlPay.retryAfter) });
+        }
         const event = await fetchEvent(singleId);
         if (!event) return sendJson(res, 404, { message: "Event not found" });
         return sendJson(res, 200, { id: event.id, title: event.title, price: Number(event.price) || 0, upiId: event.upiId || null });
@@ -548,7 +623,9 @@ export default async function handler(req: any, res: any) {
       }
       const filtered = applyFilters(await fetchAllEvents(), req.query || {});
       const page = Math.max(1, parseInt(String(req.query?.page || "1"), 10) || 1);
-      const pageSize = Math.max(1, parseInt(String(req.query?.pageSize || "12"), 10) || 12);
+      // pageSize was uncapped: ?pageSize=100000 returned up to the
+      // 1,000-row fetch cap in one response.
+      const pageSize = Math.min(100, Math.max(1, parseInt(String(req.query?.pageSize || "12"), 10) || 12));
       const total = filtered.length;
       const totalPages = Math.ceil(total / pageSize) || 1;
       const offset = (page - 1) * pageSize;
@@ -557,7 +634,9 @@ export default async function handler(req: any, res: any) {
         total, page, pageSize, totalPages,
       });
     } catch (err: any) {
-      return sendJson(res, 502, { message: "Could not load shared events: " + (err?.message || "unknown error") });
+      // Generic message; Supabase internals previously leaked here.
+      try { console.error("Events GET failed:", err?.message || err); } catch {}
+      return sendJson(res, 502, { message: "Could not load shared events" });
     }
   }
 
@@ -568,41 +647,91 @@ export default async function handler(req: any, res: any) {
       if (!(await isApprovedOrganizer(session.email))) {
         return sendJson(res, 403, { message: "Only approved organizers and admins can post events." });
       }
+      const rlPost = await checkRateLimit(`events:post:${session.email}`, 20, 60 * 60 * 1000);
+      if (!rlPost.allowed && !rlPost.tableMissing) {
+        return sendJson(res, 429, { message: "Too many events created. Try again shortly." }, { "Retry-After": String(rlPost.retryAfter) });
+      }
       const p = await readBody(req);
       const id = typeof p.id === "string" && p.id ? p.id : "evt-" + Date.now();
-      const title = p.title || "Untitled Community Event";
+      // Idempotency: a retry/replay carrying the same client id returns
+      // the existing event instead of creating a duplicate listing.
+      // (The frontend now sends a client-generated id on every create.)
+      if (typeof p.id === "string" && p.id) {
+        const dupe = await fetchEvent(p.id);
+        if (dupe) {
+          if (norm(dupe.createdByEmail) === session.email || isAdmin(session.email)) {
+            return sendJson(res, 200, stripEventPublic(dupe));
+          }
+          return sendJson(res, 409, { message: "An event with this id already exists" });
+        }
+      }
+      // Server-side validation (previously almost none: negative
+      // prices were stored and then treated as "free" instant passes,
+      // negative capacities stored as instantly-full events, past and
+      // end-before-start dates accepted verbatim, unbounded text).
+      const title = typeof p.title === "string" ? p.title.trim() : "";
+      if (!title) return sendJson(res, 400, { message: "Title is required" });
+      if (title.length > 150) return sendJson(res, 400, { message: "Title must be 150 characters or fewer" });
+      const description = typeof p.description === "string" ? p.description : "";
+      if (description.length > 5000) return sendJson(res, 400, { message: "Description must be 5000 characters or fewer" });
+      const venueName = typeof p.venueName === "string" ? p.venueName : "Community Hall";
+      if (venueName.length > 200) return sendJson(res, 400, { message: "Venue name must be 200 characters or fewer" });
+      const price = p.price === undefined || p.price === null || p.price === "" ? 0 : Number(p.price);
+      if (!Number.isFinite(price) || price < 0) return sendJson(res, 400, { message: "Price must be zero or more" });
+      const capacity = p.capacity === undefined || p.capacity === null || p.capacity === "" ? 50 : Number(p.capacity);
+      if (!Number.isInteger(capacity) || capacity < 1 || capacity > 10000) return sendJson(res, 400, { message: "Capacity must be between 1 and 10000" });
+      const startRaw = p.startDate || new Date(Date.now() + 86400000 * 7).toISOString();
+      const endRaw = p.endDate || new Date(Date.now() + 86400000 * 7 + 7200000).toISOString();
+      const startMs = Date.parse(startRaw);
+      const endMs = Date.parse(endRaw);
+      if (Number.isNaN(startMs) || Number.isNaN(endMs)) return sendJson(res, 400, { message: "Start and end dates must be valid dates" });
+      if (endMs < startMs) return sendJson(res, 400, { message: "End date must be after the start date" });
+      if (startMs < Date.now() - 5 * 60 * 1000) return sendJson(res, 400, { message: "Start date cannot be in the past" });
+      // Organizer display name comes from the account profile, not the
+      // request body — previously any approved organizer could post an
+      // event displaying as "Posted by" another organizer or brand.
+      let organizerName = "Community Organizer";
+      try {
+        const profile = await loadUserByEmail(session.email);
+        if (profile && typeof profile.data?.name === "string" && profile.data.name.trim()) {
+          organizerName = profile.data.name.trim().slice(0, 80);
+        } else if (p.organizer && typeof p.organizer.name === "string" && p.organizer.name.trim()) {
+          organizerName = p.organizer.name.trim().slice(0, 80);
+        }
+      } catch { /* profile lookup failure falls back to the body name */ }
       const event = {
         id, title, slug: p.slug || slugify(title),
-        summary: p.summary || (p.description ? String(p.description).slice(0, 140) : "Local community gathering."),
-        description: p.description || "", category: p.category || "Food & Community",
-        coverImage: p.coverImage || "", startDate: p.startDate || new Date(Date.now() + 86400000 * 7).toISOString(),
-        endDate: p.endDate || new Date(Date.now() + 86400000 * 7 + 7200000).toISOString(),
-        venueName: p.venueName || "Community Hall", address: p.address || "100 Main Street",
+        summary: p.summary || (description ? description.slice(0, 140) : "Local community gathering."),
+        description, category: p.category || "Food & Community",
+        coverImage: p.coverImage || "", startDate: startRaw,
+        endDate: endRaw,
+        venueName, address: typeof p.address === "string" ? p.address.slice(0, 300) : "100 Main Street",
         neighborhood: p.state ? (p.city || "") : "", city: p.city || "Metro City",
         state: p.state || undefined, country: p.country || undefined,
         // Ownership is forced from the session, never from the body.
         createdByEmail: session.email,
-        price: Number(p.price) || 0, upiId: p.upiId || undefined,
+        price, upiId: p.upiId || undefined,
         requireAttendeeDetails: p.requireAttendeeDetails ?? true,
-        capacity: Number(p.capacity) || 50, registeredCount: 0, status: "published",
+        capacity, registeredCount: 0, status: "published",
         organizer: {
-          ...(p.organizer || { id: "org-community", name: "Community Organizer", slug: "community-organizer", avatar: "", bio: "Community organizer.", location: "Metro City", eventsCount: 0, totalAttendeesServed: 0 }),
+          ...(p.organizer || { id: "org-community", name: organizerName, slug: "community-organizer", avatar: "", bio: "Community organizer.", location: "Metro City", eventsCount: 0, totalAttendeesServed: 0 }),
+          name: organizerName,
           email: session.email,
         },
-        tags: Array.isArray(p.tags) && p.tags.length > 0 ? p.tags : ["Local", "Community"],
+        tags: Array.isArray(p.tags) && p.tags.length > 0 ? p.tags.slice(0, 10).map((t: any) => String(t).slice(0, 40)) : ["Local", "Community"],
         isFeatured: false,
       };
       const supa = await fetch(supabaseBase() + "/rest/v1/events", {
         method: "POST", headers: supabaseHeaders(), body: JSON.stringify([{ id, data: event }]),
       });
-      const rows = await supa.json().catch(() => null);
       if (!supa.ok) {
-        const detail = rows && rows.message ? rows.message : "Supabase insert failed";
-        return sendJson(res, 502, { message: "Could not save shared event: " + detail });
+        try { console.error("Events POST failed:", supa.status); } catch {}
+        return sendJson(res, 502, { message: "Could not save shared event" });
       }
       return sendJson(res, 201, stripEventPublic(event));
     } catch (err: any) {
-      return sendJson(res, 502, { message: "Could not save shared event: " + (err?.message || "unknown error") });
+      try { console.error("Events POST failed:", err?.message || err); } catch {}
+      return sendJson(res, 502, { message: "Could not save shared event" });
     }
   }
 
@@ -610,6 +739,10 @@ export default async function handler(req: any, res: any) {
     try {
       const session = await verifySession(req);
       if (!session) return sendJson(res, 401, { message: "Sign in required" });
+      const rlPatch = await checkRateLimit(`events:patch:${session.email}`, 60, 60 * 60 * 1000);
+      if (!rlPatch.allowed && !rlPatch.tableMissing) {
+        return sendJson(res, 429, { message: "Too many event updates. Try again shortly." }, { "Retry-After": String(rlPatch.retryAfter) });
+      }
       const singleId = firstQuery(req.query, "id");
       if (!singleId) return sendJson(res, 400, { message: "Missing event id" });
       const existing = await fetchEvent(singleId);
@@ -624,29 +757,68 @@ export default async function handler(req: any, res: any) {
       }
       const statusOnly = keys.length > 0 && keys.every((k) => k === "status");
       if (statusOnly) {
-        if (!mayManageEvent(existing, session.email)) return sendJson(res, 403, { message: "Only the event owner or an admin can change status." });
+        // Status changes also require STILL-approved management.
+        if (!(await mayManageEventActive(existing, session.email))) return sendJson(res, 403, { message: "Only the event owner or an admin can change status." });
       } else {
         // Detail edits: owner only (admins explicitly cannot edit
-        // another organiser's details, per the original matrix).
-        if (!isEventOwner(existing, session.email)) return sendJson(res, 403, { message: "You can only edit your own events." });
+        // another organiser's details, per the original matrix), and
+        // the owner must still be approved.
+        if (!isEventOwner(existing, session.email) || !(await isApprovedOrganizer(session.email))) return sendJson(res, 403, { message: "You can only edit your own events." });
+      }
+      // Validate edits (previously any capacity/price/date passed):
+      // capacity can never drop below the confirmed count, prices can
+      // never go negative, and dates must stay valid and ordered. A
+      // future event cannot be moved into the past; an already-past
+      // event can still have its other details fixed.
+      if (updates.title !== undefined) {
+        if (typeof updates.title !== "string" || !updates.title.trim()) return sendJson(res, 400, { message: "Title is required" });
+        if (updates.title.trim().length > 150) return sendJson(res, 400, { message: "Title must be 150 characters or fewer" });
+      }
+      if (updates.description !== undefined && typeof updates.description === "string" && updates.description.length > 5000) return sendJson(res, 400, { message: "Description must be 5000 characters or fewer" });
+      if (updates.venueName !== undefined && typeof updates.venueName === "string" && updates.venueName.length > 200) return sendJson(res, 400, { message: "Venue name must be 200 characters or fewer" });
+      if (updates.price !== undefined) {
+        const pr = Number(updates.price);
+        if (!Number.isFinite(pr) || pr < 0) return sendJson(res, 400, { message: "Price must be zero or more" });
+      }
+      if (updates.capacity !== undefined) {
+        const cap = Number(updates.capacity);
+        if (!Number.isInteger(cap) || cap < 1 || cap > 10000) return sendJson(res, 400, { message: "Capacity must be between 1 and 10000" });
+        if (cap < Number(existing.registeredCount || 0)) return sendJson(res, 409, { message: "Capacity cannot be below the current registrations" });
+      }
+      const newStart = updates.startDate !== undefined ? Date.parse(updates.startDate) : Date.parse(existing.startDate);
+      const newEnd = updates.endDate !== undefined ? Date.parse(updates.endDate) : Date.parse(existing.endDate);
+      if ((updates.startDate !== undefined || updates.endDate !== undefined)) {
+        if (Number.isNaN(newStart) || Number.isNaN(newEnd)) return sendJson(res, 400, { message: "Start and end dates must be valid dates" });
+        if (newEnd < newStart) return sendJson(res, 400, { message: "End date must be after the start date" });
+        const existingStartMs = Date.parse(existing.startDate);
+        if (updates.startDate !== undefined && !Number.isNaN(existingStartMs) && existingStartMs >= Date.now() && newStart < Date.now() - 5 * 60 * 1000) {
+          return sendJson(res, 400, { message: "Start date cannot be moved into the past" });
+        }
       }
       const { createdByEmail: _c, registeredCount: _r, isFeatured: _f, ...safeUpdates } = updates;
       if (safeUpdates.organizer && typeof safeUpdates.organizer === "object") {
-        safeUpdates.organizer = { ...safeUpdates.organizer, email: existing.organizer?.email || existing.createdByEmail };
+        const orgName = typeof safeUpdates.organizer.name === "string" && safeUpdates.organizer.name.trim()
+          ? safeUpdates.organizer.name.trim().slice(0, 80)
+          : (existing.organizer?.name || "Community Organizer");
+        safeUpdates.organizer = { ...safeUpdates.organizer, name: orgName, email: existing.organizer?.email || existing.createdByEmail };
       }
-      const merged = { ...existing, ...safeUpdates, id: existing.id, createdByEmail: existing.createdByEmail, registeredCount: existing.registeredCount, isFeatured: existing.isFeatured };
+      // isFeatured is admin-only (server-enforced): previously PATCH
+      // stripped it always, so the Home featured section could never
+      // gain a new event; now an admin may set it, nobody else can.
+      const nextFeatured = isAdmin(session.email) && typeof updates.isFeatured === "boolean" ? updates.isFeatured : existing.isFeatured;
+      const merged = { ...existing, ...safeUpdates, id: existing.id, createdByEmail: existing.createdByEmail, registeredCount: existing.registeredCount, isFeatured: nextFeatured };
       const supa = await fetch(
         supabaseBase() + "/rest/v1/events?id=eq." + encodeURIComponent(singleId),
         { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: merged }) },
       );
       if (!supa.ok) {
-        const rows = await supa.json().catch(() => null);
-        const detail = rows && rows.message ? rows.message : "Supabase update failed";
-        return sendJson(res, 502, { message: "Could not update shared event: " + detail });
+        try { console.error("Events PATCH failed:", supa.status); } catch {}
+        return sendJson(res, 502, { message: "Could not update shared event" });
       }
       return sendJson(res, 200, stripEventPublic(merged));
     } catch (err: any) {
-      return sendJson(res, 502, { message: "Could not update shared event: " + (err?.message || "unknown error") });
+      try { console.error("Events PATCH failed:", err?.message || err); } catch {}
+      return sendJson(res, 502, { message: "Could not update shared event" });
     }
   }
 
@@ -654,17 +826,65 @@ export default async function handler(req: any, res: any) {
     try {
       const session = await verifySession(req);
       if (!session) return sendJson(res, 401, { message: "Sign in required" });
+      const rlDel = await checkRateLimit(`events:delete:${session.email}`, 20, 60 * 60 * 1000);
+      if (!rlDel.allowed && !rlDel.tableMissing) {
+        return sendJson(res, 429, { message: "Too many event deletions. Try again shortly." }, { "Retry-After": String(rlDel.retryAfter) });
+      }
       const singleId = firstQuery(req.query, "id");
       if (!singleId) return sendJson(res, 400, { message: "Missing event id" });
       const existing = await fetchEvent(singleId);
       if (!existing) return sendJson(res, 404, { message: "Event not found" });
-      if (!mayManageEvent(existing, session.email)) return sendJson(res, 403, { message: "Only the event owner or an admin can delete an event." });
+      // Deleting also requires STILL-approved management.
+      if (!(await mayManageEventActive(existing, session.email))) return sendJson(res, 403, { message: "Only the event owner or an admin can delete an event." });
+      // Deleting used to orphan every registration: attendees kept
+      // valid-looking passes for an event that 404s, paid attendees
+      // had no refund signal, and nobody was told. Now the delete
+      // cancels all active registrations, refunds confirmed Razorpay
+      // passes, and emails every affected attendee (all best-effort
+      // except the event delete itself, which is last).
+      const regRes = await fetchJson(
+        `${supabaseBase()}/rest/v1/registrations?select=id,data&limit=1000`,
+        { headers: supabaseHeaders() },
+      );
+      const rows = regRes.ok && Array.isArray(regRes.body) ? regRes.body.map((r: any) => r.data).filter(Boolean) : [];
+      const affected = rows.filter((r: any) => r.eventId === singleId && (r.status === "pending" || r.status === "confirmed"));
+      let cancelledCount = 0;
+      let refundedCount = 0;
+      const refundFailed: string[] = [];
+      const emailed = new Set<string>();
+      let emailedCount = 0;
+      for (const r of affected) {
+        const next: any = { ...r, status: "cancelled", cancelledReason: "event_deleted" };
+        if (r.status === "confirmed" && r.paymentMethod === "razorpay" && r.razorpayPaymentId && !r.refundId) {
+          const rf = await refundRazorpayPayment(r.razorpayPaymentId);
+          if (rf.ok) {
+            next.refundStatus = "initiated";
+            next.refundId = rf.refundId;
+            refundedCount++;
+          } else {
+            next.refundStatus = "failed";
+            refundFailed.push(r.razorpayPaymentId);
+          }
+        }
+        const patched = await fetchJson(
+          `${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(r.id)}`,
+          { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: next }) },
+        );
+        if (patched.ok) cancelledCount++;
+        if (r.userEmail && !emailed.has(norm(r.userEmail))) {
+          emailed.add(norm(r.userEmail));
+          try {
+            if (await sendEventCancelledEmail(r.userEmail, existing, next.refundStatus === "initiated")) emailedCount++;
+          } catch { /* best-effort */ }
+        }
+      }
       await fetch(supabaseBase() + "/rest/v1/events?id=eq." + encodeURIComponent(singleId), {
         method: "DELETE", headers: supabaseHeaders(),
       });
-      return sendJson(res, 200, { success: true });
+      return sendJson(res, 200, { success: true, cancelledCount, refundedCount, refundFailed, emailedCount });
     } catch (err: any) {
-      return sendJson(res, 502, { message: "Could not delete shared event: " + (err?.message || "unknown error") });
+      try { console.error("Events DELETE failed:", err?.message || err); } catch {}
+      return sendJson(res, 502, { message: "Could not delete shared event" });
     }
   }
 

@@ -21,6 +21,13 @@
 //   is created with receipt = registrationId, and verify requires the
 //   stored razorpayOrderId on that registration to equal the order being
 //   verified. Cross-registration verification is refused.
+// - AUTH (audit fix): both actions require a valid locora_session and
+//   only the registration's owner may call them. Previously neither
+//   endpoint verified a session at all, and registration ids were
+//   predictable (reg-<timestamp>), so anyone could probe a victim's
+//   pending row, reuse its already-paid order, and take its ticket code
+//   through the recovery path without paying. Owner checks return 404
+//   (not 403) so a stranger cannot even tell whether an id exists.
 // - The browser checkout success callback alone never issues a pass.
 //   verify requires either (a) a valid HMAC-SHA256 signature
 //   (order_id + "|" + payment_id, keyed with RAZORPAY_KEY_SECRET, via
@@ -28,9 +35,16 @@
 //   list from Razorpay itself, showing a captured payment. Both paths
 //   then fetch the payment from Razorpay (secret-authenticated) and
 //   check status === 'captured', order_id, and amount.
+// - The amount truth is the Razorpay ORDER, not the live event price:
+//   verify compares the captured amount against the order's own amount
+//   (and against the amountPaise snapshot stored on the registration at
+//   order creation, when one exists). An organizer editing the event
+//   price after an order exists can no longer orphan a captured payment.
 // - Idempotent: confirming an already-confirmed registration with the
 //   same payment returns success without reissuing a ticket or bumping
-//   the event count twice.
+//   the event count twice. Confirmation itself is compare-and-swap
+//   (the row must still be pending at write time), so two parallel
+//   verifies cannot issue two different ticket codes for one pass.
 // - Secrets come only from Vercel env vars: RAZORPAY_KEY_ID (public,
 //   returned to the browser with the order so no VITE_ build var is
 //   needed) and RAZORPAY_KEY_SECRET (server only, never returned, never
@@ -99,8 +113,21 @@ function esc(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+// Ticket codes were LOC-<1000..9999>-TK via Math.random: only 9,000
+// values, so collisions across events were a matter of time, and the
+// client generated its own codes too. Now: 6 crypto-random characters
+// (no lookalikes), server-generated only, ~2 billion values.
 function newTicketCode(): string {
-  return `LOC-${Math.floor(1000 + Math.random() * 9000)}-TK`;
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let out = "";
+  try {
+    const bytes = new Uint8Array(6);
+    (globalThis as any).crypto.getRandomValues(bytes);
+    for (const b of bytes) out += chars[b % chars.length];
+  } catch {
+    for (let i = 0; i < 6; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return `LOC-${out}-TK`;
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -127,6 +154,161 @@ function ctEqual(a: string, b: string): boolean {
   let diff = 0;
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
+}
+
+function norm(email: string): string {
+  return (email || "").trim().toLowerCase();
+}
+
+function isEmail(s: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s || "");
+}
+
+function parseCookies(req: any): Record<string, string> {
+  const out: Record<string, string> = {};
+  const header = req.headers?.cookie || "";
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx > -1) out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
+  }
+  return out;
+}
+
+// Client IP for rate limiting. The FIRST x-forwarded-for entry is
+// client-controlled (an attacker can spoof it and rotate it to dodge
+// per-IP limits); Vercel appends the real connecting IP last, so the
+// LAST entry is the trustworthy one. Single-entry headers are unaffected.
+function getClientIp(req: any): string {
+  const fwd = req.headers?.["x-forwarded-for"] || "";
+  if (typeof fwd === "string" && fwd.trim()) {
+    const parts = fwd.split(",").map((s: string) => s.trim()).filter(Boolean);
+    if (parts.length) return parts[parts.length - 1];
+  }
+  return req.headers?.["x-real-ip"] || "unknown";
+}
+
+function bytesToB64url(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+function b64urlToBytes(text: string): Uint8Array {
+  const b64 = text.replace(/-/g, "+").replace(/_/g, "/") + "==".slice(0, (4 - (text.length % 4)) % 4);
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function b64urlDecode(text: string): string {
+  return new TextDecoder().decode(b64urlToBytes(text));
+}
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await (globalThis as any).crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return bytesToHex(new Uint8Array(digest));
+}
+async function hmacB64url(secret: string, data: string): Promise<string> {
+  const key = await (globalThis as any).crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await (globalThis as any).crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
+  return bytesToB64url(new Uint8Array(sig));
+}
+
+async function loadUserByEmail(email: string): Promise<{ id: string; data: any } | null> {
+  const { ok, body } = await fetchJson(
+    `${supabaseBase()}/rest/v1/locora_users?select=id,data&data->>email=eq.${encodeURIComponent(norm(email))}`,
+    { headers: supabaseHeaders() },
+  );
+  if (!ok || !Array.isArray(body) || body.length === 0) return null;
+  return body[0];
+}
+
+// Same session verification as api/events.ts / api/auth.ts (HMAC
+// locora_session cookie, expiry, revocation list, sessionVersion).
+// Returns null on any failure — callers treat null as unauthenticated.
+async function verifySession(req: any): Promise<{ email: string } | null> {
+  try {
+    const secret = getEnv("SESSION_SECRET");
+    if (!secret) return null;
+    const token = parseCookies(req).locora_session;
+    if (!token) return null;
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const expected = await hmacB64url(secret, parts[0] + "." + parts[1]);
+    if (!ctEqual(expected, parts[2])) return null;
+    const payload = JSON.parse(b64urlDecode(parts[1]));
+    if (!payload.email || !isEmail(payload.email) || !payload.exp || payload.exp * 1000 < Date.now()) return null;
+    const email = norm(payload.email);
+    try {
+      const tokenHash = await sha256Hex(token);
+      const rev = await fetchJson(`${supabaseBase()}/rest/v1/revoked_tokens?id=eq.${encodeURIComponent(tokenHash)}&select=data`, { headers: supabaseHeaders() });
+      if (rev.ok && Array.isArray(rev.body) && rev.body.length > 0) {
+        const exp = rev.body[0].data?.expiresAt;
+        if (!exp || new Date(exp).getTime() > Date.now()) return null;
+      }
+    } catch {}
+    try {
+      const userRow = await loadUserByEmail(email);
+      if (userRow && userRow.data && typeof userRow.data.sessionVersion === "number") {
+        const stored = userRow.data.sessionVersion;
+        if (payload.v === undefined) {
+          if (stored > 0) return null;
+        } else if (payload.v !== stored) {
+          return null;
+        }
+      }
+    } catch {}
+    return { email };
+  } catch {
+    return null;
+  }
+}
+
+// Supabase-backed rate limit (table rate_limits). If the table is
+// missing, allow rather than bricking payments — the limit takes
+// effect once the table exists (see SECURITY_FIX_SETUP.md).
+async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
+  try {
+    if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
+    const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
+    const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
+    if (!ok) {
+      if (status === 404 || status === 400) return { allowed: false, retryAfter: 0, tableMissing: true };
+      return { allowed: true, retryAfter: 0, tableMissing: false };
+    }
+    const now = Date.now();
+    const row = Array.isArray(body) && body.length > 0 ? body[0].data : null;
+    const windowStart = row && typeof row.windowStart === "number" ? row.windowStart : 0;
+    const count = row && typeof row.count === "number" ? row.count : 0;
+    if (windowStart && now - windowStart < windowMs && count >= limit) {
+      return { allowed: false, retryAfter: Math.ceil((windowStart + windowMs - now) / 1000), tableMissing: false };
+    }
+    const fresh = !windowStart || now - windowStart >= windowMs;
+    const next = { count: fresh ? 1 : count + 1, windowStart: fresh ? now : windowStart };
+    await fetchJson(`${supabaseBase()}/rest/v1/rate_limits`, {
+      method: "POST",
+      headers: { ...supabaseHeaders(), Prefer: "resolution=merge-duplicates,return=representation" },
+      body: JSON.stringify({ id: key, data: next }),
+    });
+    return { allowed: true, retryAfter: 0, tableMissing: false };
+  } catch {
+    return { allowed: true, retryAfter: 0, tableMissing: false };
+  }
+}
+
+// Full refund of a captured Razorpay payment. Used when a payment was
+// captured but no pass can be issued (event full, event cancelled or
+// ended): money must not sit captured with nothing to show for it.
+async function refundRazorpayPayment(paymentId: string): Promise<{ ok: boolean; refundId?: string }> {
+  try {
+    const res = await fetchJson(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}/refund`, {
+      method: "POST",
+      headers: { Authorization: razorpayAuthHeader(), "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (res.ok && res.body?.id) return { ok: true, refundId: res.body.id };
+    return { ok: false };
+  } catch {
+    return { ok: false };
+  }
 }
 
 function razorpayAuthHeader(): string {
@@ -168,10 +350,42 @@ async function saveRegistration(reg: any): Promise<boolean> {
   return ok;
 }
 
+// Compare-and-swap save: applies ONLY if the row is still pending at
+// write time. Two parallel verifies of one payment: the first wins,
+// the second sees an empty result and must take the idempotent path
+// instead of minting a second ticket code. If this PostgREST version
+// rejects the jsonb filter, the caller falls back to a re-read +
+// plain save (see handleVerifyPayment) rather than failing the payment.
+async function saveRegistrationIfPending(reg: any): Promise<boolean> {
+  const { ok, body } = await fetchJson(
+    `${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(reg.id)}&data->>status=eq.pending`,
+    { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: reg }) },
+  );
+  return ok && Array.isArray(body) && body.length > 0;
+}
+
 async function bumpEventCount(eventId: string, delta: number): Promise<void> {
+  // Atomic path first: the adjust_event_count RPC (see
+  // SUPABASE_RPC_SETUP.md) increments only when a seat is actually
+  // free and never lets the count pass capacity, in one statement —
+  // the only real cure for last-seat races. Until that function is
+  // created in Supabase, fall back to a capped read-modify-write:
+  // the count can never exceed capacity or drop below zero, though a
+  // perfectly simultaneous pair of confirms can still oversell by one
+  // pass in that fallback mode.
+  try {
+    const rpc = await fetchJson(`${supabaseBase()}/rest/v1/rpc/adjust_event_count`, {
+      method: "POST",
+      headers: supabaseHeaders(),
+      body: JSON.stringify({ p_event_id: eventId, p_delta: delta }),
+    });
+    if (rpc.ok) return;
+  } catch { /* fall through to capped bump */ }
   const event = await loadEvent(eventId);
   if (!event) return;
-  const next = Math.max(0, Number(event.registeredCount || 0) + delta);
+  const capacity = Number(event.capacity || 0);
+  const cap = capacity > 0 ? capacity : Number.MAX_SAFE_INTEGER;
+  const next = Math.min(cap, Math.max(0, Number(event.registeredCount || 0) + delta));
   if (next === Number(event.registeredCount || 0)) return;
   await fetchJson(
     `${supabaseBase()}/rest/v1/events?id=eq.${encodeURIComponent(eventId)}`,
@@ -194,7 +408,11 @@ async function sendConfirmationEmail(reg: any, event: any, req: any): Promise<bo
     const host = req.headers?.["x-forwarded-host"] || req.headers?.host || "locora-hyperlocal.vercel.app";
     const link = `https://${host}/my-registrations`;
     const title = event?.title || "your event";
-    const amount = typeof event?.price === "number" ? `₹${event.price}` : "";
+    // The amount actually captured (snapshot on the registration), not
+    // the live event price — the price may have changed since payment.
+    const amount = typeof reg.amountPaise === "number"
+      ? `₹${(reg.amountPaise / 100).toFixed(2).replace(/\.00$/, "")}`
+      : (typeof event?.price === "number" ? `₹${event.price}` : "");
     await transporter.sendMail({
       from: user,
       to: reg.userEmail,
@@ -209,6 +427,16 @@ async function sendConfirmationEmail(reg: any, event: any, req: any): Promise<bo
 }
 
 async function handleCreateOrder(req: any, res: any): Promise<void> {
+  const session = await verifySession(req);
+  if (!session) {
+    sendJson(res, 401, { message: "Sign in required" });
+    return;
+  }
+  const rl = await checkRateLimit(`payments:create-order:${session.email}`, 30, 10 * 60 * 1000);
+  if (!rl.allowed && !rl.tableMissing) {
+    sendJson(res, 429, { message: "Too many payment attempts. Try again shortly." }, { "Retry-After": String(rl.retryAfter) });
+    return;
+  }
   const body = await readBody(req);
   const registrationId = typeof body.registrationId === "string" ? body.registrationId.trim() : "";
   if (!registrationId) {
@@ -216,7 +444,9 @@ async function handleCreateOrder(req: any, res: any): Promise<void> {
     return;
   }
   const reg = await loadRegistration(registrationId);
-  if (!reg) {
+  // Owner-only, and deliberately 404 (not 403) for strangers so the
+  // endpoint cannot be used to probe whether a registration id exists.
+  if (!reg || norm(reg.userEmail) !== session.email) {
     sendJson(res, 404, { message: "Registration not found" });
     return;
   }
@@ -231,6 +461,17 @@ async function handleCreateOrder(req: any, res: any): Promise<void> {
   const event = await loadEvent(reg.eventId);
   if (!event) {
     sendJson(res, 404, { message: "Event not found" });
+    return;
+  }
+  // No orders for unpublished, cancelled, or ended events. (Status is
+  // only enforced when present, so legacy rows without a status field
+  // keep working.)
+  if (event.status && event.status !== "published") {
+    sendJson(res, 409, { message: "This event is not open for payments" });
+    return;
+  }
+  if (event.endDate && !Number.isNaN(Date.parse(event.endDate)) && new Date(event.endDate).getTime() < Date.now()) {
+    sendJson(res, 409, { message: "This event has ended" });
     return;
   }
   const price = Number(event.price);
@@ -301,10 +542,13 @@ async function handleCreateOrder(req: any, res: any): Promise<void> {
   }
   const order = created.body;
   // Store the order on the pending row so verify can bind the payment
-  // to this registration. Failure to store must not lose the order:
-  // the frontend still gets it, but verify will refuse it until the
-  // row carries it — so a store failure is a 500, not a silent gap.
-  const stored = await saveRegistration({ ...reg, razorpayOrderId: order.id, paymentMethod: "razorpay" });
+  // to this registration, plus the amount snapshot: verify compares
+  // against this snapshot and the order itself, never the live event
+  // price (which the organizer may edit after the order exists).
+  // Failure to store must not lose the order: the frontend still gets
+  // it, but verify will refuse it until the row carries it — so a
+  // store failure is a 500, not a silent gap.
+  const stored = await saveRegistration({ ...reg, razorpayOrderId: order.id, paymentMethod: "razorpay", amountPaise: order.amount, currency: "INR" });
   if (!stored) {
     sendJson(res, 500, { message: "Failed to store payment order" });
     return;
@@ -329,8 +573,19 @@ async function handleVerifyPayment(req: any, res: any): Promise<void> {
     sendJson(res, 400, { message: "razorpay_signature is required" });
     return;
   }
+  const session = await verifySession(req);
+  if (!session) {
+    sendJson(res, 401, { message: "Sign in required" });
+    return;
+  }
+  const rl = await checkRateLimit(`payments:verify:${session.email}`, 60, 10 * 60 * 1000);
+  if (!rl.allowed && !rl.tableMissing) {
+    sendJson(res, 429, { message: "Too many payment verifications. Try again shortly." }, { "Retry-After": String(rl.retryAfter) });
+    return;
+  }
   const reg = await loadRegistration(registrationId);
-  if (!reg) {
+  // Owner-only, 404 (not 403) for strangers — see handleCreateOrder.
+  if (!reg || norm(reg.userEmail) !== session.email) {
     sendJson(res, 404, { message: "Registration not found" });
     return;
   }
@@ -358,18 +613,26 @@ async function handleVerifyPayment(req: any, res: any): Promise<void> {
     sendJson(res, 404, { message: "Event not found" });
     return;
   }
-  const expectedPaise = Math.round(Number(event.price) * 100);
   const headers = { Authorization: razorpayAuthHeader() };
 
-  // The Razorpay order itself must still match the current price.
+  // The Razorpay order itself is the amount truth — NOT the live event
+  // price, which the organizer may have edited after the order was
+  // created (that used to orphan captured payments forever). A snapshot
+  // stored at order creation must also match when one exists, so a
+  // swapped order cannot be substituted for the real one.
   const orderRes = await fetchJson(`https://api.razorpay.com/v1/orders/${encodeURIComponent(orderId)}`, { headers });
   if (!orderRes.ok || !orderRes.body) {
     if (orderRes.status === 401) { sendJson(res, 401, { message: "Razorpay authentication failed" }); return; }
     sendJson(res, 500, { message: "Failed to verify payment order" });
     return;
   }
-  if (orderRes.body.amount !== expectedPaise || orderRes.body.currency !== "INR") {
-    sendJson(res, 400, { message: "Payment amount does not match the event price" });
+  const orderAmount = Number(orderRes.body.amount);
+  if (!Number.isFinite(orderAmount) || orderAmount <= 0 || orderRes.body.currency !== "INR") {
+    sendJson(res, 400, { message: "Payment order is invalid" });
+    return;
+  }
+  if (typeof reg.amountPaise === "number" && reg.amountPaise !== orderAmount) {
+    sendJson(res, 400, { message: "Payment amount does not match the order" });
     return;
   }
 
@@ -414,34 +677,82 @@ async function handleVerifyPayment(req: any, res: any): Promise<void> {
     }
   }
 
-  if (!captured || captured.status !== "captured" || captured.order_id !== orderId || Number(captured.amount) !== expectedPaise) {
-    sendJson(res, 400, { message: "Payment is not captured for the full event price" });
+  if (!captured || captured.status !== "captured" || captured.order_id !== orderId || Number(captured.amount) !== orderAmount) {
+    sendJson(res, 400, { message: "Payment is not captured for the full order amount" });
     return;
   }
-  // Same capacity guard as organizer approval: a no-spot pending row
-  // takes a slot only on confirmation, and only if one is free. If the
-  // event filled up after payment, the pass is NOT issued here — the
-  // organizer must refund from the Razorpay dashboard (auto-refund is
-  // a follow-up, not silently attempted).
-  if (reg.holdsSpot === false && Number(event.registeredCount || 0) >= Number(event.capacity || 0)) {
-    sendJson(res, 409, { message: "This event is now at full capacity. Please contact the organizer for a refund." });
+  // A refunded (even partially) payment must not issue a pass.
+  if (Number(captured.amount_refunded || 0) > 0) {
+    sendJson(res, 400, { message: "This payment was refunded and cannot issue a pass" });
+    return;
+  }
+  // Dead events and full events never issue passes. The money is
+  // refunded first when possible; only if the refund call itself fails
+  // does the row stay pending with a contact-the-organizer message, so
+  // the payment stays visible in the organizer's queue instead of
+  // vanishing with the money captured.
+  const eventDead = (event.status && event.status !== "published") ||
+    (event.endDate && !Number.isNaN(Date.parse(event.endDate)) && new Date(event.endDate).getTime() < Date.now());
+  const eventFull = reg.holdsSpot === false && Number(event.registeredCount || 0) >= Number(event.capacity || 0);
+  if (eventDead || eventFull) {
+    const rf = await refundRazorpayPayment(captured.id);
+    if (rf.ok) {
+      await saveRegistration({ ...reg, status: "cancelled", refundStatus: "initiated", refundId: rf.refundId, razorpayPaymentId: captured.id, razorpayOrderId: orderId, amountPaise: captured.amount, currency: "INR" });
+      sendJson(res, 409, { message: eventDead ? "This event is no longer open. Your payment has been refunded." : "This event is now at full capacity. Your payment has been refunded." });
+      return;
+    }
+    sendJson(res, 409, { message: "This event cannot issue a pass right now. Your payment was captured — please contact the organizer for a refund." });
+    return;
+  }
+  // Re-read + compare-and-swap: only a still-pending row may confirm,
+  // so two parallel verifies cannot mint two ticket codes for one pass.
+  const fresh = await loadRegistration(registrationId);
+  if (!fresh) {
+    sendJson(res, 404, { message: "Registration not found" });
+    return;
+  }
+  if (fresh.status === "confirmed") {
+    if (fresh.razorpayPaymentId && fresh.razorpayPaymentId === captured.id) {
+      sendJson(res, 200, { success: true, ticketCode: fresh.ticketCode, alreadyConfirmed: true, registrationId: reg.id, paymentId: captured.id });
+      return;
+    }
+    sendJson(res, 409, { message: "This registration is already confirmed with a different payment" });
+    return;
+  }
+  if (fresh.status !== "pending") {
+    sendJson(res, 409, { message: "This registration is not pending payment" });
     return;
   }
   const confirmed: any = {
-    ...reg,
+    ...fresh,
     status: "confirmed",
-    ticketCode: reg.ticketCode || newTicketCode(),
+    ticketCode: fresh.ticketCode || newTicketCode(),
     paymentMethod: "razorpay",
     razorpayPaymentId: captured.id,
     razorpayOrderId: orderId,
+    amountPaise: captured.amount,
+    currency: "INR",
+    paidAt: new Date().toISOString(),
   };
-  const saved = await saveRegistration(confirmed);
+  let saved = await saveRegistrationIfPending(confirmed);
   if (!saved) {
-    sendJson(res, 500, { message: "Failed to confirm registration" });
-    return;
+    // Either lost a race (the parallel verify confirmed first) or the
+    // CAS filter is unsupported here: re-read to tell which.
+    const again = await loadRegistration(registrationId);
+    if (again && again.status === "confirmed" && again.razorpayPaymentId === captured.id) {
+      sendJson(res, 200, { success: true, ticketCode: again.ticketCode, alreadyConfirmed: true, registrationId: reg.id, paymentId: captured.id });
+      return;
+    }
+    if (again && again.status === "pending") {
+      saved = await saveRegistration(confirmed);
+    }
+    if (!saved) {
+      sendJson(res, 409, { message: "This registration was already processed" });
+      return;
+    }
   }
   try {
-    if (reg.holdsSpot === false) await bumpEventCount(reg.eventId, 1);
+    if (fresh.holdsSpot === false) await bumpEventCount(reg.eventId, 1);
   } catch { /* count bump failure must not undo a paid confirmation */ }
   try { await sendConfirmationEmail(confirmed, event, req); } catch { /* best-effort */ }
   sendJson(res, 200, { success: true, ticketCode: confirmed.ticketCode, registrationId: reg.id, paymentId: captured.id });
@@ -461,6 +772,16 @@ export default async function handler(req: any, res: any): Promise<void> {
       sendJson(res, 503, { message: "Razorpay is not configured" });
       return;
     }
+    // Warn (Vercel logs only, never to the client) if production is
+    // running test-mode keys — test payments verify as captured, so a
+    // test key in production would issue real passes for fake money.
+    try {
+      const vercelEnv = getEnv("VERCEL_ENV");
+      const keyId = getEnv("RAZORPAY_KEY_ID");
+      if (vercelEnv === "production" && keyId.startsWith("rzp_test_")) {
+        console.warn("Razorpay test-mode key in production environment");
+      }
+    } catch { /* logging must never break payments */ }
     const url = new URL(req.url || "/api/payments", "http://localhost");
     const action = url.searchParams.get("action") || "";
     if (action === "create-order") {
@@ -473,6 +794,8 @@ export default async function handler(req: any, res: any): Promise<void> {
     }
     sendJson(res, 400, { message: "Unknown payments action" });
   } catch (err) {
-    sendJson(res, 500, { message: err instanceof Error ? err.message : "Payments API failed" });
+    // Generic message to the client; the detail stays in server logs.
+    try { console.error("Payments API failed:", err instanceof Error ? err.message : err); } catch {}
+    sendJson(res, 500, { message: "Payments API failed" });
   }
 }

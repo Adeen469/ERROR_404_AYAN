@@ -74,8 +74,14 @@ export function parseCookies(req: any): Record<string, string> {
 }
 
 export function getClientIp(req: any): string {
+  // Last entry, not first: the first x-forwarded-for entry is
+  // client-controlled and trivially spoofed to dodge per-IP limits;
+  // Vercel appends the real connecting IP last.
   const fwd = req.headers?.["x-forwarded-for"] || "";
-  if (typeof fwd === "string" && fwd.trim()) return fwd.split(",")[0].trim();
+  if (typeof fwd === "string" && fwd.trim()) {
+    const parts = fwd.split(",").map((s: string) => s.trim()).filter(Boolean);
+    if (parts.length) return parts[parts.length - 1];
+  }
   return req.headers?.["x-real-ip"] || "unknown";
 }
 
@@ -415,8 +421,12 @@ async function handleLogin(req: any, res: any): Promise<void> {
     if (!isEmail(email) || !password) { sendJson(res, 401, { message: "Invalid credentials" }); return; }
     const rlIp = await checkRateLimit(`login:ip:${getClientIp(req)}`, 30, 60 * 60 * 1000);
     const rlEmail = await checkRateLimit(`login:email:${email}`, 10, 60 * 60 * 1000);
-    if (rlIp.tableMissing || rlEmail.tableMissing) { sendJson(res, 503, { message: "Sign-in is temporarily unavailable — rate limiting is not configured yet. See SECURITY_FIX_SETUP.md." }); return; }
-    if (!rlIp.allowed || !rlEmail.allowed) {
+    // A missing rate_limits table used to brick ALL sign-ins (503
+    // before the credential check). Now it only logs loudly and the
+    // sign-in proceeds — the limit takes effect once the table exists.
+    if (rlIp.tableMissing || rlEmail.tableMissing) {
+      try { console.warn("Rate limits unavailable during login — proceeding without limits; create the rate_limits table (see SECURITY_FIX_SETUP.md)"); } catch {}
+    } else if (!rlIp.allowed || !rlEmail.allowed) {
       sendJson(res, 429, { message: "Too many sign-in attempts. Try again later." }, { "Retry-After": String(Math.max(rlIp.retryAfter, rlEmail.retryAfter)) });
       return;
     }
@@ -453,10 +463,23 @@ async function handleSignup(req: any, res: any): Promise<void> {
     if (password.length < 6 || password.length > 128) { sendJson(res, 400, { message: "Password must be at least 6 characters" }); return; }
     if (isAdmin(email)) { sendJson(res, 403, { message: "Admin accounts sign in with Google, not with a local password." }); return; }
     const rl = await checkRateLimit(`signup:ip:${getClientIp(req)}`, 20, 60 * 60 * 1000);
-    if (rl.tableMissing) { sendJson(res, 503, { message: "Sign-up is temporarily unavailable — rate limiting is not configured yet. See SECURITY_FIX_SETUP.md." }); return; }
-    if (!rl.allowed) { sendJson(res, 429, { message: "Too many sign-ups. Try again later." }, { "Retry-After": String(rl.retryAfter) }); return; }
+    // Per-email limit too: the old per-IP-only limit was bypassable by
+    // rotating a spoofed X-Forwarded-For header, leaving mass account
+    // creation effectively unthrottled.
+    const rlEmail = await checkRateLimit(`signup:email:${email}`, 5, 60 * 60 * 1000);
+    if (rl.tableMissing || rlEmail.tableMissing) {
+      try { console.warn("Rate limits unavailable during sign-up — proceeding without limits; create the rate_limits table (see SECURITY_FIX_SETUP.md)"); } catch {}
+    } else if (!rl.allowed || !rlEmail.allowed) {
+      sendJson(res, 429, { message: "Too many sign-ups. Try again later." }, { "Retry-After": String(Math.max(rl.retryAfter, rlEmail.retryAfter)) });
+      return;
+    }
     const existing = await loadUserByEmail(email);
-    if (existing) { sendJson(res, 409, { message: "An account with this email already exists. Sign in instead." }); return; }
+    // Clearer recovery path: a squatted or forgotten local account
+    // previously just said "already exists". (Full email verification
+    // for local sign-ups is a separate, larger change — see the audit
+    // report — because it needs a verification table and mail flow and
+    // must not brick sign-ups if it misfires.)
+    if (existing) { sendJson(res, 409, { message: "An account with this email already exists. Sign in instead — or use 'Trouble signing in?' if you didn't create it." }); return; }
     const id = `usr-${Date.now()}`;
     const row = { id, data: { email, name, role: "attendee", authProvider: "local", passwordHash: await hashPassword(password), sessionVersion: 0, createdAt: new Date().toISOString() } };
     const { ok } = await fetchJson(`${supabaseBase()}/rest/v1/locora_users`, {
@@ -472,11 +495,33 @@ async function handleSignup(req: any, res: any): Promise<void> {
 
 async function handleLogout(req: any, res: any): Promise<void> {
   if (req.method !== "POST") { sendJson(res, 405, { message: "Method not allowed" }); return; }
+  // Previously the revocation result was silently ignored: when the
+  // revoked_tokens table was missing (or the insert failed), logout
+  // still reported success while the 7-day token stayed valid. Now the
+  // response says whether the token was actually revoked, and
+  // { everywhere: true } bumps sessionVersion so EVERY session for
+  // this account (all devices) stops working — the "sign out
+  // everywhere" that previously only a password reset could do.
+  let revoked = false;
+  let everywhere = false;
   try {
     const session = await verifySession(req);
-    if (session) await revokeSessionToken(req);
+    if (session) {
+      revoked = await revokeSessionToken(req);
+      const body = await readBody(req);
+      if (body && body.everywhere === true) {
+        const userRow = await loadUserByEmail(session.email);
+        if (userRow) {
+          const updated = { ...userRow.data, sessionVersion: typeof userRow.data.sessionVersion === "number" ? userRow.data.sessionVersion + 1 : 1 };
+          const up = await fetchJson(`${supabaseBase()}/rest/v1/locora_users?id=eq.${encodeURIComponent(userRow.id)}`, {
+            method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: updated }),
+          });
+          everywhere = up.ok;
+        }
+      }
+    }
   } catch {}
-  sendJson(res, 200, { ok: true }, { "Set-Cookie": clearSessionCookie(req) });
+  sendJson(res, 200, { ok: true, revoked, everywhere }, { "Set-Cookie": clearSessionCookie(req) });
 }
 
 async function handleReset(req: any, res: any): Promise<void> {
@@ -491,8 +536,9 @@ async function handleReset(req: any, res: any): Promise<void> {
       if (!isEmail(email)) { sendJson(res, 400, { message: "A valid email is required" }); return; }
       const rlIp = await checkRateLimit(`reset:req:ip:${getClientIp(req)}`, 20, 60 * 60 * 1000);
       const rlEmail = await checkRateLimit(`reset:req:email:${email}`, 5, 60 * 60 * 1000);
-      if (rlIp.tableMissing || rlEmail.tableMissing) { sendJson(res, 503, { message: "Password reset is temporarily unavailable — rate limiting is not configured yet. See SECURITY_FIX_SETUP.md." }); return; }
-      if (!rlIp.allowed || !rlEmail.allowed) {
+      if (rlIp.tableMissing || rlEmail.tableMissing) {
+        try { console.warn("Rate limits unavailable during password-reset request — proceeding without limits"); } catch {}
+      } else if (!rlIp.allowed || !rlEmail.allowed) {
         sendJson(res, 429, { message: "Too many reset requests. Try again later." }, { "Retry-After": String(Math.max(rlIp.retryAfter, rlEmail.retryAfter)) });
         return;
       }
@@ -517,8 +563,9 @@ async function handleReset(req: any, res: any): Promise<void> {
       const newPassword = String(body.newPassword || "");
       if (!token || newPassword.length < 6 || newPassword.length > 128) { sendJson(res, 400, { message: "A valid reset token and a password of at least 6 characters are required" }); return; }
       const rl = await checkRateLimit(`reset:confirm:ip:${getClientIp(req)}`, 20, 60 * 60 * 1000);
-      if (rl.tableMissing) { sendJson(res, 503, { message: "Password reset is temporarily unavailable — rate limiting is not configured yet." }); return; }
-      if (!rl.allowed) { sendJson(res, 429, { message: "Too many attempts. Try again later." }, { "Retry-After": String(rl.retryAfter) }); return; }
+      if (rl.tableMissing) {
+        try { console.warn("Rate limits unavailable during password-reset confirm — proceeding without limits"); } catch {}
+      } else if (!rl.allowed) { sendJson(res, 429, { message: "Too many attempts. Try again later." }, { "Retry-After": String(rl.retryAfter) }); return; }
       const tokenHash = await hashToken(token);
       const { ok, body: rows } = await fetchJson(
         `${supabaseBase()}/rest/v1/password_resets?select=id,data&data->>tokenHash=eq.${encodeURIComponent(tokenHash)}`,
