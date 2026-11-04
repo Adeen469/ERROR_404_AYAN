@@ -455,6 +455,9 @@ export function CreateEventPage() {
           <h2 className="font-editorial text-base font-bold text-[#1E2320] pb-2 border-b border-[#EBE7DF]">
             2. Cover Artwork
           </h2>
+          <p className="text-[11px] text-[#5F635D]">
+            Tip: hover over a cover for 1.8 seconds to preview it enlarged.
+          </p>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
             {PRESET_COVER_IMAGES.map((preset) => {
