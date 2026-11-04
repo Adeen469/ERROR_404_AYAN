@@ -1,0 +1,16 @@
+# Locora: Vercel Hobby allows at most 12 Serverless Functions per deployment.
+# The files below are excluded from deployment. They stay in the repo for
+# reference; delete them via GitHub web UI if desired.
+# Dead: calendar connect removed; calendar-service has no importers, so
+# nothing calls these endpoints.
+api/calendar/status.ts
+api/calendar/events.ts
+api/auth/google-calendar.ts
+# Dead: frontend uses /api/events?id= ; the path-style route is unused.
+api/events/\[id\].ts
+# Merged into api/auth.ts (routed via vercel.json rewrites + ?endpoint=).
+api/auth/login.ts
+api/auth/signup.ts
+api/auth/logout.ts
+api/auth/reset.ts
+api/me.ts

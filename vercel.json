@@ -33,6 +33,26 @@
   ],
   "rewrites": [
     {
+      "source": "/api/auth/login",
+      "destination": "/api/auth?endpoint=login"
+    },
+    {
+      "source": "/api/auth/signup",
+      "destination": "/api/auth?endpoint=signup"
+    },
+    {
+      "source": "/api/auth/logout",
+      "destination": "/api/auth?endpoint=logout"
+    },
+    {
+      "source": "/api/auth/reset",
+      "destination": "/api/auth?endpoint=reset"
+    },
+    {
+      "source": "/api/me",
+      "destination": "/api/auth?endpoint=me"
+    },
+    {
       "destination": "/index.html",
       "source": "/((?!api/).*)"
     }
