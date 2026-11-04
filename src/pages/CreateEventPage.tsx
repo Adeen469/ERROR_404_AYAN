@@ -150,7 +150,7 @@ export function CreateEventPage() {
   // Hover preview for preset covers: the enlarged image, fitted to the
   // viewport, with NO blurred or dimmed background — the page behind it
   // stays exactly as it is. The preview only appears after the cursor
-  // has rested on a cover for 3 seconds, so merely passing over the grid
+  // has rested on a cover for 1.8 seconds, so merely passing over the grid
   // never pops a preview up. Leaving the enlarged picture (or clicking
   // outside it) closes it again.
   const [hoveredCover, setHoveredCover] = useState<string | null>(null);
@@ -165,7 +165,7 @@ export function CreateEventPage() {
 
   const startHoverPreview = (url: string) => {
     // A different cover: drop any preview already showing, then wait the
-    // full 3 seconds for this one. Leaving the card cancels the timer
+    // full 1.8 seconds for this one. Leaving the card cancels the timer
     // (see onMouseLeave on the preset button) without closing a preview
     // that is already showing — that one closes on its own mouse-leave.
     setHoveredCover(null);
@@ -173,7 +173,7 @@ export function CreateEventPage() {
     hoverTimer.current = setTimeout(() => {
       setHoveredCover(url);
       hoverTimer.current = null;
-    }, 3000);
+    }, 1800);
   };
 
   // Close the preview on Escape as well as on mouse-leave / outside click.
@@ -468,7 +468,7 @@ export function CreateEventPage() {
                   onMouseLeave={cancelHoverPreview}
                   onClick={() => {
                     // Clicking selects at once — a preview must not pop up
-                    // 3 seconds later for a cover the user already picked.
+                    // 1.8 seconds later for a cover the user already picked.
                     cancelHoverPreview();
                     // Picking a preset also switches back to its category,
                     // so a custom category can never sit under a preset.
