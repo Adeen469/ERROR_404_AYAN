@@ -355,31 +355,33 @@ export function esc(s: string): string {
 // and userId are never trusted as identity.
 // See SECURITY_FIX_SETUP.md (locora_users, rate_limits, SESSION_SECRET).
 
-// Shared registrations API — manual-approval payments.
+// Shared registrations API — Razorpay-only paid registrations.
 //
-// Registrations used to live only in each browser's localStorage, so an
-// organizer on another device could never see (let alone approve) an
-// attendee's payment. This function stores them in Supabase instead, so
-// a pending payment submitted on one device appears in the organizer's
-// Attendees page on any device.
+// Manual organizer approval (pay via UPI, submit a UTR, organizer
+// approves) was REMOVED in full: paid events are paid only through
+// Razorpay Standard Checkout (api/payments.ts), which issues the pass
+// automatically once Razorpay confirms a captured payment. There is no
+// approval queue, no UTR, and no organizer approve/reject anymore —
+// for paid rows, PATCH status changes by an organizer are refused.
 //
 // GET  /api/registrations?userId=x      -> that user's registrations
 // GET  /api/registrations?eventId=x     -> that event's registrations
 // GET  /api/registrations?id=x          -> one registration
 // GET  /api/registrations?pendingCounts=1 -> { counts: { eventId: n } }
-//                                            for pending registrations
+//                                            for pending (unpaid
+//                                            Razorpay) registrations
 // POST /api/registrations { ...registration }
-//      -> stores a registration (status 'pending' for paid, 'confirmed'
-//         for free). The ticket code for a pending registration is issued
-//         at approval time, not here.
-// PATCH /api/registrations?id=x { status?, ticketCode?, checkedIn?,
-//                                  approverEmail?, userId? }
-//      -> approve ('confirmed') / reject ('rejected') / check-in: only the
-//         event's owner or an admin may do these, verified here against
-//         the stored event row (approverEmail must match the event's
-//         createdByEmail / organizer email, or be an admin email).
-//         cancel ('cancelled'): only the registration's own user
-//         (body.userId must match the stored userId).
+//      -> stores a registration (status 'pending' for a Razorpay row,
+//         'confirmed' for free). A paid row that is NOT a Razorpay row
+//         is refused: there is no manual payment path anymore. The
+//         ticket code for a pending row is issued by api/payments.ts
+//         on verified payment, not here.
+// PATCH /api/registrations?id=x { status?, checkedIn? }
+//      -> check-in: only the event's owner or an admin (Active
+//         management). cancel ('cancelled'): only the registration's
+//         own user. Organizer confirm/reject no longer exist.
+// Identity comes from the verified session cookie; body/query
+// userEmail, approverEmail and userId are never trusted as identity.
 //
 // This is a Vercel Serverless Function, self-contained (no imports).
 //
@@ -391,29 +393,18 @@ export function esc(s: string): string {
 // The service-role key is server-only: the frontend never calls Supabase
 // directly, it only calls this function, so the key never reaches a browser.
 //
-// Honest limit, same as the events API: there is no session auth, so the
-// approverEmail / userId checks above trust what the caller sends. They
-// stop casual misuse from the app's own UI (which only ever sends the
-// signed-in user's email), but they are not proof of identity the way a
-// signed session would be. In-app ownership gating is the real control
-// until server-side session auth exists.
-//
 // If the env vars are missing, this returns 503 JSON and the frontend
 // falls back to per-browser local registrations.
 //
 // Email notifications (see ORGANIZER_NOTIFICATIONS_SETUP.md):
-// when a PENDING registration is stored (a paid event's payment awaiting
-// approval), the organizer gets an email with the attendee, amount, UTR
-// and a link to the Attendees page; and when a registration is CONFIRMED
-// with a ticket code (a free instant registration, or an organizer's
-// approval), the attendee gets a confirmation email with that code.
-// Sending is best-effort and gated on GMAIL_USER / GMAIL_APP_PASSWORD:
-// without them nothing is sent and the registration still succeeds, and
-// the in-app pass / "N pending" badge remain the fallback signals. Sends
-// are awaited before responding (serverless work after a response is not
-// guaranteed to run), but any mail failure is swallowed so it can never
-// fail a registration. Rejected payments mail nobody; the attendee sees
-// "Payment not approved" in the app.
+// when a registration is CONFIRMED with a ticket code (a free instant
+// registration, or a Razorpay payment verified by api/payments.ts),
+// the attendee gets a confirmation email with that code. Sending is
+// best-effort and gated on the Gmail env vars; without them nothing
+// is sent and the registration still succeeds. Sends are awaited
+// before responding (serverless work after a response is not
+// guaranteed to run), but any mail failure is swallowed so it can
+// never fail a registration.
 
 
 async function loadAllRegistrations(): Promise<any[]> {
@@ -503,35 +494,12 @@ function ticketBox(code: string): string {
   return `<div style="background:#FAF8F5;border:1px solid #E7E3DB;border-radius:12px;padding:16px;text-align:center;margin:20px 0;"><div style="font-size:12px;letter-spacing:1px;text-transform:uppercase;color:#5F635D;margin-bottom:6px;">Your ticket code</div><div style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:20px;letter-spacing:2px;font-weight:700;color:#1E3F35;">${code}</div></div>`;
 }
 
-export function buildApprovalEmail(reg: any, event: any): { to: string; subject: string; text: string; html: string } | null {
-  const to = event?.organizer?.email || event?.createdByEmail || '';
-  if (!to) return null;
-  const title = event?.title || 'your event';
-  const amount = typeof event?.price === 'number' ? `₹${event.price}` : 'the ticket price';
-  const link = `https://locora-hyperlocal.vercel.app/organizer/events/${reg.eventId}/attendees`;
-  const subject = `New payment approval needed: ${title}`;
-  const text = [
-    `${reg.userName || 'An attendee'} (${reg.userEmail || ''}) paid ${amount} for "${title}" and submitted a payment for approval.`,
-    `UTR: ${reg.utr || '—'}`,
-    `Submitted: ${reg.registeredAt || ''}`,
-    `Verify the payment in your UPI app, then approve to issue their pass (or reject to release the spot): ${link}`,
-  ].join('\n\n');
-  const html = emailLayout(
-    "New payment approval needed",
-    bodyText(`<strong>${esc(reg.userName || 'An attendee')}</strong> (${esc(reg.userEmail || '')}) paid <strong>${esc(amount)}</strong> for "${esc(title)}" and submitted a payment for approval.`) +
-      detailRow("UTR", `<strong>${esc(reg.utr || '—')}</strong>`) +
-      detailRow("Submitted", esc(reg.registeredAt || '')) +
-      bodyText(`Verify the payment in your UPI app, then approve to issue their pass — or reject to release the spot.`) +
-      primaryButton("Review in Attendees", link),
-  );
-  return { to, subject, text, html };
-}
 
 // Confirmation email for the attendee. Sent when a registration is
-// confirmed with a ticket code: a free instant registration, or an
-// organizer's approval of a paid one. Returns null without a recipient
+// confirmed with a ticket code: a free instant registration, or a
+// Razorpay payment verified by api/payments.ts. Returns null without a recipient
 // or without a ticket code, so a confirmation without a pass is never
-// mailed. Exported for unit tests, like buildApprovalEmail.
+// mailed. Exported for unit tests.
 export function buildAttendeeConfirmationEmail(reg: any, event: any): { to: string; subject: string; text: string; html: string } | null {
   const to = reg?.userEmail || '';
   if (!to || !reg?.ticketCode) return null;
@@ -571,32 +539,9 @@ export function buildAttendeeConfirmationEmail(reg: any, event: any): { to: stri
   return { to, subject, text, html };
 }
 
-// "Payment received" email for the attendee of a PENDING paid
-// registration: the organizer has not approved yet, so this carries no
-// ticket code — it only confirms the payment arrived and is awaiting
-// approval. Exported for unit tests, like the other builders.
-export function buildAttendeePendingEmail(reg: any, event: any): { to: string; subject: string; text: string; html: string } | null {
-  const to = reg?.userEmail || '';
-  if (!to) return null;
-  const title = event?.title || 'the event';
-  const amount = typeof event?.price === 'number' ? `₹${event.price}` : 'the ticket price';
-  const link = `https://locora-hyperlocal.vercel.app/events/${reg.eventId}`;
-  const subject = `Payment received: ${title} — awaiting approval`;
-  const lines = [
-    `We received your payment of ${amount} for "${title}".`,
-    reg?.utr ? `UTR: ${reg.utr}` : '',
-    `The organizer will verify the payment and approve it, then your ticket code will arrive by email. You can also check the status on the event page: ${link}`,
-  ].filter(Boolean);
-  const text = lines.join('\n\n');
-  const html = emailLayout(
-    "Payment received",
-    bodyText(`We received your payment of <strong>${esc(amount)}</strong> for "${esc(title)}".`) +
-      (reg?.utr ? detailRow("UTR", `<strong>${esc(reg.utr)}</strong>`) : '') +
-      bodyText(`The organizer will verify the payment and approve it, then your ticket code will arrive by email.`) +
-      primaryButton("View event", link),
-  );
-  return { to, subject, text, html };
-}
+// (Deleted with the manual-approval flow: the "payment received,
+// awaiting approval" email no longer exists. Pending Razorpay rows
+// mail nothing; confirmation mails go out on verified payment.)
 
 async function sendMail(mail: { to: string; subject: string; text: string; html: string } | null): Promise<boolean> {
   const user = getEnv('GMAIL_USER');
@@ -618,21 +563,15 @@ async function sendMail(mail: { to: string; subject: string; text: string; html:
   }
 }
 
-async function sendApprovalEmail(reg: any, event: any): Promise<boolean> {
-  return sendMail(buildApprovalEmail(reg, event));
-}
 
 async function sendAttendeeConfirmationEmail(reg: any, event: any): Promise<boolean> {
   return sendMail(buildAttendeeConfirmationEmail(reg, event));
 }
 
-async function sendAttendeePendingEmail(reg: any, event: any): Promise<boolean> {
-  return sendMail(buildAttendeePendingEmail(reg, event));
-}
 
 function stripReg(reg: any, sessionEmail: string, isOrganiser: boolean): any {
   const event = reg.event ? stripEventPublic(reg.event) : undefined;
-  // Organiser view keeps attendee fields needed for approval.
+  // Organiser view keeps attendee fields needed for the roster.
   // Own view keeps the attendee's own fields (including their own ticketCode).
   // In both cases the nested event is stripped. Any other view (which
   // callers must 403 first) is defence-in-depth stripped of phone/UTR:
@@ -685,7 +624,7 @@ async function refundRazorpayPayment(paymentId: string): Promise<{ ok: boolean; 
   }
 }
 
-// Management (approve/reject/check-in, attendee roster) requires the
+// Management (check-in, attendee roster) requires the
 // organizer to STILL be approved, not just to have created the event:
 // revocation previously left old-event management and attendee phones
 // fully open to a removed organizer's still-valid session. Admins pass
@@ -816,8 +755,19 @@ export default async function handler(req: any, res: any): Promise<void> {
       const existingCancelled = allRegs.find((r: any) => r.eventId === reg.eventId && norm(r.userEmail) === me && r.status === "cancelled");
       const reactivating = Boolean(existingCancelled);
       if (reactivating) reg.id = existingCancelled.id;
-      // Server-side paid rule: a paid event never gets an instant pass.
+      // Server-side paid rule: a paid event never gets an instant pass,
+      // and never gets a manual pending row either. Paid rows exist
+      // only as Razorpay rows (paymentMethod 'razorpay', created by
+      // the Razorpay checkout flow); anything else for a paid event
+      // is refused, because manual UPI/UTR approval no longer exists.
+      // Legacy manual pending rows are NOT rejected here — the dedupe
+      // above already returned them as-is, so their owners can still
+      // convert them via Pay Now (Razorpay create-order).
       if (Number(event.price) > 0 && reg.status === "confirmed") reg.status = "pending";
+      if (Number(event.price) > 0 && reg.paymentMethod !== "razorpay" && reg.status === "pending") {
+        sendJson(res, 400, { message: "Paid events use Razorpay checkout — manual payments are no longer accepted" });
+        return;
+      }
       // Server-owned fields are never caller-writable: a crafted row
       // must not smuggle holdsSpot=true (a free seat on approval), a
       // chosen ticket code, or payment markers past the guards. Ticket
@@ -832,21 +782,8 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 409, { message: "This event is at full capacity" });
         return;
       }
-      // Manual paid rows need a real 12-digit UTR (previously the
-      // format check lived only in the browser, so direct API calls
-      // could flood the organizer queue with empty/garbage UTRs).
-      // A duplicate UTR is NOT hard-rejected — a retry after a
-      // rejection legitimately reuses the same payment — but the
-      // Attendees queue flags duplicates for the organizer to spot.
-      if (Number(event.price) > 0 && reg.paymentMethod !== "razorpay" && reg.status === "pending") {
-        if (typeof reg.utr !== "string" || !/^\d{12}$/.test(reg.utr.trim())) {
-          sendJson(res, 400, { message: "A 12-digit UTR is required for manual payments" });
-          return;
-        }
-        reg.utr = reg.utr.trim();
-      }
-      // Expected-amount snapshot so the organizer can compare what was
-      // claimed against what the event costs.
+      // Expected-amount snapshot for the Razorpay order (the amount
+      // create-order charges and verify checks against).
       if (Number(event.price) > 0) reg.amountPaise = Math.round(Number(event.price) * 100);
       reg.registeredAt = reg.registeredAt || new Date().toISOString();
       // Do not store a full nested event with organiser email/UPI.
@@ -874,12 +811,11 @@ export default async function handler(req: any, res: any): Promise<void> {
       if (stored && stored.status === "confirmed") { try { await bumpEventCount(stored.eventId, 1); } catch {} }
       if (stored) {
         try {
-          // Razorpay pending rows need no organizer approval: the
-          // organizer-approval email and the "awaiting approval"
-          // attendee email would both be wrong for them. The pass
-          // confirmation email is sent by api/payments.ts on verify.
-          if (stored.status === 'pending' && stored.paymentMethod !== 'razorpay') { await sendApprovalEmail(stored, event); await sendAttendeePendingEmail(stored, event); }
-          else if (stored.status === 'confirmed') await sendAttendeeConfirmationEmail(stored, event);
+          // Only confirmed rows mail here (free instant passes). A
+          // pending Razorpay row mails nothing: its pass confirmation
+          // email is sent by api/payments.ts on verified payment.
+          // There is no approval email anymore — approval is gone.
+          if (stored.status === 'confirmed') await sendAttendeeConfirmationEmail(stored, event);
         } catch {}
       }
       sendJson(res, 200, stripReg(stored, me, false));
@@ -901,27 +837,20 @@ export default async function handler(req: any, res: any): Promise<void> {
       // approves, rejects, checks in, or reads this roster.
       const isOrgActive = isOrg ? await mayManageEventActive(event, me) : false;
       const isOwner = norm(existing.userEmail) === me;
-      if (nextStatus === "confirmed" || nextStatus === "rejected" || updates.checkedIn !== undefined) {
+      // Organizer approval is GONE: there is no confirm/reject anymore.
+      // Paid passes are issued only by api/payments.ts on a verified
+      // captured payment, so any organizer status change is refused
+      // outright (with a clear message, not a silent 400) — including
+      // for legacy manual pending rows, which can only convert to
+      // Razorpay via Pay Now or be withdrawn by their owner.
+      if (nextStatus === "confirmed" || nextStatus === "rejected") {
+        sendJson(res, 403, { message: "Organizer approval has been removed — passes are issued automatically by Razorpay" });
+        return;
+      }
+      if (updates.checkedIn !== undefined) {
         if (!isOrgActive) { sendJson(res, 403, { message: "Only the event owner or an admin can do this" }); return; }
-        // Razorpay rows are confirmed by payment verification ONLY.
-        // Letting an organizer approve one manually minted free passes
-        // for people who never paid (the queue used to show them
-        // alongside UTR rows with no distinction).
-        if (nextStatus === "confirmed" && existing.paymentMethod === "razorpay" && !existing.razorpayPaymentId) {
-          sendJson(res, 409, { message: "Awaiting Razorpay payment — this registration cannot be approved manually" });
-          return;
-        }
-        // Approvals only for open events.
-        if (nextStatus === "confirmed" && event) {
-          if (event.status && event.status !== "published") { sendJson(res, 409, { message: "This event is not open for approval" }); return; }
-          if (event.endDate && !Number.isNaN(Date.parse(event.endDate)) && new Date(event.endDate).getTime() < Date.now()) { sendJson(res, 409, { message: "This event has ended" }); return; }
-        }
-        if (nextStatus === "confirmed" && existing.status === "pending" && existing.holdsSpot === false && event && event.registeredCount >= event.capacity) {
-          sendJson(res, 409, { message: "This event is at full capacity. Free a spot before approving." });
-          return;
-        }
         // Check-in only makes sense on a confirmed pass.
-        if (updates.checkedIn !== undefined && existing.status !== "confirmed" && nextStatus !== "confirmed") {
+        if (existing.status !== "confirmed") {
           sendJson(res, 400, { message: "Only confirmed registrations can be checked in" });
           return;
         }
@@ -930,19 +859,14 @@ export default async function handler(req: any, res: any): Promise<void> {
       } else {
         if (!isOwner && !isOrgActive) { sendJson(res, 403, { message: "Not allowed" }); return; }
       }
-      // Field allowlist by role — the old code stripped only five
-      // fields, so attendees could rewrite ticketCode, holdsSpot,
-      // payment markers and userPhone, and reopen rejected rows, by
-      // direct API call. Now: attendees may only cancel their own row;
-      // organizers/admins may only change status (confirm/reject) and
-      // checkedIn. Ticket codes, holdsSpot, and every payment field
-      // are server-only, always.
+      // Field allowlist by role: attendees may only cancel their own
+      // row; organizers/admins may only toggle checkedIn. There is no
+      // organizer status change anymore (see the gate above). Ticket
+      // codes, holdsSpot, and every payment field are server-only,
+      // always.
       let allowedUpdates: any = null;
       if (nextStatus === "cancelled" && isOwner) {
         allowedUpdates = { status: "cancelled" };
-      } else if (isOrgActive && (nextStatus === "confirmed" || nextStatus === "rejected")) {
-        allowedUpdates = { status: nextStatus };
-        if (updates.checkedIn !== undefined && nextStatus === "confirmed") allowedUpdates.checkedIn = Boolean(updates.checkedIn);
       } else if (isOrgActive && updates.checkedIn !== undefined && nextStatus === undefined) {
         allowedUpdates = { checkedIn: Boolean(updates.checkedIn) };
       }
@@ -951,7 +875,6 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       const merged: any = { ...existing, ...allowedUpdates, id: existing.id, userEmail: existing.userEmail, userId: existing.userId, eventId: existing.eventId, utr: existing.utr };
-      if (existing.status === 'pending' && merged.status === 'confirmed') merged.ticketCode = newTicketCode();
       if (merged.event) merged.event = stripEventPublic(merged.event);
       // Cancelling a confirmed Razorpay pass refunds it automatically:
       // previously the pass vanished but the money stayed with the
@@ -969,18 +892,13 @@ export default async function handler(req: any, res: any): Promise<void> {
         { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: merged }) },
       );
       if (!ok) { sendJson(res, 500, { message: "Failed to update registration" }); return; }
-      // Server-side counts: approval of a no-spot pending row takes a
-      // slot; cancelling a held slot releases one; rejecting a held
-      // legacy pending row releases its seat too (previously a
-      // rejected legacy row kept its seat consumed forever).
+      // Server-side counts: cancelling a held slot releases one
+      // (confirmed passes, and legacy pending rows that predate the
+      // holdsSpot flag). Nothing else changes counts here anymore —
+      // Razorpay confirms bump their own count in api/payments.ts.
       try {
-        if (existing.status === 'pending' && merged.status === 'confirmed' && existing.holdsSpot === false) await bumpEventCount(merged.eventId, 1);
         if (merged.status === 'cancelled' && (existing.status === 'confirmed' || (existing.status === 'pending' && existing.holdsSpot !== false))) await bumpEventCount(merged.eventId, -1);
-        if (existing.status === 'pending' && merged.status === 'rejected' && existing.holdsSpot !== false) await bumpEventCount(merged.eventId, -1);
       } catch {}
-      if (existing.status === 'pending' && merged.status === 'confirmed' && merged.ticketCode) {
-        try { if (event) await sendAttendeeConfirmationEmail(merged, event); } catch {}
-      }
       sendJson(res, 200, stripReg(merged, me, isOrgActive));
       return;
     }

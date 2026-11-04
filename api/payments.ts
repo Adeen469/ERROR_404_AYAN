@@ -772,16 +772,17 @@ export default async function handler(req: any, res: any): Promise<void> {
       sendJson(res, 503, { message: "Razorpay is not configured" });
       return;
     }
-    // Warn (Vercel logs only, never to the client) if production is
-    // running test-mode keys — test payments verify as captured, so a
-    // test key in production would issue real passes for fake money.
-    try {
-      const vercelEnv = getEnv("VERCEL_ENV");
-      const keyId = getEnv("RAZORPAY_KEY_ID");
-      if (vercelEnv === "production" && keyId.startsWith("rzp_test_")) {
-        console.warn("Razorpay test-mode key in production environment");
-      }
-    } catch { /* logging must never break payments */ }
+    // Live mode ONLY: test keys are refused outright, not warned
+    // about. Test payments verify as captured, so a test key in
+    // production would issue real passes for fake money — and the
+    // product no longer has a test mode at all. Until live keys
+    // (rzp_live_…) are in Vercel Production env vars, checkout
+    // fails closed with a clear message instead of a fake pass.
+    if (getEnv("RAZORPAY_KEY_ID").startsWith("rzp_test_")) {
+      try { console.warn("Razorpay test-mode key refused: live keys required"); } catch {}
+      sendJson(res, 503, { message: "Live Razorpay payments are not configured yet" });
+      return;
+    }
     const url = new URL(req.url || "/api/payments", "http://localhost");
     const action = url.searchParams.get("action") || "";
     if (action === "create-order") {

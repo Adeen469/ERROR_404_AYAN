@@ -415,9 +415,10 @@ export function esc(s: string): string {
 // exists because the organizer hub and the edit page filter by exactly
 // those fields: stripping them for the owner too made every non-admin
 // organizer's hub come back empty after a fresh fetch (e.g. logout ->
-// login) while Discover still showed the events. UPI is only available
-// via the session-only ?payment=1&id= endpoint, to a signed-in user,
-// for that one event. Writes require a session and server-side ownership
+// login) while Discover still showed the events. (UPI IDs are legacy
+// only now: the manual payment flow is gone, new events store none,
+// and the ?payment=1 endpoint that used to hand them out is removed.)
+// Writes require a session and server-side ownership
 // (POST: approved organiser/admin; PATCH details: owner only; PATCH
 // status / DELETE: owner or admin).
 
@@ -600,21 +601,14 @@ export default async function handler(req: any, res: any) {
       const viewEvent = (e: any) =>
         viewerEmail && mayManageEvent(e, viewerEmail) ? e : stripEventPublic(e);
       const singleId = firstQuery(req.query, "id");
-      // Session-only payment endpoint: the ONLY place a UPI ID leaves
-      // the server. Any signed-in user may fetch it for the event they
-      // are about to pay for; guests get 401 and no UPI, never a fallback.
+      // The ?payment=1 UPI endpoint was REMOVED with the manual
+      // payment flow: there is no UPI ID to hand out anymore, and
+      // the endpoint had let any signed-in user harvest organizer
+      // UPI IDs. A stale client asking for it gets a plain 404
+      // (the single-event branch below would 404 the same way for
+      // an unknown id, so this keeps the shape explicit).
       if (singleId && firstQuery(req.query, "payment") === "1") {
-        const session = await verifySession(req);
-        if (!session) return sendJson(res, 401, { message: "Sign in required" });
-        // The UPI endpoint used to be harvestable without limit: any
-        // signed-in user could collect every organizer's UPI id.
-        const rlPay = await checkRateLimit(`events:payment:${session.email}`, 30, 10 * 60 * 1000);
-        if (!rlPay.allowed && !rlPay.tableMissing) {
-          return sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlPay.retryAfter) });
-        }
-        const event = await fetchEvent(singleId);
-        if (!event) return sendJson(res, 404, { message: "Event not found" });
-        return sendJson(res, 200, { id: event.id, title: event.title, price: Number(event.price) || 0, upiId: event.upiId || null });
+        return sendJson(res, 404, { message: "Manual payments are no longer supported" });
       }
       if (singleId) {
         const event = await fetchEvent(singleId);
@@ -710,7 +704,10 @@ export default async function handler(req: any, res: any) {
         state: p.state || undefined, country: p.country || undefined,
         // Ownership is forced from the session, never from the body.
         createdByEmail: session.email,
-        price, upiId: p.upiId || undefined,
+        price,
+        // No upiId on new events: the manual UPI flow is gone, so
+        // there is nothing to collect one for. (Legacy rows keep
+        // theirs stored, still stripped for non-owners above.)
         requireAttendeeDetails: p.requireAttendeeDetails ?? true,
         capacity, registeredCount: 0, status: "published",
         organizer: {
@@ -795,7 +792,7 @@ export default async function handler(req: any, res: any) {
           return sendJson(res, 400, { message: "Start date cannot be moved into the past" });
         }
       }
-      const { createdByEmail: _c, registeredCount: _r, isFeatured: _f, ...safeUpdates } = updates;
+      const { createdByEmail: _c, registeredCount: _r, isFeatured: _f, upiId: _u, ...safeUpdates } = updates;
       if (safeUpdates.organizer && typeof safeUpdates.organizer === "object") {
         const orgName = typeof safeUpdates.organizer.name === "string" && safeUpdates.organizer.name.trim()
           ? safeUpdates.organizer.name.trim().slice(0, 80)
