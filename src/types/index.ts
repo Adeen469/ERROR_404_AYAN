@@ -120,6 +120,17 @@ export interface AttendeeRegistration {
   paymentMethod?: 'manual' | 'razorpay';
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
+  // Price snapshot at payment time, in paise (server-set from the
+  // stored event price — never from a client claim), shown to the
+  // organizer on pending rows so approval can check the amount paid.
+  amountPaise?: number;
+  currency?: string;
+  // Refund bookkeeping for cancelled Razorpay rows (server-set):
+  // 'initiated' with a refund id means Razorpay accepted the refund,
+  // 'failed' means the organizer must refund manually from the
+  // Razorpay dashboard; absent means no refund was attempted.
+  refundStatus?: 'initiated' | 'failed';
+  refundId?: string;
 }
 
 export interface UserProfile {

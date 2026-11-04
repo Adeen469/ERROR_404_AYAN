@@ -115,7 +115,11 @@ async function flushPending(): Promise<void> {
   if (isDemoMode() || flushInFlight) return;
   flushInFlight = true;
   try {
-    const { flushed } = await flushPendingOps(localStorage, apiClient);
+    const { flushed } = await flushPendingOps(
+      localStorage,
+      apiClient,
+      authService.getCurrentUser()?.email,
+    );
     if (flushed.length > 0) {
       // Flushed events stop being "pending" in the local copy too, so a
       // later offline fallback doesn't show them as waiting to sync.
@@ -456,6 +460,13 @@ export const eventsService = {
     // passes createdByEmail; this is the fallback for any other caller.
     const payload: Partial<EventItem> = {
       ...eventPayload,
+      // Client-generated id, stable per form session (the Create page
+      // generates it once): the server returns the existing event on
+      // an id conflict, so a double-submit or a retry after a lost
+      // response cannot create a duplicate listing.
+      id:
+        eventPayload.id ||
+        `evt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
       createdByEmail:
         eventPayload.createdByEmail || authService.getCurrentUser()?.email,
     };
@@ -470,7 +481,10 @@ export const eventsService = {
     await new Promise((resolve) => setTimeout(resolve, 250));
     const events = getStoredEvents();
 
-    const newId = `evt-${Date.now()}`;
+    // Reuse the payload id when the caller supplied one, so the local
+    // pending copy and the later server flush refer to the same event
+    // (and the server's id-conflict return can reconcile them).
+    const newId = payload.id || `evt-${Date.now()}`;
     const slug = (payload.title || 'event')
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
@@ -513,7 +527,7 @@ export const eventsService = {
     const pendingEvent: EventItem = { ...newEvent, _pendingSync: true };
     events.unshift(pendingEvent);
     saveStoredEvents(events);
-    addPendingOp(localStorage, { op: 'create', event: pendingEvent });
+    addPendingOp(localStorage, { op: 'create', event: pendingEvent }, authService.getCurrentUser()?.email);
     return pendingEvent;
   },
 
@@ -559,11 +573,26 @@ export const eventsService = {
     if (index === -1) events.unshift(updated);
     else events[index] = updated;
     saveStoredEvents(events);
-    addPendingOp(localStorage, { op: 'update', id, updates });
+    addPendingOp(localStorage, { op: 'update', id, updates }, opts.ownerEmail);
     return updated;
   },
 
-  async deleteEvent(id: string, opts?: OwnershipOptions): Promise<boolean> {
+  // Server DELETE summary (api/events.ts): deleting an event no
+  // longer orphans its registrations — it cancels them, refunds
+  // confirmed Razorpay rows, and emails the attendees. The caller
+  // surfaces that summary so the organizer sees what happened.
+  async deleteEvent(
+    id: string,
+    opts?: OwnershipOptions,
+  ): Promise<{
+    deleted: boolean;
+    summary?: {
+      cancelledCount?: number;
+      refundedCount?: number;
+      refundFailed?: number;
+      emailedCount?: number;
+    };
+  }> {
     // A mutation must not leave stale cached reads behind.
     clearEventsCache();
     // Delete is an owner-or-admin operation, and the check is mandatory:
@@ -577,8 +606,13 @@ export const eventsService = {
     }
     if (!isDemoMode()) {
       try {
-        await apiClient.delete('/events', { id });
-        return true;
+        const summary = await apiClient.delete<{
+          cancelledCount?: number;
+          refundedCount?: number;
+          refundFailed?: number;
+          emailedCount?: number;
+        }>('/events', { id });
+        return { deleted: true, summary: summary || undefined };
       } catch (err) {
         console.warn('Backend API delete event unavailable, queuing the delete for sync:', err);
       }
@@ -590,8 +624,8 @@ export const eventsService = {
     saveStoredEvents(events);
     // Queued, unless the event itself never reached the server: a pending
     // create for this id is simply cancelled by addPendingOp.
-    addPendingOp(localStorage, { op: 'delete', id });
-    return true;
+    addPendingOp(localStorage, { op: 'delete', id }, opts.ownerEmail);
+    return { deleted: true };
   },
 
   // SECURITY FIX: counts are now updated server-side inside

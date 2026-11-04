@@ -106,6 +106,24 @@ export function EditEventPage() {
 
     const capNum = Number(capacity);
     if (isNaN(capNum) || capNum <= 0) errs.capacity = 'Capacity must be at least 1 spot.';
+    // Mirror the server rules: capacity can never drop below the seats
+    // already taken, and an upcoming event's start cannot be moved into
+    // the past (already-past events stay editable for corrections).
+    const registered = event?.registeredCount || 0;
+    if (!isNaN(capNum) && capNum < registered) {
+      errs.capacity = `Capacity cannot be below the ${registered} already registered.`;
+    }
+    const origStart = event ? new Date(event.startDate) : null;
+    if (
+      origStart &&
+      !isNaN(origStart.getTime()) &&
+      origStart.getTime() > Date.now() &&
+      !isNaN(start.getTime()) &&
+      start.getTime() < Date.now() - 5 * 60 * 1000
+    ) {
+      errs.startDate = 'Start cannot be moved into the past for an upcoming event.';
+    }
+    if (Number(price) < 0) errs.price = 'Price cannot be negative.';
 
     // Same rule as create: paid events need a UPI ID, because it powers
     // the QR code and tap-to-pay UPI link in the payment dialog. Free
@@ -118,6 +136,7 @@ export function EditEventPage() {
 
   const handleUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
     if (!eventId || !validate()) return;
 
     setSubmitting(true);

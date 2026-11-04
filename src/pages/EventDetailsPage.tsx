@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { EventItem, AttendeeRegistration } from '../types';
 import QRCode from 'qrcode';
-import { eventsService } from '../services/events-service';
+import { eventsService, isEventOwner } from '../services/events-service';
 import { registrationsService } from '../services/registrations-service';
 import { paymentsService } from '../services/payments-service';
 import { savedEventsService } from '../services/saved-events-service';
@@ -225,6 +225,26 @@ export function EventDetailsPage() {
   const isPaymentRejected = Boolean(registration && registration.status === 'rejected');
   const isPaidEvent = event.price > 0;
   const spotsLeft = Math.max(0, event.capacity - event.registeredCount);
+  // Owner state: since the server GET is now session-aware, an owner
+  // viewing their own event receives createdByEmail/organizer.email and
+  // this is true. Guests and other viewers still get the stripped
+  // public shape, so they never see themselves as the owner. Owners
+  // get Manage/Edit links instead of Register, and no "Message
+  // organizer" button (messaging yourself is blocked server-side).
+  const viewerEmail = (authService.getCurrentUser()?.email || '').toLowerCase();
+  const isOwner = Boolean(viewerEmail) && isEventOwner(event, viewerEmail);
+  // Dead-event state: the server rejects registrations for draft,
+  // cancelled, or ended events, so the page must say so instead of
+  // offering a Register button that can only fail.
+  const eventEnded = Boolean(event.endDate) && new Date(event.endDate).getTime() < Date.now();
+  const eventStateNote =
+    event.status === 'cancelled'
+      ? 'This event has been cancelled by the organizer.'
+      : event.status === 'draft'
+        ? 'This event is still a draft and is not open for registration.'
+        : eventEnded
+          ? 'This event has already ended.'
+          : null;
 
   const handleToggleBookmark = async () => {
     try {
@@ -345,7 +365,13 @@ export function EventDetailsPage() {
             title: 'Payment confirmed!',
             description: `Your ticket code is ${result.ticketCode}. View it anytime in My Registrations.`,
           });
+        } else {
+          // Previously the Pay button stayed stuck loading here with no
+          // message: the recovery finished without a pass and the
+          // loading flag was never cleared.
+          setRazorpayError('Payment could not be recovered. If money was deducted, contact the organizer with your order ID.');
         }
+        setActionLoading(false);
         return;
       }
       const user = authService.getCurrentUser();
@@ -616,28 +642,24 @@ export function EventDetailsPage() {
 
             {/* Message the organizer: SECURITY FIX (P2-4) — the link
                 is /messages?eventId=x&to=organizer, an opaque slug,
-                never an email. Public events no longer carry the
-                organiser email (Finding 2), so this page cannot know
-                whether the viewer IS the organiser; the server blocks
-                messaging yourself ("You cannot message yourself") if
-                they try. Guests go to sign-in first, like the gated
-                View Event button. */}
-            {(() => {
-              const viewerEmail = (authService.getCurrentUser()?.email || '').toLowerCase();
-              return (
-                <Link
-                  to={
-                    viewerEmail
-                      ? `/messages?eventId=${event.id}&to=organizer`
-                      : '/login'
-                  }
-                  className="flex items-center justify-center gap-2 w-full px-4 py-2.5 text-xs font-semibold text-[#1E3F35] bg-white hover:bg-[#F4F1EA] border border-[#1E3F35] rounded-lg transition-colors"
-                >
-                  <MessageCircle className="w-4 h-4" />
-                  Message organizer
-                </Link>
-              );
-            })()}
+                never an email. Hidden for the event's own owner (the
+                server GET is session-aware, so owners can now be
+                recognised here); the server still blocks messaging
+                yourself as a backstop. Guests go to sign-in first,
+                like the gated View Event button. */}
+            {!isOwner && (
+              <Link
+                to={
+                  viewerEmail
+                    ? `/messages?eventId=${event.id}&to=organizer`
+                    : '/login'
+                }
+                className="flex items-center justify-center gap-2 w-full px-4 py-2.5 text-xs font-semibold text-[#1E3F35] bg-white hover:bg-[#F4F1EA] border border-[#1E3F35] rounded-lg transition-colors"
+              >
+                <MessageCircle className="w-4 h-4" />
+                Message organizer
+              </Link>
+            )}
           </div>
         </div>
 
@@ -691,8 +713,34 @@ export function EventDetailsPage() {
               )}
             </div>
 
-            {/* Action State: Registered vs Not Registered */}
-            {isRegistered ? (
+            {/* Action State: owner, dead event, registered, or open */}
+            {isOwner ? (
+              <div className="space-y-3 pt-2">
+                <div className="p-3 bg-[#EAF1ED] border border-[#D0E2D9] rounded-lg flex items-start gap-2.5">
+                  <CheckCircle2 className="w-4 h-4 text-[#1E3F35] shrink-0 mt-0.5" />
+                  <div className="text-xs text-[#1E3F35]">
+                    <p className="font-semibold">This is your event</p>
+                    <p className="text-[11px] text-[#1E3F35]/80 mt-0.5">
+                      Organizers cannot register for their own event.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <Link
+                    to={`/organizer/events/${event.id}/attendees`}
+                    className="flex-1 text-center py-2.5 px-3 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors"
+                  >
+                    Manage Attendees
+                  </Link>
+                  <Link
+                    to={`/organizer/events/${event.id}/edit`}
+                    className="flex-1 text-center py-2.5 px-3 text-xs font-semibold text-[#1E3F35] bg-[#EAF1ED] hover:bg-[#DCEAE3] border border-[#D0E2D9] rounded-lg transition-colors"
+                  >
+                    Edit Event
+                  </Link>
+                </div>
+              </div>
+            ) : isRegistered ? (
               <div className="space-y-3 pt-2">
                 <div className="p-3 bg-[#EAF1ED] border border-[#D0E2D9] rounded-lg flex items-start gap-2.5">
                   <CheckCircle2 className="w-4 h-4 text-[#1E3F35] shrink-0 mt-0.5" />
@@ -787,6 +835,16 @@ export function EventDetailsPage() {
                   >
                     {isFull ? 'Event Sold Out' : 'Pay & Register Again'}
                   </button>
+                </div>
+              </div>
+            ) : eventStateNote ? (
+              <div className="space-y-3 pt-2">
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg flex items-start gap-2.5">
+                  <AlertCircle className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />
+                  <div className="text-xs text-slate-600">
+                    <p className="font-semibold">Registration closed</p>
+                    <p className="text-[11px] mt-0.5">{eventStateNote}</p>
+                  </div>
                 </div>
               </div>
             ) : (
@@ -997,7 +1055,9 @@ export function EventDetailsPage() {
                       </div>
                     </div>
                     <p className="text-[11px] text-[#5F635D] text-center">
-                      Scan with any UPI app — the amount is prefilled
+                      Scan with any UPI app — the amount is prefilled. Pay the
+                      full ticket amount: the QR only suggests it, so check
+                      the amount in your UPI app before confirming.
                     </p>
                     <a
                       href={upiUri}

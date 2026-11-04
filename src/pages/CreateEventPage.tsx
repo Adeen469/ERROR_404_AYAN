@@ -223,6 +223,10 @@ export function CreateEventPage() {
 
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  // One stable id per form session: a double-submit or a retry after a
+  // lost response reuses it, and the server returns the existing event
+  // instead of creating a duplicate listing.
+  const formEventIdRef = useRef(`evt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
 
   const validate = (): boolean => {
     const errs: Record<string, string> = {};
@@ -257,6 +261,9 @@ export function CreateEventPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    // Entry guard: the button disables only after a render, so two
+    // rapid submits could previously reach the server as two events.
+    if (submitting) return;
     if (!validate()) {
       toast({
         type: 'error',
@@ -293,6 +300,7 @@ export function CreateEventPage() {
         .filter(Boolean);
 
       const newEvent = await eventsService.createEvent({
+        id: formEventIdRef.current,
         title: title.trim(),
         summary: summary.trim() || description.trim().slice(0, 140),
         description: description.trim(),
