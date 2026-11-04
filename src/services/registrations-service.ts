@@ -129,6 +129,14 @@ export const registrationsService = {
       throw new Error('This event is at full capacity. Join the waitlist or explore nearby alternatives.');
     }
 
+    // Merged-state check: a pass bought on another device lives in the
+    // shared table, not this browser's local copy. Checking only local
+    // state used to create duplicate pendings across devices.
+    if (!isDemoMode()) {
+      const merged = await this.getRegistrationForEvent(event.id);
+      if (merged && merged.status === 'confirmed') return merged;
+    }
+
     const all = getStoredRegistrations();
     const existing = all.find((r) => r.eventId === event.id && r.userId === user.id);
 
@@ -156,6 +164,41 @@ export const registrationsService = {
       checkedIn: false,
     };
 
+    // Server first in non-demo mode: a failed shared write used to be
+    // swallowed and a local "confirmed" row returned — a phantom pass
+    // the server knew nothing about. Only a 503 (backend unconfigured)
+    // still falls back to the local row; any other failure is thrown
+    // so the UI can say registration failed instead of faking a pass.
+    if (!isDemoMode()) {
+      try {
+        const saved = await apiClient.post<AttendeeRegistration>(
+          '/registrations',
+          existing
+            ? { ...existing, status: 'confirmed', ticketCode: newReg.ticketCode }
+            : newReg,
+        );
+        const row = saved || newReg;
+        if (existing) Object.assign(existing, row);
+        else all.unshift(row);
+        saveStoredRegistrations(all);
+        try {
+          await eventsService.adjustRegisteredCount(
+            event.id,
+            Math.min(event.capacity, event.registeredCount + 1),
+          );
+        } catch (e) {
+          console.warn('Could not increment event registered count:', e);
+        }
+        return row;
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 503) {
+          console.warn('Shared registration unavailable (backend unconfigured), keeping local registration:', err);
+        } else {
+          throw err;
+        }
+      }
+    }
+
     if (existing) {
       existing.status = 'confirmed';
       existing.ticketCode = newReg.ticketCode;
@@ -165,16 +208,6 @@ export const registrationsService = {
       all.unshift(newReg);
     }
     saveStoredRegistrations(all);
-
-    // Shared copy first (best effort); the local copy above is the
-    // fallback when the shared table is not set up yet.
-    if (!isDemoMode()) {
-      try {
-        await apiClient.post('/registrations', existing || newReg);
-      } catch (err) {
-        console.warn('Shared registration unavailable, keeping local registration:', err);
-      }
-    }
 
     // Update event registered count (system count bump, not a user edit,
     // so it does not go through the ownership check).
@@ -210,6 +243,13 @@ export const registrationsService = {
       throw new Error('This event is at full capacity. Join the waitlist or explore nearby alternatives.');
     }
 
+    // Merged-state check (see register): a pending row created on
+    // another device must be reused, not duplicated.
+    if (!isDemoMode()) {
+      const merged = await this.getRegistrationForEvent(event.id);
+      if (merged && (merged.status === 'confirmed' || merged.status === 'pending')) return merged;
+    }
+
     const all = getStoredRegistrations();
     const existing = all.find((r) => r.eventId === event.id && r.userId === user.id);
     if (existing && (existing.status === 'confirmed' || existing.status === 'pending')) {
@@ -238,16 +278,26 @@ export const registrationsService = {
       utr: cleanUtr,
     };
 
-    all.unshift(newReg);
-    saveStoredRegistrations(all);
-
+    // Server first in non-demo mode (see register): only a 503 falls
+    // back to a local pending row; other failures are thrown.
     if (!isDemoMode()) {
       try {
-        await apiClient.post('/registrations', newReg);
+        const saved = await apiClient.post<AttendeeRegistration>('/registrations', newReg);
+        const row = saved || newReg;
+        all.unshift(row);
+        saveStoredRegistrations(all);
+        return row;
       } catch (err) {
-        console.warn('Shared registration unavailable, keeping local pending registration:', err);
+        if (err instanceof ApiError && err.status === 503) {
+          console.warn('Shared registration unavailable (backend unconfigured), keeping local pending registration:', err);
+        } else {
+          throw err;
+        }
       }
     }
+
+    all.unshift(newReg);
+    saveStoredRegistrations(all);
 
     // No count change: a pending payment holds no spot. The slot is
     // taken only if the organizer approves (approveRegistration).
@@ -269,6 +319,13 @@ export const registrationsService = {
     }
     if (event.registeredCount >= event.capacity) {
       throw new Error('This event is at full capacity. Join the waitlist or explore nearby alternatives.');
+    }
+
+    // Merged-state check (see register): reuse a pending row created
+    // on another device instead of duplicating it.
+    if (!isDemoMode()) {
+      const merged = await this.getRegistrationForEvent(event.id);
+      if (merged && (merged.status === 'confirmed' || merged.status === 'pending')) return merged;
     }
 
     const all = getStoredRegistrations();
@@ -294,16 +351,27 @@ export const registrationsService = {
       paymentMethod: 'razorpay',
     };
 
-    all.unshift(newReg);
-    saveStoredRegistrations(all);
-
+    // Server first in non-demo mode (see register): only a 503 falls
+    // back to a local pending row; other failures are thrown, so a
+    // failed Razorpay row can never pretend to be pending.
     if (!isDemoMode()) {
       try {
-        await apiClient.post('/registrations', newReg);
+        const saved = await apiClient.post<AttendeeRegistration>('/registrations', newReg);
+        const row = saved || newReg;
+        all.unshift(row);
+        saveStoredRegistrations(all);
+        return row;
       } catch (err) {
-        console.warn('Shared registration unavailable, keeping local pending registration:', err);
+        if (err instanceof ApiError && err.status === 503) {
+          console.warn('Shared registration unavailable (backend unconfigured), keeping local pending registration:', err);
+        } else {
+          throw err;
+        }
       }
     }
+
+    all.unshift(newReg);
+    saveStoredRegistrations(all);
 
     // No count change: a pending payment holds no spot. The slot is
     // taken only on verified payment (api/payments.ts).
@@ -341,7 +409,16 @@ export const registrationsService = {
       try {
         await apiClient.patch('/registrations', { status: 'cancelled' }, { id: registrationId });
       } catch (err) {
-        console.warn('Shared cancellation unavailable, cancelling locally:', err);
+        // Same honesty rule as register: only a 503 (backend
+        // unconfigured) falls back to a local cancel. Any other
+        // failure is thrown — claiming "cancelled" while the server
+        // still holds a confirmed pass would strand the seat and the
+        // attendee's refund.
+        if (err instanceof ApiError && err.status === 503) {
+          console.warn('Shared cancellation unavailable (backend unconfigured), cancelling locally:', err);
+        } else {
+          throw err;
+        }
       }
     }
 
@@ -455,7 +532,10 @@ export const registrationsService = {
         const localTarget = all.find((r) => r.id === registrationId);
         if (localTarget) {
           localTarget.status = 'confirmed';
-          localTarget.ticketCode = ticketCode;
+          // The pass code comes from the server response, never from
+          // the locally generated one: the two used to disagree, and
+          // the organizer's toast showed a code the attendee never got.
+          localTarget.ticketCode = updated.ticketCode || ticketCode;
           saveStoredRegistrations(all);
         }
         if (needsSpot && event) {
@@ -472,11 +552,15 @@ export const registrationsService = {
       } catch (err) {
         // A deliberate refusal (full event, or not the event's owner)
         // is a decision, not an outage: surface it instead of falling
-        // back to a local approval that would bypass it.
-        if (err instanceof ApiError && (err.status === 409 || err.status === 403)) {
+        // back to a local approval that would bypass it. Same for any
+        // other non-503 failure — a local approval the server never
+        // saw would show the organizer a confirmed pass the attendee
+        // does not have. Only a 503 (backend unconfigured) still
+        // falls back to the local row.
+        if (err instanceof ApiError && err.status !== 503) {
           throw err;
         }
-        console.warn('Shared approval unavailable, approving locally:', err);
+        console.warn('Shared approval unavailable (backend unconfigured), approving locally:', err);
       }
     }
     const all = getStoredRegistrations();
@@ -518,12 +602,14 @@ export const registrationsService = {
         if (updated.holdsSpot !== false) await this.releaseSpot(updated.eventId);
         return updated;
       } catch (err) {
-        // A deliberate refusal (not the event's owner) is a decision,
-        // not an outage: surface it instead of rejecting locally.
-        if (err instanceof ApiError && err.status === 403) {
+        // Same honesty rule as approve: only a 503 (backend
+        // unconfigured) falls back to a local rejection. Any other
+        // failure is thrown — a local rejection the server never saw
+        // would hide a still-pending payment from the organizer.
+        if (err instanceof ApiError && err.status !== 503) {
           throw err;
         }
-        console.warn('Shared rejection unavailable, rejecting locally:', err);
+        console.warn('Shared rejection unavailable (backend unconfigured), rejecting locally:', err);
       }
     }
     const all = getStoredRegistrations();

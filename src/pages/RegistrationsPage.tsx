@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Ticket, Calendar, MapPin, Clock, QrCode, XCircle, ArrowLeft, CheckCircle2 } from 'lucide-react';
-import { AttendeeRegistration } from '../types';
+import { AttendeeRegistration, EventItem } from '../types';
 import { registrationsService } from '../services/registrations-service';
+import { eventsService } from '../services/events-service';
 import { formatEventDate, formatEventTimeRange, formatEventLocation } from '../utils/formatters';
 import { useToast } from '../components/ui/Toast';
 import { Modal, ConfirmDialog } from '../components/ui/Modal';
@@ -18,12 +19,29 @@ export function RegistrationsPage() {
   const [cancelTarget, setCancelTarget] = useState<AttendeeRegistration | null>(null);
   const [cancelling, setCancelling] = useState(false);
 
+  // Live event details by id: passes used to render the frozen
+  // snapshot stored at registration time, so a renamed, rescheduled,
+  // or repriced event still showed the old title/venue/price here.
+  // The live event wins when it loads; the snapshot stays as the
+  // fallback (e.g. for deleted events, which no longer list).
+  const [liveById, setLiveById] = useState<Record<string, EventItem>>({});
+  const liveEventOf = (reg: AttendeeRegistration): EventItem =>
+    liveById[reg.eventId] || reg.event;
+
   useEffect(() => {
     async function loadRegistrations() {
       setLoading(true);
       try {
         const data = await registrationsService.getMyRegistrations();
         setRegistrations(data);
+        try {
+          const page = await eventsService.getEvents({}, 1, 100);
+          const map: Record<string, EventItem> = {};
+          for (const e of page.data || []) map[e.id] = e;
+          setLiveById(map);
+        } catch {
+          /* live details are a nicety: snapshots still render */
+        }
       } finally {
         setLoading(false);
       }
@@ -43,7 +61,7 @@ export function RegistrationsPage() {
       toast({
         type: 'info',
         title: cancelTarget.status === 'pending' ? 'Payment Request Withdrawn' : 'RSVP Cancelled',
-        description: `Your registration for "${cancelTarget.event.title.slice(0, 30)}..." was cancelled.`,
+        description: `Your registration for "${liveEventOf(cancelTarget).title.slice(0, 30)}..." was cancelled.`,
       });
     } catch {
       toast({
@@ -125,7 +143,9 @@ export function RegistrationsPage() {
         />
       ) : (
         <div className="space-y-4">
-          {displayedList.map((reg) => (
+          {displayedList.map((reg) => {
+            const ev = liveEventOf(reg);
+            return (
             <div
               key={reg.id}
               className="bg-white rounded-xl border border-[#E5E1D8] p-5 flex flex-col md:flex-row md:items-center justify-between gap-6 hover:border-[#1E3F35]/30 transition-colors shadow-2xs"
@@ -133,8 +153,8 @@ export function RegistrationsPage() {
               <div className="flex items-start gap-4">
                 <div className="w-20 h-20 rounded-lg overflow-hidden bg-[#F4F1EA] shrink-0 border border-[#E2DFD8]">
                   <img
-                    src={reg.event.coverImage}
-                    alt={reg.event.title}
+                    src={ev.coverImage}
+                    alt={ev.title}
                     referrerPolicy="no-referrer"
                     className="w-full h-full object-cover"
                   />
@@ -142,33 +162,33 @@ export function RegistrationsPage() {
 
                 <div className="space-y-1">
                   <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-[#1E3F35]">
-                    <span>{reg.event.category}</span>
-                    {formatEventLocation(reg.event) && (
+                    <span>{ev.category}</span>
+                    {formatEventLocation(ev) && (
                       <>
                         <span aria-hidden="true" className="text-[#C8C4BC]">·</span>
-                        <span className="text-[#5F635D] font-normal normal-case">{formatEventLocation(reg.event)}</span>
+                        <span className="text-[#5F635D] font-normal normal-case">{formatEventLocation(ev)}</span>
                       </>
                     )}
                   </div>
 
                   <h3 className="font-editorial text-lg font-bold text-[#1E2320] leading-snug">
-                    <Link to={`/events/${reg.event.id}`} className="hover:text-[#1E3F35]">
-                      {reg.event.title}
+                    <Link to={`/events/${ev.id}`} className="hover:text-[#1E3F35]">
+                      {ev.title}
                     </Link>
                   </h3>
 
                   <div className="flex flex-wrap items-center gap-3 text-xs text-[#5F635D] pt-1">
                     <span className="flex items-center gap-1">
                       <Calendar className="w-3.5 h-3.5 text-[#8C887E]" />
-                      {formatEventDate(reg.event.startDate)}
+                      {formatEventDate(ev.startDate)}
                     </span>
                     <span className="flex items-center gap-1">
                       <Clock className="w-3.5 h-3.5 text-[#8C887E]" />
-                      {formatEventTimeRange(reg.event.startDate, reg.event.endDate)}
+                      {formatEventTimeRange(ev.startDate, ev.endDate)}
                     </span>
                     <span className="flex items-center gap-1">
                       <MapPin className="w-3.5 h-3.5 text-[#8C887E]" />
-                      {reg.event.venueName}
+                      {ev.venueName}
                     </span>
                   </div>
                 </div>
@@ -213,7 +233,7 @@ export function RegistrationsPage() {
                       Payment not approved
                     </span>
                     <Link
-                      to={`/events/${reg.event.id}`}
+                      to={`/events/${ev.id}`}
                       className="px-3.5 py-2 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors"
                     >
                       Try Again
@@ -226,7 +246,8 @@ export function RegistrationsPage() {
                 )}
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -244,10 +265,10 @@ export function RegistrationsPage() {
                 LOCORA VERIFIED ATTENDEE PASS
               </span>
               <h3 className="font-editorial text-xl font-bold leading-tight">
-                {selectedPass.event.title}
+                {liveEventOf(selectedPass).title}
               </h3>
               <p className="text-xs text-white/80">
-                {formatEventDate(selectedPass.event.startDate)} · {selectedPass.event.venueName}
+                {formatEventDate(liveEventOf(selectedPass).startDate)} · {liveEventOf(selectedPass).venueName}
               </p>
 
               {/* Simulated QR Code Canvas */}
@@ -287,8 +308,8 @@ export function RegistrationsPage() {
         title={cancelTarget?.status === 'pending' ? 'Withdraw Payment Request' : 'Cancel Event RSVP'}
         message={
           cancelTarget?.status === 'pending'
-            ? `Withdraw your pending payment request for "${cancelTarget?.event.title}"? Any held spot will be released.`
-            : `Are you sure you want to cancel your RSVP for "${cancelTarget?.event.title}"? Your spot will be made available to other attendees immediately.`
+            ? `Withdraw your pending payment request for "${cancelTarget ? liveEventOf(cancelTarget).title : ''}"? Any held spot will be released.`
+            : `Are you sure you want to cancel your RSVP for "${cancelTarget ? liveEventOf(cancelTarget).title : ''}"? Your spot will be made available to other attendees immediately.`
         }
         confirmLabel={cancelTarget?.status === 'pending' ? 'Yes, Withdraw Request' : 'Yes, Cancel RSVP'}
       />

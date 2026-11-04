@@ -17,6 +17,7 @@ import {
   MessageThread,
   messagesService,
   groupThreads,
+  threadKey,
   validateAttachment,
   formatFileSize,
 } from '../services/messages-service';
@@ -36,6 +37,7 @@ function fmtTime(iso: string): string {
 }
 
 function snippetOf(m: EventMessage): string {
+  if (m.deletedForEveryone) return 'This message was deleted';
   if (m.text && m.text.trim()) return m.text.trim();
   if (m.attachment) return `Sent an attachment: ${m.attachment.name}`;
   return 'Message';
@@ -51,6 +53,9 @@ type ChatMessage = EventMessage & {
   failed?: boolean;
   localFile?: File;
   localPreview?: string;
+  // Stable per draft: retries reuse it so the server dedupes instead
+  // of creating a second message.
+  idempotencyKey?: string;
 };
 
 interface MenuState {
@@ -106,7 +111,10 @@ function AttachmentView({ m }: { m: EventMessage }) {
 
 export function MessagesPage() {
   const [searchParams] = useSearchParams();
-  const [currentUser] = useState(() => authService.getCurrentUser());
+  // Subscribed, not captured once at mount: a sign-in/out while the
+  // page is open used to leave it acting as the previous user.
+  const [currentUser, setCurrentUser] = useState(() => authService.getCurrentUser());
+  useEffect(() => authService.subscribe((u) => setCurrentUser(u)), []);
   const [messages, setMessages] = useState<EventMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -155,7 +163,10 @@ export function MessagesPage() {
         setMessages(list);
         setLoadError('');
       } catch (err: any) {
-        setLoadError(err?.message || 'Could not load messages.');
+        // Silent polls must never raise the red banner: a transient
+        // failure (two tabs polling into a 429, a blip) is not a
+        // broken inbox, and the last loaded list stays on screen.
+        if (!silent) setLoadError(err?.message || 'Could not load messages.');
       } finally {
         if (!silent) setLoading(false);
       }
@@ -313,6 +324,42 @@ export function MessagesPage() {
     );
   }, [selectedKey, messages, currentUser?.email, meEmail, loadMessages]);
 
+  // Deep-link repair: the event page opens a dead pending key
+  // (`<eventId>|organizer`) when no thread exists yet. As soon as the
+  // real thread loads (or is created by the first send), switch to
+  // its key — otherwise the pane goes blank after the first send,
+  // because the pending key matches nothing anymore.
+  useEffect(() => {
+    if (!pendingThread || !queryEventId) return;
+    const real = threads.find((t) => t.eventId === queryEventId);
+    if (real) {
+      setPendingThread(null);
+      setSelectedKey(real.key);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, pendingThread, queryEventId]);
+
+  // Draft persistence: a draft survives a thread switch and a reload
+  // (sessionStorage, per thread) until it is sent successfully.
+  const draftKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!selectedKey || draftKeyRef.current === selectedKey) return;
+    draftKeyRef.current = selectedKey;
+    try {
+      setDraft(sessionStorage.getItem(`locora_msg_draft_${selectedKey}`) || '');
+    } catch {
+      /* storage unavailable: drafts just don't persist */
+    }
+  }, [selectedKey]);
+  useEffect(() => {
+    if (!selectedKey) return;
+    try {
+      sessionStorage.setItem(`locora_msg_draft_${selectedKey}`, draft);
+    } catch {
+      /* ignore */
+    }
+  }, [draft, selectedKey]);
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [visibleMessages.length, selectedKey]);
@@ -321,6 +368,30 @@ export function MessagesPage() {
     setSelectedKey(key);
     setMobileView('chat');
     setSendError('');
+  }
+
+  // Block state is per-session: the server does not expose blocks on
+  // read (GET never lists block rows), so the toggle resets on thread
+  // change and block calls are idempotent server-side.
+  const [blocked, setBlocked] = useState(false);
+  useEffect(() => {
+    setBlocked(false);
+  }, [selectedKey]);
+
+  async function handleBlockToggle() {
+    if (!selected || !selected.otherEmail) return;
+    closeMenu();
+    try {
+      if (blocked) {
+        await messagesService.unblockUser(selected.eventId, selected.otherEmail);
+        setBlocked(false);
+      } else {
+        await messagesService.blockUser(selected.eventId, selected.otherEmail);
+        setBlocked(true);
+      }
+    } catch (err: any) {
+      setSendError(err?.message || 'Could not change the block. Please try again.');
+    }
   }
 
   // The actual network delivery, shared by fresh sends and retries:
@@ -333,6 +404,7 @@ export function MessagesPage() {
     organizerId?: string;
     text: string;
     file?: File | null;
+    idempotencyKey?: string;
   }): Promise<EventMessage> {
     if (!currentUser?.email) throw new Error('Sign in to send messages.');
     let attachmentMeta: { name: string; size: number; type: string; path: string } | undefined;
@@ -348,18 +420,38 @@ export function MessagesPage() {
         fileSize: input.file.size,
         fileType: input.file.type,
       });
-      await messagesService.uploadFile(uploadUrl, input.file);
+      try {
+        await messagesService.uploadFile(uploadUrl, input.file);
+      } catch (err) {
+        // Upload itself failed: nothing was stored, nothing to clean.
+        throw err;
+      }
       attachmentMeta = { name: input.file.name, size: input.file.size, type: input.file.type, path };
     }
-    return messagesService.sendMessage({
-      eventId: input.eventId,
-      senderEmail: currentUser.email,
-      senderName: currentUser.name,
-      recipientEmail: input.recipientEmail || undefined,
-      organizerId: input.organizerId,
-      text: input.text,
-      attachment: attachmentMeta,
-    });
+    try {
+      return await messagesService.sendMessage({
+        eventId: input.eventId,
+        senderEmail: currentUser.email,
+        senderName: currentUser.name,
+        recipientEmail: input.recipientEmail || undefined,
+        organizerId: input.organizerId,
+        text: input.text,
+        attachment: attachmentMeta,
+        idempotencyKey: input.idempotencyKey,
+      });
+    } catch (err) {
+      // The file uploaded but the message did not send: delete the
+      // orphaned object instead of leaving it public in Storage
+      // forever, then report the original failure.
+      if (attachmentMeta) {
+        try {
+          await messagesService.deleteUpload(attachmentMeta.path);
+        } catch {
+          /* best effort: the orphan cleanup must not mask the send error */
+        }
+      }
+      throw err;
+    }
   }
 
   // Optimistic send: the bubble appears instantly as a normal sent
@@ -395,10 +487,12 @@ export function MessagesPage() {
         sendingFile && sendingFile.type.startsWith('image/')
           ? URL.createObjectURL(sendingFile)
           : undefined,
+      idempotencyKey: `msg-${selected.key}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
     };
     setPending((prev) => [...prev, temp]);
-    setDraft('');
-    setFile(null);
+    // The draft is cleared only on success now: clearing it before the
+    // send completed meant a failed send lost the text, and a retry
+    // could duplicate it. The idempotency key covers the retry.
     setSendError('');
     try {
       const created = await deliver({
@@ -407,6 +501,7 @@ export function MessagesPage() {
         organizerId: selected.otherEmail ? undefined : 'organizer',
         text,
         file: sendingFile,
+        idempotencyKey: temp.idempotencyKey,
       });
       setPending((prev) => prev.filter((p) => p.id !== temp.id));
       // Dedupe by id: the 3s poll can already have fetched this very
@@ -414,6 +509,12 @@ export function MessagesPage() {
       // blindly showed it twice until the next poll.
       setMessages((prev) => (prev.some((m) => m.id === created.id) ? prev : [...prev, created]));
       setPendingThread(null);
+      setDraft('');
+      setFile(null);
+      // Switch to the real thread key at once (the deep-link effect
+      // also does this on the next poll, but waiting for it left the
+      // pane blank after the first send).
+      setSelectedKey(threadKey(created.eventId, created.senderEmail, created.recipientEmail));
       await loadMessages(true);
     } catch (err: any) {
       setPending((prev) =>
@@ -435,9 +536,13 @@ export function MessagesPage() {
         recipientEmail: temp.recipientEmail,
         text: temp.text || '',
         file: temp.localFile || null,
+        idempotencyKey: temp.idempotencyKey,
       });
       setPending((prev) => prev.filter((p) => p.id !== temp.id));
       setMessages((prev) => (prev.some((m) => m.id === created.id) ? prev : [...prev, created]));
+      setDraft('');
+      setFile(null);
+      setSelectedKey(threadKey(created.eventId, created.senderEmail, created.recipientEmail));
       await loadMessages(true);
     } catch (err: any) {
       setPending((prev) =>
@@ -685,6 +790,16 @@ export function MessagesPage() {
                   <p className="text-xs font-semibold text-[#1E2320] truncate">{selected.eventTitle}</p>
                   <p className="text-[11px] text-[#5F635D] truncate">With {selected.otherName}</p>
                 </div>
+                {selected.otherEmail && (
+                  <button
+                    type="button"
+                    onClick={handleBlockToggle}
+                    title={blocked ? 'Allow messages from this person again' : 'Stop messages in this conversation'}
+                    className="ml-auto px-3 py-1.5 text-[11px] font-semibold text-rose-700 hover:bg-rose-50 border border-rose-200 rounded-lg shrink-0"
+                  >
+                    {blocked ? 'Unblock' : 'Block'}
+                  </button>
+                )}
               </div>
 
               <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-[300px] max-h-[60vh]">
@@ -743,6 +858,10 @@ export function MessagesPage() {
                                 </button>
                               </div>
                             </div>
+                          ) : m.deletedForEveryone ? (
+                            <p className="text-xs leading-relaxed italic opacity-70">
+                              This message was deleted
+                            </p>
                           ) : (
                             <>
                               {m.text && (

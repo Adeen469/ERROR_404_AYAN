@@ -75,13 +75,27 @@ export function OrganizerEventsPage() {
     if (!deleteTarget) return;
     setDeleting(true);
     try {
-      await eventsService.deleteEvent(deleteTarget.id, ownershipOpts);
+      const result = await eventsService.deleteEvent(deleteTarget.id, ownershipOpts);
       setEvents((prev) => prev.filter((e) => e.id !== deleteTarget.id));
       setDeleteTarget(null);
+      // Deleting no longer orphans registrations: the server cancels
+      // them, refunds paid rows, and emails attendees — say what
+      // happened, including refunds that still need manual action.
+      const s = result.summary;
+      const parts: string[] = [`"${deleteTarget.title}" was removed from the listings.`];
+      if (s && (s.cancelledCount || 0) > 0) {
+        parts.push(
+          `${s.cancelledCount} registration(s) cancelled, ${s.emailedCount || 0} attendee(s) emailed` +
+            ((s.refundedCount || 0) > 0 ? `, ${s.refundedCount} refund(s) initiated` : '') +
+            ((s.refundFailed || 0) > 0
+              ? `, ${s.refundFailed} refund(s) FAILED — refund manually from the Razorpay dashboard`
+              : ''),
+        );
+      }
       toast({
         type: 'info',
         title: 'Event Deleted',
-        description: `"${deleteTarget.title}" was removed from the listings.`,
+        description: parts.join(' '),
       });
     } catch {
       toast({ type: 'error', title: 'Failed to delete event' });
