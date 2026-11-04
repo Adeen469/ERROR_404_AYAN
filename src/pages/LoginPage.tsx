@@ -1,12 +1,22 @@
 import React, { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { Eye, EyeOff, Lock, Mail } from 'lucide-react';
 import { authService } from '../services/auth-service';
+import { isAdminEmail } from '../services/roles-service';
 import { useToast } from '../components/ui/Toast';
 import { GoogleAuthButton } from '../components/auth/GoogleAuthButton';
 
+// Only same-site paths are accepted as a post-login destination —
+// never an external URL, and never back to an auth page.
+function safeReturnTo(raw: string | null): string | null {
+  if (!raw || !raw.startsWith('/') || raw.startsWith('//')) return null;
+  if (raw === '/login' || raw.startsWith('/login?') || raw === '/signup' || raw === '/logout') return null;
+  return raw;
+}
+
 export function LoginPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { toast } = useToast();
 
   const [email, setEmail] = useState('');
@@ -14,6 +24,8 @@ export function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  const returnTo = safeReturnTo(searchParams.get('returnTo'));
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -31,7 +43,9 @@ export function LoginPage() {
         title: `Signed in as ${user.name}`,
         description: `Welcome back to Locora (${user.role} role).`,
       });
-      if (user.role === 'admin') {
+      if (returnTo) {
+        navigate(returnTo);
+      } else if (user.role === 'admin') {
         navigate('/admin');
       } else if (user.role === 'organizer') {
         navigate('/organizer/dashboard');
@@ -84,6 +98,11 @@ export function LoginPage() {
               className="w-full pl-9 pr-3 py-2.5 text-xs bg-white border border-[#E2DFD8] rounded-lg text-[#1E2320] focus:border-[#1E3F35]"
             />
           </div>
+          {isAdminEmail(email) && (
+            <p className="mt-1.5 text-[11px] text-[#5F635D]">
+              Admin accounts sign in with Google, not with a password — use the Google button below.
+            </p>
+          )}
         </div>
 
         <div>
@@ -136,6 +155,7 @@ export function LoginPage() {
 
         <GoogleAuthButton
           buttonText="Sign In with Google"
+          returnTo={returnTo ?? undefined}
           disabled={loading}
           onSuccess={(user) => {
             toast({

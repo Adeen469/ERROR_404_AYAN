@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, useLocation, Navigate } from 'react-router-dom';
 import { ToastProvider } from './components/ui/Toast';
 import { PageErrorBoundary } from './components/ui/ErrorBoundary';
 import { Navbar } from './components/layout/Navbar';
@@ -59,6 +59,27 @@ function ScrollToTop() {
   return null;
 }
 
+// Attendee pages used to have no route guard at all: a guest opening
+// /my-registrations or /messages got each page's own inconsistent
+// handling (one rendered an empty list). Now guests are sent to sign
+// in with ?returnTo= so they land back on the page they wanted, and
+// the server APIs still enforce the session themselves — this is a UX
+// guard, not the security boundary.
+function RequireAuth({ children }: { children: React.ReactNode }) {
+  const location = useLocation();
+  const [currentUser, setCurrentUser] = React.useState(() => authService.getCurrentUser());
+
+  useEffect(() => {
+    const unsub = authService.subscribe((u) => setCurrentUser(u));
+    return unsub;
+  }, []);
+
+  if (!currentUser) {
+    return <Navigate to={`/login?returnTo=${encodeURIComponent(location.pathname + location.search)}`} replace />;
+  }
+  return <>{children}</>;
+}
+
 export default function App() {
   return (
     <BrowserRouter>
@@ -79,11 +100,11 @@ export default function App() {
               <Route path="/smart-match" element={<SmartMatchPage />} />
 
               {/* Attendee Protected Areas */}
-              <Route path="/dashboard" element={<DashboardPage />} />
-              <Route path="/my-registrations" element={<RegistrationsPage />} />
-              <Route path="/saved" element={<SavedEventsPage />} />
-              <Route path="/profile" element={<ProfilePage />} />
-              <Route path="/messages" element={<MessagesPage />} />
+              <Route path="/dashboard" element={<RequireAuth><DashboardPage /></RequireAuth>} />
+              <Route path="/my-registrations" element={<RequireAuth><RegistrationsPage /></RequireAuth>} />
+              <Route path="/saved" element={<RequireAuth><SavedEventsPage /></RequireAuth>} />
+              <Route path="/profile" element={<RequireAuth><ProfilePage /></RequireAuth>} />
+              <Route path="/messages" element={<RequireAuth><MessagesPage /></RequireAuth>} />
 
               {/* Organizer Hub — guarded: only approved organizers and
                   admins may open these pages. Attendees get a page that

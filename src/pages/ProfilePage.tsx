@@ -44,9 +44,14 @@ export function ProfilePage() {
   useEffect(() => {
     if (!currentUser) return;
     let cancelled = false;
-    fetchAccess(currentUser.email).then((access) => {
-      if (!cancelled) setAccessRole(access ? access.role : null);
-    });
+    fetchAccess(currentUser.email)
+      .then((access) => {
+        if (!cancelled) setAccessRole(access ? access.role : null);
+      })
+      .catch(() => {
+        // Error status: leave the role unknown rather than treating
+        // the failure as "attendee" (see roles-service.ts).
+      });
     return () => {
       cancelled = true;
     };
@@ -453,22 +458,42 @@ export function ProfilePage() {
 
         {/* Save & Sign Out CTA */}
         <div className="pt-6 border-t border-[#EBE7DF] flex items-center justify-between gap-3">
-          <button
-            type="button"
-            onClick={async () => {
-              await authService.logout();
-              navigate('/');
-              toast({
-                type: 'info',
-                title: 'Signed Out',
-                description: 'You have been safely signed out.',
-              });
-            }}
-            className="flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-rose-600 hover:text-rose-700 hover:bg-rose-50 border border-rose-200 rounded-lg transition-colors cursor-pointer"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>Sign Out</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={async () => {
+                await authService.logout();
+                navigate('/');
+                toast({
+                  type: 'info',
+                  title: 'Signed Out',
+                  description: 'You have been safely signed out.',
+                });
+              }}
+              className="flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-rose-600 hover:text-rose-700 hover:bg-rose-50 border border-rose-200 rounded-lg transition-colors cursor-pointer"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Sign Out</span>
+            </button>
+            <button
+              type="button"
+              title="Sign out on every device and browser where this account is signed in"
+              onClick={async () => {
+                const result = await authService.logoutEverywhere();
+                navigate('/');
+                toast({
+                  type: result.everywhere ? 'success' : 'info',
+                  title: 'Signed out everywhere',
+                  description: result.everywhere
+                    ? 'All sessions for this account have been ended.'
+                    : 'This device is signed out. If other sessions are still active, sign in and try again.',
+                });
+              }}
+              className="px-3 py-2.5 text-xs font-semibold text-rose-600 hover:text-rose-700 hover:bg-rose-50 border border-rose-200 rounded-lg transition-colors cursor-pointer"
+            >
+              Sign out everywhere
+            </button>
+          </div>
 
           <button
             type="submit"

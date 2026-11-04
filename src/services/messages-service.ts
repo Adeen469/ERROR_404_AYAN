@@ -29,12 +29,21 @@ export interface EventMessage {
   senderEmail: string;
   senderName?: string;
   recipientEmail: string;
+  // Server-derived counterparty name for the thread list: without it,
+  // a sender-side thread showed the viewer's OWN name (the senderName
+  // was the only name stored). Falls back to the legacy senderName
+  // logic for rows written before this field existed.
+  recipientName?: string;
   text?: string;
   attachment?: MessageAttachment | null;
   read?: boolean;
   edited?: boolean;
   editedAt?: string;
   hiddenFor?: string[];
+  // Delete-for-everyone is now a tombstone, not a row deletion (the
+  // public attachment URL used to keep serving after the row vanished).
+  deletedForEveryone?: boolean;
+  deletedAt?: string;
   createdAt: string;
 }
 
@@ -80,7 +89,7 @@ export function groupThreads(messages: EventMessage[], meEmail: string): Message
     const otherEmail = m.senderEmail.toLowerCase() === me ? m.recipientEmail : m.senderEmail;
     const otherName =
       m.senderEmail.toLowerCase() === me
-        ? m.senderName || m.recipientEmail
+        ? m.recipientName || m.senderName || m.recipientEmail
         : m.senderName || m.senderEmail;
     const key = threadKey(m.eventId, m.senderEmail, m.recipientEmail);
     const thread = byKey.get(key) || {
@@ -130,6 +139,9 @@ export interface SendMessageInput {
   organizerId?: string;
   text?: string;
   attachment?: { name: string; size: number; type: string; path: string };
+  // Stable per draft: a retry reuses the same key and the server
+  // returns the already-created row instead of a duplicate message.
+  idempotencyKey?: string;
 }
 
 export const messagesService = {
@@ -138,14 +150,17 @@ export const messagesService = {
     return Array.isArray(data.messages) ? data.messages : [];
   },
 
-  async getUnreadCount(_userEmail?: string): Promise<number> {
+  // Returns null on failure so callers can keep the previous count:
+  // the old code returned 0 on any error, so a transient failure
+  // silently cleared a real unread badge.
+  async getUnreadCount(_userEmail?: string): Promise<number | null> {
     try {
       const data = await apiClient.request<{ count: number }>('/messages', {
         params: { unreadCount: 1 },
       });
       return typeof data.count === 'number' ? data.count : 0;
     } catch {
-      return 0;
+      return null;
     }
   },
 
@@ -170,12 +185,42 @@ export const messagesService = {
     });
   },
 
-  // "Delete for everyone": permanently removes the row (server only
-  // allows the sender). Also removes the Storage object best-effort.
+  // "Delete for everyone": tombstones the row (text + attachment
+  // cleared, deletedForEveryone flag set) within a 24h window — the
+  // server enforces both, and verifies the Storage object is really
+  // gone before tombstoning, so a public attachment URL can never
+  // outlive its message.
   async deleteForEveryone(id: string, _userEmail?: string): Promise<void> {
     await apiClient.request('/messages', {
       params: { id },
       method: 'DELETE',
+    });
+  },
+
+  // Block / unblock a thread counterparty (server stores a block row
+  // in the messages table; blocked threads refuse new messages both
+  // ways until the blocker unblocks).
+  async blockUser(eventId: string, blockedEmail: string): Promise<void> {
+    await apiClient.request('/messages', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'block', eventId, blockedEmail }),
+    });
+  },
+
+  async unblockUser(eventId: string, blockedEmail: string): Promise<void> {
+    await apiClient.request('/messages', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'unblock', eventId, blockedEmail }),
+    });
+  },
+
+  // Remove an uploaded attachment that never made it into a sent
+  // message (e.g. the send failed after the upload): without this,
+  // orphaned files stayed public in Storage forever.
+  async deleteUpload(path: string): Promise<void> {
+    await apiClient.request('/messages', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'delete-upload', path }),
     });
   },
 

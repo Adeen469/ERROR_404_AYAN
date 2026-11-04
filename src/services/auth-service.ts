@@ -77,11 +77,15 @@ export const authService = {
   // /api/auth/google/callback, which stores the profile in localStorage
   // and sends the user to /dashboard. Because the page navigates away,
   // this promise intentionally never resolves.
-  async loginWithGoogle(): Promise<UserProfile> {
+  async loginWithGoogle(returnTo?: string): Promise<UserProfile> {
     // Role is intentionally not passed: the callback assigns 'admin' to
     // admin emails and 'attendee' to everyone else. Nobody can choose
-    // 'organizer' at sign-in anymore.
-    window.location.href = '/api/auth/google?role=attendee';
+    // 'organizer' at sign-in anymore. A same-site returnTo is carried
+    // through the OAuth state by the server (which re-validates it).
+    const safe = returnTo && returnTo.startsWith('/') && !returnTo.startsWith('//')
+      ? `?returnTo=${encodeURIComponent(returnTo)}`
+      : '';
+    window.location.href = `/api/auth/google${safe}`;
     return new Promise<UserProfile>(() => {});
   },
 
@@ -118,9 +122,23 @@ export const authService = {
     localStorage.removeItem(TOKEN_STORAGE_KEY);
     // The per-email backup (utils/saved-profile.ts) intentionally stays:
     // it is what the next login restores the saved number from.
-    // Limitation: the server JWT stays valid until expiry if copied —
-    // see FIX_SUMMARY.md (no revocation list yet).
+    // The server token is revoked server-side (revoked_tokens table),
+    // so this device's session stops working immediately.
     notify(null);
+  },
+
+  // Sign out of ALL devices: bumps sessionVersion server-side, which
+  // invalidates every session for this account, then clears this
+  // device the same way logout() does.
+  async logoutEverywhere(): Promise<{ revoked: boolean; everywhere: boolean }> {
+    let result = { revoked: false, everywhere: false };
+    try {
+      result = await apiClient.post<{ revoked: boolean; everywhere: boolean }>('/auth/logout', { everywhere: true });
+    } catch { /* local state still clears below */ }
+    localStorage.removeItem(USER_STORAGE_KEY);
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    notify(null);
+    return result;
   },
 
   async updateProfile(updates: Partial<UserProfile>): Promise<UserProfile> {

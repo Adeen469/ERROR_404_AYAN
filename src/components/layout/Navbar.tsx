@@ -51,9 +51,15 @@ export function Navbar() {
       return;
     }
     let cancelled = false;
-    fetchAccess(currentUser.email).then((access) => {
-      if (!cancelled) setAccessRole(access ? access.role : null);
-    });
+    fetchAccess(currentUser.email)
+      .then((access) => {
+        if (!cancelled) setAccessRole(access ? access.role : null);
+      })
+      .catch(() => {
+        // Error status (not 503/network): hide organizer/admin links
+        // outright instead of falling back to a local 'admin' claim.
+        if (!cancelled) setAccessRole('attendee');
+      });
     return () => {
       cancelled = true;
     };
@@ -62,15 +68,29 @@ export function Navbar() {
     // navigation instead of keeping them until they sign out and back in.
   }, [currentUser?.email, location.pathname]);
 
-  // Unread message badge: refreshed on sign-in and on every route
-  // change (so reading a thread then navigating anywhere clears it).
-  // A failure here only hides the badge, never the Messages link.
+  // Unread message badge: refreshed on sign-in, on every route change
+  // (so reading a thread then navigating anywhere clears it), and
+  // every 30 seconds while the app is open (previously it only moved
+  // on navigation). A failed refresh keeps the previous count instead
+  // of resetting the badge to 0; a failure only ever hides the badge,
+  // never the Messages link.
   useEffect(() => {
     if (!currentUser?.email) {
       setUnreadCount(0);
       return;
     }
-    messagesService.getUnreadCount(currentUser.email).then(setUnreadCount);
+    let cancelled = false;
+    const refresh = () => {
+      messagesService.getUnreadCount(currentUser.email).then((count) => {
+        if (!cancelled && count !== null) setUnreadCount(count);
+      });
+    };
+    refresh();
+    const timer = setInterval(refresh, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, [currentUser?.email, location.pathname]);
 
   const canPost =
@@ -286,7 +306,7 @@ export function Navbar() {
                     <p className="text-xs font-medium text-slate-900 truncate">{currentUser.name}</p>
                     <p className="text-[11px] text-slate-500 truncate">{currentUser.email}</p>
                     <p className="text-[10px] text-indigo-600 font-semibold uppercase tracking-wider mt-1">
-                      Role: {currentUser.role}
+                      Role: {accessRole ?? currentUser.role}
                     </p>
                   </div>
 
