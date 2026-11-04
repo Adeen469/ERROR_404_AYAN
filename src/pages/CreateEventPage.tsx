@@ -14,34 +14,79 @@ import { useToast } from '../components/ui/Toast';
 // bundles them into dist/ for production. A plain src/ URL
 // string only works in Vite dev (via vite.middlewares) and 404s in a
 // production build, which is why the cards showed broken images.
-import heroGatheringImg from '../assets/images/hero_neighborhood_gathering_1792850960020.jpg';
 import techHackathonImg from '../assets/images/event_tech_hackathon_1792850960780.jpg';
 import farmersMarketImg from '../assets/images/event_farmers_market_1792850961672.jpg';
 import acousticMusicImg from '../assets/images/event_acoustic_music_1792850962324.jpg';
 import morningYogaImg from '../assets/images/event_morning_yoga_1792850962615.jpg';
 
-export const PRESET_COVER_IMAGES = [
-  {
-    name: 'Evening Gathering',
-    url: heroGatheringImg,
-  },
+// One preset per category (7 categories, 7 covers). Four are the bundled
+// images; the other three are stable Unsplash photos, because binary
+// images cannot be pushed through the text-only push route used here.
+// The hero gathering image is still used on Home/Landing, just not as a
+// preset anymore.
+export const PRESET_COVER_IMAGES: { name: string; url: string; category: EventCategory }[] = [
   {
     name: 'Tech & Hackathon',
     url: techHackathonImg,
+    category: 'Technology & Hackathons',
   },
   {
-    name: 'Farmers & Food Market',
-    url: farmersMarketImg,
+    name: 'Workshop & Learning',
+    url: 'https://images.unsplash.com/photo-1552664730-d307ca884978?w=800&auto=format&fit=crop&q=80',
+    category: 'Workshops & Learning',
   },
   {
     name: 'Acoustic Concert',
     url: acousticMusicImg,
+    category: 'Live Music & Culture',
   },
   {
     name: 'Morning Wellness & Yoga',
     url: morningYogaImg,
+    category: 'Fitness & Outdoors',
+  },
+  {
+    name: 'Farmers & Food Market',
+    url: farmersMarketImg,
+    category: 'Food & Community',
+  },
+  {
+    name: 'Art & Creative',
+    url: 'https://images.unsplash.com/photo-1541961017774-22349e4a1262?w=800&auto=format&fit=crop&q=80',
+    category: 'Art & Creative',
+  },
+  {
+    name: 'Volunteering & Impact',
+    url: 'https://images.unsplash.com/photo-1593113598332-cd288d649433?w=800&auto=format&fit=crop&q=80',
+    category: 'Volunteering & Impact',
   },
 ];
+
+// Category -> its preset cover. Used when the dropdown category changes.
+export const CATEGORY_COVER: Record<EventCategory, string> = Object.fromEntries(
+  PRESET_COVER_IMAGES.map((preset) => [preset.category, preset.url]),
+) as Record<EventCategory, string>;
+
+// Format a Date as a datetime-local value (local time, YYYY-MM-DDTHH:MM).
+function toLocalInput(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// Default schedule: tomorrow 18:00-21:00, so the form never opens with a
+// past date (the old hardcoded 2026-11-20 defaults would go stale).
+function defaultStart(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  d.setHours(18, 0, 0, 0);
+  return toLocalInput(d);
+}
+function defaultEnd(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  d.setHours(21, 0, 0, 0);
+  return toLocalInput(d);
+}
 
 export function CreateEventPage() {
   const navigate = useNavigate();
@@ -52,14 +97,41 @@ export function CreateEventPage() {
   const [summary, setSummary] = useState('');
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState<EventCategory>('Food & Community');
-  const [coverImage, setCoverImage] = useState(PRESET_COVER_IMAGES[0].url);
-  const [customImageUrl, setCustomImageUrl] = useState('');
+  // Free-text category. When non-empty it wins over the dropdown, and no
+  // preset cover is selected (see handleCustomCategoryChange).
+  const [customCategory, setCustomCategory] = useState('');
+  const [coverImage, setCoverImage] = useState(CATEGORY_COVER['Food & Community']);
   // Uploaded cover (data URL from ImageUploadField). Only one cover source
-  // is active at a time: picking a preset, typing a URL, or uploading each
-  // clears the others.
+  // is active at a time: picking a preset or uploading clears the other.
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
-  const [startDate, setStartDate] = useState('2026-11-20T18:00');
-  const [endDate, setEndDate] = useState('2026-11-20T21:00');
+  const [startDate, setStartDate] = useState(defaultStart);
+  const [endDate, setEndDate] = useState(defaultEnd);
+
+  // Dropdown category -> auto-select that category's preset cover, and
+  // clear any custom category text.
+  const handleCategoryChange = (v: string) => {
+    const next = v as EventCategory;
+    setCategory(next);
+    setCustomCategory('');
+    setCoverImage(CATEGORY_COVER[next]);
+    setUploadedImage(null);
+  };
+
+  // Custom category text -> no preset cover is selected. Clearing the
+  // text restores the dropdown category's cover.
+  const handleCustomCategoryChange = (text: string) => {
+    setCustomCategory(text);
+    if (text.trim()) {
+      setCoverImage('');
+      setUploadedImage(null);
+    } else {
+      setCoverImage(CATEGORY_COVER[category]);
+    }
+  };
+
+  // Earliest selectable date/time, recomputed on each render so the
+  // native picker greys out past dates/times.
+  const minDateTime = toLocalInput(new Date());
   const [venueName, setVenueName] = useState('');
   const [address, setAddress] = useState('');
   // Worldwide event location (Country -> State -> City). Previously every
@@ -90,9 +162,12 @@ export function CreateEventPage() {
 
     const start = new Date(startDate);
     const end = new Date(endDate);
+    const now = new Date();
     if (isNaN(start.getTime())) errs.startDate = 'Valid start date & time required.';
+    else if (start < now) errs.startDate = 'Start date & time cannot be in the past.';
     if (isNaN(end.getTime())) errs.endDate = 'Valid end date & time required.';
-    if (end <= start) errs.endDate = 'End time must be strictly after start time.';
+    else if (end < now) errs.endDate = 'End date & time cannot be in the past.';
+    else if (end <= start) errs.endDate = 'End time must be strictly after start time.';
 
     const capNum = Number(capacity);
     if (isNaN(capNum) || capNum <= 0) errs.capacity = 'Capacity must be at least 1 spot.';
@@ -134,9 +209,12 @@ export function CreateEventPage() {
 
     setSubmitting(true);
     try {
-      const activeImage = customImageUrl.trim()
-        ? customImageUrl.trim()
-        : uploadedImage || coverImage;
+      const activeImage = uploadedImage || coverImage;
+      // Custom category text wins over the dropdown; it is not one of the
+      // preset EventCategory values, so it is cast at the boundary here.
+      const effectiveCategory = customCategory.trim()
+        ? (customCategory.trim() as EventCategory)
+        : category;
       const tags = tagsInput
         .split(',')
         .map((t) => t.trim())
@@ -146,7 +224,7 @@ export function CreateEventPage() {
         title: title.trim(),
         summary: summary.trim() || description.trim().slice(0, 140),
         description: description.trim(),
-        category,
+        category: effectiveCategory,
         coverImage: activeImage,
         startDate: new Date(startDate).toISOString(),
         endDate: new Date(endDate).toISOString(),
@@ -257,7 +335,7 @@ export function CreateEventPage() {
               <ThemedSelect
                 value={category}
                 options={DEMO_CATEGORIES.map((cat) => ({ value: cat, label: cat }))}
-                onChange={(v) => setCategory(v as EventCategory)}
+                onChange={handleCategoryChange}
                 ariaLabel="Category"
                 size="form"
               />
@@ -275,6 +353,24 @@ export function CreateEventPage() {
                 className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
               />
             </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+              Or Custom Category
+            </label>
+            <input
+              type="text"
+              value={customCategory}
+              onChange={(e) => handleCustomCategoryChange(e.target.value)}
+              placeholder="e.g. Charity Run"
+              className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
+            />
+            <p className="text-[11px] text-[#5F635D] mt-1">
+              Leave blank to use the dropdown category. Typing here overrides
+              the dropdown and clears the cover selection below — upload your
+              own cover, or pick a dropdown category again to restore its cover.
+            </p>
           </div>
 
           <div>
@@ -302,17 +398,20 @@ export function CreateEventPage() {
             2. Cover Artwork
           </h2>
 
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
             {PRESET_COVER_IMAGES.map((preset) => {
               const selected =
-                coverImage === preset.url && !customImageUrl && !uploadedImage;
+                coverImage === preset.url && !uploadedImage;
               return (
                 <button
                   key={preset.name}
                   type="button"
                   onClick={() => {
+                    // Picking a preset also switches back to its category,
+                    // so a custom category can never sit under a preset.
                     setCoverImage(preset.url);
-                    setCustomImageUrl('');
+                    setCategory(preset.category);
+                    setCustomCategory('');
                     setUploadedImage(null);
                   }}
                   className={`relative rounded-xl overflow-hidden aspect-[4/3] border-2 transition-all cursor-pointer ${
@@ -338,6 +437,12 @@ export function CreateEventPage() {
             })}
           </div>
 
+          {customCategory.trim() && !uploadedImage && !coverImage && (
+            <p className="text-[11px] text-[#5F635D]">
+              No cover selected for this custom category — upload one below.
+            </p>
+          )}
+
           <div>
             <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
               Or Upload Your Own Image
@@ -346,25 +451,8 @@ export function CreateEventPage() {
               uploadedImage={uploadedImage}
               onUpload={(dataUrl) => {
                 setUploadedImage(dataUrl);
-                setCustomImageUrl('');
               }}
               onRemove={() => setUploadedImage(null)}
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
-              Or Custom Image URL
-            </label>
-            <input
-              type="url"
-              value={customImageUrl}
-              onChange={(e) => {
-                setCustomImageUrl(e.target.value);
-                if (e.target.value.trim()) setUploadedImage(null);
-              }}
-              placeholder="https://example.com/photo.jpg"
-              className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
             />
           </div>
         </div>
@@ -383,8 +471,9 @@ export function CreateEventPage() {
               <input
                 type="datetime-local"
                 value={startDate}
+                min={minDateTime}
                 onChange={(e) => setStartDate(e.target.value)}
-                className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] ${
+                className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] focus:ring-1 focus:ring-[#1E3F35] ${
                   errors.startDate ? 'border-rose-500' : 'border-[#E2DFD8]'
                 }`}
               />
@@ -400,8 +489,9 @@ export function CreateEventPage() {
               <input
                 type="datetime-local"
                 value={endDate}
+                min={minDateTime}
                 onChange={(e) => setEndDate(e.target.value)}
-                className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] ${
+                className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] focus:ring-1 focus:ring-[#1E3F35] ${
                   errors.endDate ? 'border-rose-500' : 'border-[#E2DFD8]'
                 }`}
               />
