@@ -6,6 +6,7 @@ import { DEMO_CATEGORIES } from '../mocks/demo-data';
 import { LocationPicker } from '../components/LocationPicker';
 import { ThemedSelect } from '../components/ui/ThemedSelect';
 import { ImageUploadField } from '../components/events/ImageUploadField';
+import { DateTimePicker } from '../components/events/DateTimePicker';
 import { eventsService } from '../services/events-service';
 import { detectLocationByIp } from '../services/location-service';
 import { authService } from '../services/auth-service';
@@ -130,9 +131,17 @@ export function CreateEventPage() {
     }
   };
 
-  // Earliest selectable date/time, recomputed on each render so the
-  // native picker greys out past dates/times.
-  const minDateTime = toLocalInput(new Date());
+  // "Now", recomputed on each render: the Start picker's earliest
+  // allowed datetime. The End picker's earliest is the Start value.
+  const nowInput = toLocalInput(new Date());
+
+  // Moving Start later must never leave End before it: snap End to the
+  // new Start (same date & time is allowed) instead of leaving an
+  // invalid pair for submit validation to catch.
+  const handleStartChange = (v: string) => {
+    setStartDate(v);
+    if (endDate && endDate < v) setEndDate(v);
+  };
 
   // Worldwide event location (Country -> State -> City). Previously every
   // event was silently fixed to 'Metro City' with no way to change it.
@@ -554,14 +563,12 @@ export function CreateEventPage() {
               <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
                 Start Date & Time *
               </label>
-              <input
-                type="datetime-local"
+              <DateTimePicker
                 value={startDate}
-                min={minDateTime}
-                onChange={(e) => setStartDate(e.target.value)}
-                className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] focus:ring-1 focus:ring-[#1E3F35] ${
-                  errors.startDate ? 'border-rose-500' : 'border-[#E2DFD8]'
-                }`}
+                onChange={handleStartChange}
+                earliest={nowInput}
+                ariaLabel="Start date and time"
+                hasError={!!errors.startDate}
               />
               {errors.startDate && (
                 <p className="text-[11px] text-rose-600 mt-1">{errors.startDate}</p>
@@ -572,14 +579,12 @@ export function CreateEventPage() {
               <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
                 End Date & Time *
               </label>
-              <input
-                type="datetime-local"
+              <DateTimePicker
                 value={endDate}
-                min={minDateTime}
-                onChange={(e) => setEndDate(e.target.value)}
-                className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] focus:ring-1 focus:ring-[#1E3F35] ${
-                  errors.endDate ? 'border-rose-500' : 'border-[#E2DFD8]'
-                }`}
+                onChange={(v) => setEndDate(v)}
+                earliest={startDate || nowInput}
+                ariaLabel="End date and time"
+                hasError={!!errors.endDate}
               />
               {errors.endDate && (
                 <p className="text-[11px] text-rose-600 mt-1">{errors.endDate}</p>

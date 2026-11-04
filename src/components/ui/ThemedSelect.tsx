@@ -11,6 +11,9 @@ import { Check, ChevronDown } from 'lucide-react';
 export interface ThemedSelectOption {
   value: string;
   label: string;
+  // Greyed out and unclickable (used by the date/time picker for past
+  // hours and minutes). Options without this behave exactly as before.
+  disabled?: boolean;
 }
 
 interface ThemedSelectProps {
@@ -109,16 +112,24 @@ export function ThemedSelect({
               <button
                 key={opt.value}
                 type="button"
+                disabled={opt.disabled}
                 onClick={() => {
+                  if (opt.disabled) return;
                   onChange(opt.value);
                   setOpen(false);
                 }}
-                className={`w-full flex items-center justify-between gap-2 text-left px-3 py-2 transition-colors cursor-pointer ${
+                className={`w-full flex items-center justify-between gap-2 text-left px-3 py-2 transition-colors ${
+                  opt.disabled
+                    ? 'text-[#C9C4B8] opacity-50 cursor-not-allowed'
+                    : 'cursor-pointer'
+                } ${
                   size === 'drawer' ? 'text-sm' : 'text-xs'
                 } ${
                   isSelected
                     ? 'bg-[#EAF1ED] text-[#1E3F35] font-semibold'
-                    : 'text-[#1E2320] hover:bg-[#F4F1EA]'
+                    : opt.disabled
+                      ? ''
+                      : 'text-[#1E2320] hover:bg-[#F4F1EA]'
                 }`}
               >
                 <span className="truncate">{opt.label}</span>
