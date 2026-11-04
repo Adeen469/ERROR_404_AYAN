@@ -1,5 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
+import {
+  filterSearchOptions,
+  findExactMatch,
+} from '../../utils/searchable-options';
 
 // A dropdown that actually looks like Locora, instead of the browser's
 // plain native select: parchment-white trigger, Deep Forest focus ring,
@@ -33,11 +37,17 @@ interface ThemedSelectProps {
   onCustomChange?: (value: string) => void;
   customPlaceholder?: string;
   customLabel?: string;
-  // Hidden type-to-search: when the popover is open, typing letters
-  // filters the option list, but the typed text is NEVER shown anywhere
-  // — there is no search box, and the trigger keeps showing only the
-  // selected result. Picking a result clears the search. Off by default,
-  // so every existing dropdown behaves exactly as before.
+  // Searchable: a search input sits at the top of the popover (it is
+  // NOT a field on the page, and it is NOT an option). Typing in it
+  // filters the real options in real time; the query itself never
+  // becomes an option and never becomes the field value — only clicking
+  // a result, or Enter on an exact match / a highlighted result, calls
+  // onChange. The trigger always shows the selected result only, and
+  // the search clears on select or close. Off by default, so every
+  // existing dropdown behaves exactly as before. This replaces the
+  // earlier hidden type-to-search, which had no input to type into: a
+  // closed field is a button, not an input, so typing did nothing, and
+  // on mobile no keyboard ever appeared.
   searchable?: boolean;
 }
 
@@ -56,20 +66,38 @@ export function ThemedSelect({
 }: ThemedSelectProps) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
-  // The typed search is held here only — it is never rendered, so the
-  // user sees only the filtered results, never their keystrokes.
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  // Selected value (the `value` prop) and search query are separate
+  // state on purpose: typing only ever narrows the list, it never
+  // writes the field. Only selectOption() writes the field.
   const [searchQuery, setSearchQuery] = useState('');
-  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [highlightIndex, setHighlightIndex] = useState(-1);
+  const [noExactMatch, setNoExactMatch] = useState(false);
+
+  const resetSearch = () => {
+    setSearchQuery('');
+    setHighlightIndex(-1);
+    setNoExactMatch(false);
+  };
+
+  const closePicker = () => {
+    resetSearch();
+    setOpen(false);
+  };
 
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (e: MouseEvent) => {
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
-        setOpen(false);
+        closePicker();
       }
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key === 'Escape') {
+        closePicker();
+        triggerRef.current?.focus();
+      }
     };
     document.addEventListener('mousedown', onPointerDown);
     document.addEventListener('keydown', onKeyDown);
@@ -79,54 +107,73 @@ export function ThemedSelect({
     };
   }, [open ]);
 
-  // Type-to-search capture: only while this popover is open, and never
-  // while typing in a real input (e.g. the custom-value box). One
-  // printable key appends to the hidden search; Backspace removes the
-  // last letter; pausing for ~1.2s resets it so a new search starts
-  // fresh. Closing the popover or picking a result also resets it.
   useEffect(() => {
-    if (!open || !searchable) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      const target = e.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          target.isContentEditable)
-      ) {
-        return;
-      }
-      if (e.key === 'Backspace') {
-        setSearchQuery((q) => q.slice(0, -1));
-      } else if (e.key.length === 1) {
-        setSearchQuery((q) => q + e.key.toLowerCase());
-      } else {
-        return;
-      }
-      if (searchTimer.current) clearTimeout(searchTimer.current);
-      searchTimer.current = setTimeout(() => setSearchQuery(''), 1200);
-    };
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      if (searchTimer.current) clearTimeout(searchTimer.current);
-    };
-  }, [open, searchable]);
-
-  useEffect(() => {
-    if (!open) setSearchQuery('');
+    if (!open) resetSearch();
   }, [open ]);
 
   const selected = options.find((o) => o.value === value);
   const label = selected ? selected.label : value;
 
-  // The list the user actually sees: narrowed by the hidden search when
-  // one is in progress, full list otherwise.
-  const visibleOptions =
-    searchable && searchQuery
-      ? options.filter((o) => o.label.toLowerCase().includes(searchQuery))
-      : options;
+  // The list the user actually sees: the full dataset filtered by the
+  // search query in real time (case-insensitive, partial, trimmed,
+  // de-duplicated). With no query it is the full list. The query itself
+  // is never added to this list.
+  const visibleOptions = searchable
+    ? filterSearchOptions(options, searchQuery)
+    : options;
+  optionRefs.current.length = visibleOptions.length;
+
+  // Keep a keyboard-highlighted row in view while arrowing through the
+  // filtered list.
+  useEffect(() => {
+    if (highlightIndex >= 0) {
+      optionRefs.current[highlightIndex]?.scrollIntoView({ block: 'nearest' });
+    }
+  }, [highlightIndex]);
+
+  const selectOption = (opt: ThemedSelectOption) => {
+    if (opt.disabled) return;
+    onChange(opt.value);
+    closePicker();
+    triggerRef.current?.focus();
+  };
+
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setNoExactMatch(false);
+      setHighlightIndex((i) =>
+        visibleOptions.length === 0
+          ? -1
+          : Math.min(i + 1, visibleOptions.length - 1),
+      );
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setNoExactMatch(false);
+      setHighlightIndex((i) => Math.max(i - 1, -1));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      // Arrow-highlighted result first; otherwise only an exact match
+      // (full name, case-insensitive, trimmed) may be selected. A
+      // partial query with no exact match selects nothing, stays open,
+      // and shows the hint below — arbitrary text is never accepted.
+      const highlighted =
+        highlightIndex >= 0 ? visibleOptions[highlightIndex] : undefined;
+      if (highlighted && !highlighted.disabled) {
+        selectOption(highlighted);
+        return;
+      }
+      const exact = findExactMatch(options, searchQuery);
+      if (exact && !exact.disabled) {
+        selectOption(exact);
+        return;
+      }
+      setNoExactMatch(true);
+    } else if (e.key === 'Escape') {
+      closePicker();
+      triggerRef.current?.focus();
+    }
+  };
 
   const triggerSize =
     size === 'bar'
@@ -142,6 +189,7 @@ export function ThemedSelect({
   return (
     <div ref={wrapRef} className={`relative ${size === 'bar' ? '' : 'w-full'}`}>
       <button
+        ref={triggerRef}
         type="button"
         aria-label={ariaLabel}
         aria-expanded={open}
@@ -164,28 +212,50 @@ export function ThemedSelect({
           className={`absolute z-30 mt-2 bg-white border border-[#E7E3DB] rounded-xl shadow-lg py-1 max-h-64 overflow-y-auto ${popoverSize}`}
         >
           {searchable && (
-            <p className="px-3 py-2 text-[11px] text-[#5F635D] border-b border-[#E7E3DB]">
-              Type to search
-            </p>
+            <div className="sticky top-0 bg-white px-2 pt-1 pb-2 border-b border-[#E7E3DB]">
+              <input
+                autoFocus
+                type="text"
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setHighlightIndex(-1);
+                  setNoExactMatch(false);
+                }}
+                onKeyDown={handleSearchKeyDown}
+                placeholder="Search…"
+                aria-label={`${ariaLabel} search`}
+                className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg px-3 py-2 text-[#1E2320] focus:border-[#1E3F35] focus:ring-1 focus:ring-[#1E3F35] outline-none"
+              />
+              {noExactMatch && (
+                <p className="text-[11px] text-rose-600 mt-1">
+                  No exact match — pick a result from the list below.
+                </p>
+              )}
+            </div>
           )}
-          {searchable && searchQuery && visibleOptions.length === 0 && (
-            <p className="px-3 py-2 text-xs text-[#5F635D]">
-              No matching results
-            </p>
-          )}
-          {visibleOptions.map((opt) => {
+          {searchable &&
+            searchQuery.trim() &&
+            visibleOptions.length === 0 && (
+              <p className="px-3 py-2 text-xs text-[#5F635D]">
+                No results found
+              </p>
+            )}
+          {visibleOptions.map((opt, index) => {
             const isSelected = opt.value === value;
+            const isHighlighted = searchable && highlightIndex === index;
             return (
               <button
                 key={opt.value}
+                ref={(el) => {
+                  optionRefs.current[index] = el;
+                }}
                 type="button"
                 disabled={opt.disabled}
-                onClick={() => {
-                  if (opt.disabled) return;
-                  onChange(opt.value);
-                  setSearchQuery('');
-                  setOpen(false);
+                onMouseEnter={() => {
+                  if (searchable) setHighlightIndex(index);
                 }}
+                onClick={() => selectOption(opt)}
                 className={`w-full flex items-center justify-between gap-2 text-left px-3 py-2 transition-colors ${
                   opt.disabled
                     ? 'text-[#C9C4B8] opacity-50 cursor-not-allowed'
@@ -197,7 +267,9 @@ export function ThemedSelect({
                     ? 'bg-[#EAF1ED] text-[#1E3F35] font-semibold'
                     : opt.disabled
                       ? ''
-                      : 'text-[#1E2320] hover:bg-[#F4F1EA]'
+                      : isHighlighted
+                        ? 'bg-[#F4F1EA] text-[#1E2320]'
+                        : 'text-[#1E2320] hover:bg-[#F4F1EA]'
                 }`}
               >
                 <span className="truncate">{opt.label}</span>
