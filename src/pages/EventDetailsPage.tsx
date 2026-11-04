@@ -21,6 +21,7 @@ import { EventItem, AttendeeRegistration } from '../types';
 import QRCode from 'qrcode';
 import { eventsService } from '../services/events-service';
 import { registrationsService } from '../services/registrations-service';
+import { paymentsService } from '../services/payments-service';
 import { savedEventsService } from '../services/saved-events-service';
 import { authService } from '../services/auth-service';
 import { AttendeeDetailsGate } from '../components/events/AttendeeDetailsGate';
@@ -106,6 +107,7 @@ export function EventDetailsPage() {
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [utr, setUtr] = useState('');
   const [utrError, setUtrError] = useState('');
+  const [razorpayError, setRazorpayError] = useState('');
   const [copiedUpi, setCopiedUpi] = useState(false);
   const [upiQr, setUpiQr] = useState('');
   // SECURITY FIX (Finding 2): UPI is no longer in the public event
@@ -303,6 +305,105 @@ export function EventDetailsPage() {
       });
     } finally {
       setActionLoading(false);
+    }
+  };
+
+  // Razorpay Standard Checkout: the pass is issued automatically, but
+  // ONLY after the server verifies the payment (signature + captured
+  // payment from Razorpay itself). The checkout success callback alone
+  // never issues a pass — handleRazorpayPay always calls verify first.
+  // Dismissing the modal or a failed payment leaves the registration
+  // pending, so the attendee can retry or fall back to manual UPI.
+  const handleRazorpayPay = async () => {
+    if (!event) return;
+    setRazorpayError('');
+    setActionLoading(true);
+    try {
+      // Reuse the shared pending registration if one already exists
+      // (e.g. created on another device); otherwise create a Razorpay
+      // pending row. Never create a second pending row for this user.
+      let reg = registration && registration.status === 'pending' ? registration : null;
+      if (!reg) {
+        reg = await registrationsService.registerWithRazorpay(event);
+        setRegistration(reg);
+      }
+      const order = await paymentsService.createOrder(reg.id);
+      if (order.alreadyPaid) {
+        // Payment was captured but verify never completed (browser
+        // closed, network drop): recover server-side, no checkout.
+        const result = await paymentsService.verifyPayment({
+          registrationId: reg.id,
+          razorpay_order_id: order.order_id,
+        });
+        if (result.success) {
+          const updated = await registrationsService.getRegistrationForEvent(event.id);
+          if (updated) setRegistration(updated);
+          setEvent((prev) => (prev ? { ...prev, registeredCount: prev.registeredCount + 1 } : null));
+          setPaymentOpen(false);
+          toast({
+            type: 'success',
+            title: 'Payment confirmed!',
+            description: `Your ticket code is ${result.ticketCode}. View it anytime in My Registrations.`,
+          });
+        }
+        return;
+      }
+      const user = authService.getCurrentUser();
+      await paymentsService.openCheckout({
+        order,
+        eventTitle: event.title,
+        attendeeName: user?.name,
+        attendeeEmail: user?.email,
+        attendeePhone: user?.phone,
+        onSuccess: async (response) => {
+          try {
+            const result = await paymentsService.verifyPayment({
+              registrationId: reg!.id,
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+            });
+            if (result.success) {
+              const updated = await registrationsService.getRegistrationForEvent(event.id);
+              if (updated) setRegistration(updated);
+              setEvent((prev) => (prev ? { ...prev, registeredCount: prev.registeredCount + 1 } : null));
+              setPaymentOpen(false);
+              toast({
+                type: 'success',
+                title: 'Payment confirmed!',
+                description: `Your ticket code is ${result.ticketCode}. View it anytime in My Registrations.`,
+              });
+            }
+          } catch (err: unknown) {
+            setRazorpayError(
+              err instanceof Error
+                ? err.message
+                : 'Payment verification failed. If money was deducted, contact the organizer with your payment ID.',
+            );
+          } finally {
+            setActionLoading(false);
+          }
+        },
+        onDismiss: () => {
+          setActionLoading(false);
+          toast({
+            type: 'info',
+            title: 'Payment cancelled',
+            description: 'Your registration is still pending — you can try again or pay via UPI below.',
+          });
+        },
+        onError: (message) => {
+          setActionLoading(false);
+          setRazorpayError(message);
+        },
+      });
+    } catch (err: unknown) {
+      setActionLoading(false);
+      setRazorpayError(
+        err instanceof Error
+          ? err.message
+          : 'Could not start Razorpay payment. Please try again or pay via UPI below.',
+      );
     }
   };
 
@@ -625,17 +726,30 @@ export function EventDetailsPage() {
                 <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2.5">
                   <Clock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
                   <div className="text-xs text-amber-800">
-                    <p className="font-semibold">Payment pending approval</p>
+                    <p className="font-semibold">
+                      {registration?.paymentMethod === 'razorpay'
+                        ? 'Payment pending'
+                        : 'Payment pending approval'}
+                    </p>
                     <p className="text-[11px] mt-0.5">
-                      UTR {registration?.utr} submitted. The organizer will verify your payment and approve your pass — it will appear here once approved.
+                      {registration?.paymentMethod === 'razorpay'
+                        ? 'Your Razorpay payment is not complete yet. Pay now and your pass will be issued automatically once the payment is verified.'
+                        : `UTR ${registration?.utr} submitted. The organizer will verify your payment and approve your pass — it will appear here once approved.`}
                     </p>
                   </div>
                 </div>
 
                 <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPaymentOpen(true)}
+                    className="flex-1 text-center py-2.5 px-3 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors"
+                  >
+                    Pay Now
+                  </button>
                   <Link
                     to="/my-registrations"
-                    className="flex-1 text-center py-2.5 px-3 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors"
+                    className="flex-1 text-center py-2.5 px-3 text-xs font-semibold text-[#1E3F35] bg-[#EAF1ED] hover:bg-[#DCEAE3] border border-[#D0E2D9] rounded-lg transition-colors"
                   >
                     View Registration
                   </Link>
@@ -784,17 +898,42 @@ export function EventDetailsPage() {
         confirmLabel={isPaymentPending ? 'Yes, Withdraw Request' : 'Yes, Cancel RSVP'}
       />
 
-      {/* Manual-approval payment dialog (paid events only) */}
+      {/* Payment dialog (paid events only): Razorpay for an automatic
+          pass, or the original manual UPI/UTR flow for organizer
+          approval. Both paths create the same pending registration
+          shape; only the confirmation step differs. */}
       <Modal
         isOpen={paymentOpen}
         onClose={() => {
           setPaymentOpen(false);
           setUtrError('');
+          setRazorpayError('');
         }}
         title="Pay & Register"
-        description={`This is a paid event. Pay ${formatPrice(event.price)} to the organizer via UPI — scan the QR code or tap Pay via UPI app — then enter your 12-digit UTR below. Your pass is issued once the organizer approves the payment.`}
+        description={`This is a paid event (${formatPrice(event.price)}). Pay with Razorpay for an automatic pass, or pay via UPI and enter your 12-digit UTR below for organizer approval.`}
       >
         <div className="space-y-4">
+          <div className="p-4 bg-[#EAF1ED] border border-[#D0E2D9] rounded-lg space-y-2">
+            <p className="text-xs font-semibold text-[#1E3F35]">Pay with Razorpay — automatic pass</p>
+            <p className="text-[11px] text-[#5F635D] leading-relaxed">
+              Pay by UPI, card, or netbanking in the Razorpay checkout. Your pass is issued
+              automatically once the payment is verified — no UTR needed, no organizer approval.
+            </p>
+            <button
+              type="button"
+              disabled={actionLoading}
+              onClick={handleRazorpayPay}
+              className="w-full py-3 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors disabled:opacity-60"
+            >
+              {actionLoading ? 'Starting payment…' : `Pay ${formatPrice(event.price)} with Razorpay`}
+            </button>
+            {razorpayError && <p className="text-[11px] text-rose-600">{razorpayError}</p>}
+          </div>
+
+          <p className="text-[11px] font-semibold text-[#5F635D] text-center">
+            Or pay manually via UPI
+          </p>
+
           <div className="p-4 bg-[#F4F1EA] border border-[#E2DFD8] rounded-lg space-y-2">
             <div className="flex items-center justify-between text-xs">
               <span className="text-[#5F635D]">Amount to pay</span>

@@ -255,6 +255,62 @@ export const registrationsService = {
     return newReg;
   },
 
+  // Razorpay path: same pending row as registerWithPayment, but no
+  // UTR and no organizer approval. The row is created pending with
+  // paymentMethod 'razorpay'; api/payments.ts then creates the order
+  // for this row and confirms it (issuing the pass) only after a
+  // verified captured payment. The server skips the approval emails
+  // for razorpay rows (see api/registrations.ts), so the organizer is
+  // never asked to approve a Razorpay payment.
+  async registerWithRazorpay(event: EventItem): Promise<AttendeeRegistration> {
+    const user = authService.getCurrentUser();
+    if (!user) {
+      throw new Error('Please sign in or select a demo user profile to register for events.');
+    }
+    if (event.registeredCount >= event.capacity) {
+      throw new Error('This event is at full capacity. Join the waitlist or explore nearby alternatives.');
+    }
+
+    const all = getStoredRegistrations();
+    const existing = all.find((r) => r.eventId === event.id && r.userId === user.id);
+    if (existing && (existing.status === 'confirmed' || existing.status === 'pending')) {
+      return existing;
+    }
+
+    const newReg: AttendeeRegistration = {
+      id: `reg-${Date.now()}`,
+      eventId: event.id,
+      event,
+      userId: user.id,
+      userName: user.name,
+      userEmail: user.email,
+      userPhone: user.phone || undefined,
+      phoneVerified: user.phoneVerified || undefined,
+      holdsSpot: false,
+      status: 'pending',
+      registeredAt: new Date().toISOString(),
+      ticketCode: '',
+      checkedIn: false,
+      paymentMethod: 'razorpay',
+    };
+
+    all.unshift(newReg);
+    saveStoredRegistrations(all);
+
+    if (!isDemoMode()) {
+      try {
+        await apiClient.post('/registrations', newReg);
+      } catch (err) {
+        console.warn('Shared registration unavailable, keeping local pending registration:', err);
+      }
+    }
+
+    // No count change: a pending payment holds no spot. The slot is
+    // taken only on verified payment (api/payments.ts).
+
+    return newReg;
+  },
+
   async cancelRegistration(registrationId: string): Promise<boolean> {
     // Load the record (shared first, local fallback) so a pass bought on
     // another device can be cancelled from here too.

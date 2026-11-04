@@ -110,6 +110,16 @@ export interface AttendeeRegistration {
   // Approval of a holdsSpot: false registration takes a slot (+1),
   // guarded by capacity; approval of a legacy one does not.
   holdsSpot?: boolean;
+  // Razorpay Standard Checkout payments. 'manual' is the original
+  // UPI/UTR flow (or absent on older rows); 'razorpay' rows are
+  // confirmed automatically by api/payments.ts on verified payment,
+  // never by organizer approval. The order id is stored on the pending
+  // row so verify can bind the payment to exactly this registration;
+  // the payment id is stored on confirmation. Neither field is ever
+  // set from an unverified client claim.
+  paymentMethod?: 'manual' | 'razorpay';
+  razorpayOrderId?: string;
+  razorpayPaymentId?: string;
 }
 
 export interface UserProfile {
