@@ -51,7 +51,6 @@ export function ForgotPasswordPage() {
         <button type="submit" disabled={loading} className="w-full py-2.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-60">
           {loading ? 'Sending…' : 'Send reset link'}
         </button>
-        <p className="text-[11px] text-[#5F635D]">Accounts created before the security update need to sign up again — old demo accounts no longer work (see the sign-in page note).</p>
       </form>
       <div className="bg-white p-6 sm:p-8 rounded-2xl border border-[#E5E1D8] shadow-xs space-y-4">
         <div className="flex items-start gap-3">
