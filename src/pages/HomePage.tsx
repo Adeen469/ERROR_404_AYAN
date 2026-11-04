@@ -45,7 +45,13 @@ export function HomePage() {
       try {
         const { data } = await eventsService.getEvents({}, 1, 10);
         setFeaturedEvents(data.filter((e) => e.isFeatured).slice(0, 3));
-        setUpcomingEvents(data.slice(0, 6));
+        // The "Upcoming in Your City" grid used to show whatever the
+        // server returned first — including events that already ended
+        // — because the server's default sort has no date cutoff. The
+        // hero already filtered; the grid did not.
+        setUpcomingEvents(
+          data.filter((e) => new Date(e.startDate).getTime() >= Date.now()).slice(0, 6),
+        );
       } finally {
         setLoading(false);
       }

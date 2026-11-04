@@ -67,9 +67,15 @@ class ApiClient {
       ...headers,
     };
 
+    // Requests used to hang forever on a stalled connection (no
+    // timeout anywhere), leaving pages on stale data with no error.
+    // 15 seconds, then an ApiError the caller can surface.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
     try {
       const response = await fetch(url, {
         headers: defaultHeaders,
+        signal: controller.signal,
         ...customConfig,
       });
 
@@ -95,7 +101,12 @@ class ApiClient {
       if (err instanceof ApiError) {
         throw err;
       }
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new ApiError('Request timed out. Please try again.', 0, err);
+      }
       throw new ApiError(err instanceof Error ? err.message : 'Network request failed', 0, err);
+    } finally {
+      clearTimeout(timer);
     }
   }
 

@@ -86,7 +86,13 @@ export function DiscoverPage() {
     [filters, debouncedQuery],
   );
 
-  // Fetch events on filter or page change
+  const [loadError, setLoadError] = useState(false);
+  const [retryTick, setRetryTick] = useState(0);
+
+  // Fetch events on filter or page change. A failed refresh used to
+  // fail silently (console.error only) and leave the previous list on
+  // screen with no indication it was stale — now the page says so and
+  // offers a retry.
   useEffect(() => {
     let active = true;
     async function fetchEvents() {
@@ -98,9 +104,11 @@ export function DiscoverPage() {
           setShowingLocalOnly(eventsService.lastEventsFromLocal());
           setTotalResults(response.total);
           setTotalPages(response.totalPages);
+          setLoadError(false);
         }
       } catch (err) {
         console.error('Failed to load events:', err);
+        if (active) setLoadError(true);
       } finally {
         if (active) setLoading(false);
       }
@@ -109,7 +117,7 @@ export function DiscoverPage() {
     return () => {
       active = false;
     };
-  }, [effectiveFilters, page]);
+  }, [effectiveFilters, page, retryTick]);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
@@ -132,6 +140,21 @@ export function DiscoverPage() {
           <span className="font-semibold text-[#1E2320]">Shared server unreachable — </span>
           showing events saved on this device only. That is why another
           device can show different results right now.
+        </div>
+      )}
+
+      {!loading && loadError && (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 flex items-center justify-between gap-3">
+          <span>
+            Couldn't refresh events — showing the last loaded list, which may be out of date.
+          </span>
+          <button
+            type="button"
+            onClick={() => setRetryTick((t) => t + 1)}
+            className="shrink-0 px-3 py-1.5 bg-white border border-rose-200 rounded-lg text-xs font-semibold hover:bg-rose-100 transition-colors"
+          >
+            Retry
+          </button>
         </div>
       )}
 

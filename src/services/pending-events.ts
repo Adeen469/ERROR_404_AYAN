@@ -30,9 +30,9 @@
 import type { EventItem, EventFilterOptions, PaginatedResponse } from '../types';
 
 export type PendingOp =
-  | { op: 'create'; event: EventItem }
-  | { op: 'update'; id: string; updates: Partial<EventItem> }
-  | { op: 'delete'; id: string };
+  | { op: 'create'; event: EventItem; creatorEmail?: string }
+  | { op: 'update'; id: string; updates: Partial<EventItem>; creatorEmail?: string }
+  | { op: 'delete'; id: string; creatorEmail?: string };
 
 export const PENDING_KEY = 'locora_events_pending';
 
@@ -67,20 +67,28 @@ export function savePendingOps(storage: Storage, ops: PendingOp[]): void {
 //   the server, so there is nothing to delete there.
 // - A delete supersedes pending updates for the same id.
 // - Repeated updates merge, newest fields win.
-export function addPendingOp(storage: Storage, op: PendingOp): PendingOp[] {
+// creatorEmail stamps who queued the op. Ops queued before this field
+// existed (no creatorEmail) still flush for anyone — they predate the
+// fix and blocking them would strand legitimate drafts.
+export function addPendingOp(storage: Storage, op: PendingOp, creatorEmail?: string): PendingOp[] {
   const ops = getPendingOps(storage);
-  const id = opId(op);
+  // Stamp the creator so a later flush can refuse to publish one
+  // user's draft under another user's session (see flushPendingOps).
+  // Folds below preserve the stamped op (and an existing create's own
+  // creator when an update folds into it).
+  const opIn: PendingOp = creatorEmail ? { ...op, creatorEmail } : op;
+  const id = opId(opIn);
   let next: PendingOp[];
-  if (op.op === 'delete') {
+  if (opIn.op === 'delete') {
     const without = ops.filter((o) => opId(o) !== id);
     const hadCreate = ops.some((o) => o.op === 'create' && o.event.id === id);
-    next = hadCreate ? without : [...without, op];
-  } else if (op.op === 'update') {
+    next = hadCreate ? without : [...without, opIn];
+  } else if (opIn.op === 'update') {
     let folded = false;
     next = ops.map((o) => {
       if (o.op === 'create' && o.event.id === id) {
         folded = true;
-        return { op: 'create', event: { ...o.event, ...op.updates } } as PendingOp;
+        return { op: 'create', event: { ...o.event, ...opIn.updates }, creatorEmail: o.creatorEmail || opIn.creatorEmail } as PendingOp;
       }
       return o;
     });
@@ -89,14 +97,14 @@ export function addPendingOp(storage: Storage, op: PendingOp): PendingOp[] {
       next = next.map((o) => {
         if (o.op === 'update' && o.id === id) {
           merged = true;
-          return { op: 'update', id, updates: { ...o.updates, ...op.updates } } as PendingOp;
+          return { op: 'update', id, updates: { ...o.updates, ...opIn.updates }, creatorEmail: o.creatorEmail || opIn.creatorEmail } as PendingOp;
         }
         return o;
       });
-      if (!merged) next = [...next, op];
+      if (!merged) next = [...next, opIn];
     }
   } else {
-    next = [...ops.filter((o) => opId(o) !== id), op];
+    next = [...ops.filter((o) => opId(o) !== id), opIn];
   }
   savePendingOps(storage, next);
   return next;
@@ -155,7 +163,17 @@ export function applyPendingToPage(
       created += 1;
     }
   }
-  return { ...page, data, total: page.total + created };
+  // Re-slice to the page size: prepending pending creates used to let
+  // page 1 show more cards than the page size (the total was adjusted,
+  // the slice was not).
+  const pageSize = page.pageSize || data.length || 12;
+  const total = page.total + created;
+  return {
+    ...page,
+    data: data.slice(0, pageSize),
+    total,
+    totalPages: Math.max(1, Math.ceil(total / pageSize)),
+  };
 }
 
 export interface PendingApi {
@@ -183,11 +201,21 @@ function statusOf(err: unknown): number | null {
 export async function flushPendingOps(
   storage: Storage,
   api: PendingApi,
+  currentEmail?: string,
 ): Promise<{ flushed: string[]; remaining: PendingOp[] }> {
   const ops = getPendingOps(storage);
   const flushed: string[] = [];
   for (const op of ops) {
     const id = opId(op);
+    // Never publish one user's draft under another user's session:
+    // the server stamps createdByEmail from the session, so flushing
+    // user A's offline create after user B signed in on the same
+    // browser would have made B the owner of A's event. Mismatched ops
+    // stay pending for their creator's next sign-in. Ops queued before
+    // creator tagging existed carry no creator and still flush.
+    if (op.creatorEmail && currentEmail && op.creatorEmail !== currentEmail.toLowerCase()) {
+      continue;
+    }
     try {
       if (op.op === 'create') {
         await api.post('/events', stripPendingFlag(op.event));

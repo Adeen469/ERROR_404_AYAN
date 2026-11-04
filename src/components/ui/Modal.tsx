@@ -14,18 +14,52 @@ export function Modal({ isOpen, onClose, title, description, children, maxWidth 
   const modalRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    if (!isOpen) return;
+    // Focus trap: keyboard users used to be able to tab out behind the
+    // dialog while it was open. Now Tab cycles inside the dialog, focus
+    // starts on the first focusable element, and focus returns to
+    // wherever it was when the dialog closes.
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const node = modalRef.current;
+    const focusables = (): HTMLElement[] => {
+      if (!node) return [];
+      const els = node.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      );
+      return Array.from(els).filter(
+        (el) => !el.hasAttribute('disabled') && el.offsetParent !== null,
+      );
+    };
+    const first = focusables()[0];
+    if (first) first.focus();
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape' && isOpen) {
+      if (e.key === 'Escape') {
         onClose();
+        return;
+      }
+      if (e.key !== 'Tab' || !node) return;
+      const els = focusables();
+      if (els.length === 0) return;
+      const current = document.activeElement as HTMLElement | null;
+      const idx = els.indexOf(current as HTMLElement);
+      if (e.shiftKey) {
+        if (idx <= 0) {
+          e.preventDefault();
+          els[els.length - 1].focus();
+        }
+      } else if (idx === -1 || idx === els.length - 1) {
+        e.preventDefault();
+        els[0].focus();
       }
     }
-    if (isOpen) {
-      document.body.style.overflow = 'hidden';
-      window.addEventListener('keydown', handleKeyDown);
-    }
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', handleKeyDown);
     return () => {
       document.body.style.overflow = '';
       window.removeEventListener('keydown', handleKeyDown);
+      if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
+        previouslyFocused.focus();
+      }
     };
   }, [isOpen, onClose]);
 

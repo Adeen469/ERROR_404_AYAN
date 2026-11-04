@@ -8,6 +8,8 @@ interface GoogleAuthButtonProps {
   // admin status comes from the admin email list in the callback, and
   // organizer status only from an admin approval. Nobody chooses a role
   // at sign-in.
+  // returnTo: a same-site path to land on after sign-in (from ?returnTo=).
+  returnTo?: string;
   buttonText?: string;
   // Kept for compatibility with LoginPage/SignupPage. With the server-side
   // OAuth flow these callbacks are not called, because clicking the button
@@ -28,6 +30,7 @@ interface GoogleAuthButtonProps {
 // /api/auth/google/callback, which signs the user in.
 export function GoogleAuthButton({
   buttonText = 'Continue with Google',
+  returnTo,
   onSuccess: _onSuccess,
   onError: _onError,
   disabled = false,
@@ -38,7 +41,7 @@ export function GoogleAuthButton({
     setLoading(true);
     // loginWithGoogle redirects the browser; it never resolves, because
     // the sign-in completes via the OAuth callback page.
-    void authService.loginWithGoogle();
+    void authService.loginWithGoogle(returnTo);
   };
 
   return (
