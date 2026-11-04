@@ -264,7 +264,7 @@ function saveStoredEvents(events: EventItem[]): void {
 }
 
 export const eventsService = {
-  async getEvents(filters: EventFilterOptions = {}, page = 1, pageSize = 12): Promise<PaginatedResponse<EventItem>> {
+  async getEvents(filters: EventFilterOptions = {}, page = 1, pageSize = 12, opts: { slim?: boolean } = {}): Promise<PaginatedResponse<EventItem>> {
     if (!isDemoMode()) {
       try {
         // Cache keys are viewer-aware: the server now returns ownership
@@ -272,13 +272,16 @@ export const eventsService = {
         // guest (stripped) must never serve a signed-in owner after
         // login, and one owner's list must never serve another account
         // on the same browser. Stale entries simply age out (60s TTL).
+        // The slim flag is part of the key: a slim card row must never
+        // serve a caller that expects the full record.
         const viewer = authService.getCurrentUser()?.email?.trim().toLowerCase() || 'guest';
         const shared = await cachedFetch(
-          `list:${viewer}:${cacheKey({ ...filters, page, pageSize })}`,
+          `list:${viewer}:${cacheKey({ ...filters, page, pageSize, slim: opts.slim ? 1 : undefined })}`,
           () => apiClient.get<PaginatedResponse<EventItem>>('/events', {
             ...filters,
             page,
             pageSize,
+            slim: opts.slim ? 1 : undefined,
           }),
         );
         // The server answered, so anything this browser saved locally
@@ -429,13 +432,25 @@ export const eventsService = {
     return events.find((e) => e.id === id) || null;
   },
 
+  // Warm the single-event cache for an event the user is about to
+  // open (card hover/focus). Fire-and-forget: failures are swallowed
+  // here so a prefetch can never break navigation, and the one-cache
+  // dedupes repeat hovers on the same card. With ~2s per call, a
+  // hover that starts the fetch early is often the difference
+  // between an instant details page and a skeleton.
+  prefetchEvent(id: string): void {
+    if (!id || isDemoMode()) return;
+    void this.getEventById(id).catch(() => {});
+  },
+
   async getRelatedEvents(eventId: string, limit = 3): Promise<EventItem[]> {
     // The event and the list do not depend on each other, so fetch both
     // at once instead of stacking two ~2s calls. The shared cache also
     // dedupes the event fetch if the caller already requested it.
+    // Related cards render card fields only, so the list is slim.
     const [current, listData] = await Promise.all([
       this.getEventById(eventId),
-      this.getEvents({}, 1, 100).then((r) => r.data).catch(() => null),
+      this.getEvents({}, 1, 100, { slim: true }).then((r) => r.data).catch(() => null),
     ]);
     if (!current) return [];
 

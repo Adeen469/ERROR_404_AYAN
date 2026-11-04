@@ -42,7 +42,7 @@ export function LandingPage() {
   useEffect(() => {
     let cancelled = false;
     eventsService
-      .getEvents({}, 1, 1000)
+      .getEvents({}, 1, 1000, { slim: true })
       .then((res) => {
         if (cancelled) return;
         const list = res.data;
@@ -186,6 +186,8 @@ export function LandingPage() {
                   src={heroGatheringImg}
                   alt="Evening neighborhood dinner and music gathering in community courtyard"
                   referrerPolicy="no-referrer"
+                  decoding="async"
+                  fetchPriority="high"
                   className="w-full h-full object-cover"
                 />
                 <div className="absolute inset-0 bg-gradient-to-t from-slate-950/85 via-slate-950/25 to-transparent" />

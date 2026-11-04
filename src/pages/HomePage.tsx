@@ -43,7 +43,7 @@ export function HomePage() {
     async function loadData() {
       setLoading(true);
       try {
-        const { data } = await eventsService.getEvents({}, 1, 10);
+        const { data } = await eventsService.getEvents({}, 1, 10, { slim: true });
         setFeaturedEvents(data.filter((e) => e.isFeatured).slice(0, 3));
         // The "Upcoming in Your City" grid used to show whatever the
         // server returned first — including events that already ended

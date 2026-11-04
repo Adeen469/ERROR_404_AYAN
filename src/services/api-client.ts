@@ -35,6 +35,15 @@ export const getApiBaseUrl = (): string => API_BASE_URL;
 
 class ApiClient {
   private baseUrl: string;
+  // In-flight GET dedupe: identical concurrent GETs (same URL, same
+  // params) share one network call instead of stacking several ~2s
+  // calls — e.g. two components mounting at once, or a prefetch
+  // racing the page's own fetch. GETs only, never mutations, and
+  // never when the caller passed its own AbortSignal (sharing a
+  // fetch across two different abort scopes would be wrong). Entries
+  // are dropped on settle, so this dedupes concurrency, not time —
+  // the services' own TTL caches still own time-based caching.
+  private inflightGets = new Map<string, Promise<unknown>>();
 
   constructor(baseUrl: string = API_BASE_URL) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
@@ -58,6 +67,26 @@ class ApiClient {
   public async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
     const { params, headers = {}, ...customConfig } = options;
     const url = this.buildUrl(path, params);
+    const method = (customConfig.method || 'GET').toString().toUpperCase();
+    const dedupeKey = method === 'GET' && !customConfig.signal
+      ? `GET ${url}`
+      : null;
+    if (dedupeKey) {
+      const existing = this.inflightGets.get(dedupeKey);
+      if (existing) return existing as Promise<T>;
+    }
+    const promise = this.performRequest<T>(url, headers, customConfig);
+    if (dedupeKey) {
+      this.inflightGets.set(dedupeKey, promise);
+      promise.then(
+        () => { if (this.inflightGets.get(dedupeKey) === promise) this.inflightGets.delete(dedupeKey); },
+        () => { if (this.inflightGets.get(dedupeKey) === promise) this.inflightGets.delete(dedupeKey); },
+      );
+    }
+    return promise;
+  }
+
+  private async performRequest<T>(url: string, headers: HeadersInit, customConfig: RequestInit): Promise<T> {
 
     // No Bearer token: the HttpOnly locora_session cookie is sent by
     // the browser automatically on same-site requests.

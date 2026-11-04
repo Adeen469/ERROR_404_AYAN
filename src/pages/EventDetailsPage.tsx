@@ -400,6 +400,8 @@ export function EventDetailsPage() {
           src={event.coverImage}
           alt={event.title}
           referrerPolicy="no-referrer"
+          decoding="async"
+          fetchPriority="high"
           className="w-full h-full object-cover"
         />
         <div className="absolute inset-0 bg-gradient-to-t from-[#1E2320]/80 via-transparent to-transparent" />

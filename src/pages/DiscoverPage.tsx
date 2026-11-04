@@ -98,7 +98,7 @@ export function DiscoverPage() {
     async function fetchEvents() {
       setLoading(true);
       try {
-        const response = await eventsService.getEvents(effectiveFilters, page, 9);
+        const response = await eventsService.getEvents(effectiveFilters, page, 9, { slim: true });
         if (active) {
           setEvents(response.data);
           setShowingLocalOnly(eventsService.lastEventsFromLocal());

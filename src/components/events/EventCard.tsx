@@ -4,6 +4,7 @@ import { Bookmark, MapPin, Calendar, Users, ImageOff } from 'lucide-react';
 import { EventItem } from '../../types';
 import { formatEventDate, formatPrice } from '../../utils/formatters';
 import { savedEventsService } from '../../services/saved-events-service';
+import { eventsService } from '../../services/events-service';
 import { useToast } from '../ui/Toast';
 
 interface EventCardProps {
@@ -39,8 +40,20 @@ export function EventCard({ event, isRegistered = false, onBookmarkChange }: Eve
 
   const remaining = Math.max(0, event.capacity - event.registeredCount);
 
+  // Hover/focus prefetch: a card hover is strong intent to open the
+  // details page, and a shared call costs ~2s. Warming the cache here
+  // often makes the details page paint instantly instead of showing
+  // a skeleton. Pending-sync rows (not on the server yet) are skipped.
+  const prefetch = () => {
+    if (!event._pendingSync) eventsService.prefetchEvent(event.id);
+  };
+
   return (
-    <article className="group flex flex-col bg-white rounded-xl border border-[#E5E1D8] shadow-xs hover:border-[#1E3F35]/40 hover:shadow-md transition-all duration-200 overflow-hidden">
+    <article
+      onMouseEnter={prefetch}
+      onFocus={prefetch}
+      className="group flex flex-col bg-white rounded-xl border border-[#E5E1D8] shadow-xs hover:border-[#1E3F35]/40 hover:shadow-md transition-all duration-200 overflow-hidden"
+    >
       {/* Visual Cover Slot */}
       <div className="relative aspect-[4/3] bg-[#F4F1EA] overflow-hidden">
         <Link to={`/events/${event.id}`} tabIndex={-1} aria-hidden="true" className="block w-full h-full">

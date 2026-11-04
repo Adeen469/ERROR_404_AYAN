@@ -623,8 +623,30 @@ export default async function handler(req: any, res: any) {
       const total = filtered.length;
       const totalPages = Math.ceil(total / pageSize) || 1;
       const offset = (page - 1) * pageSize;
+      const pageItems = filtered.slice(offset, offset + pageSize).map((e: any) => viewEvent(e));
+      // Slim list mode (?slim=1): card fields only. The full list
+      // response was measured at ~374KB for 100 events (descriptions,
+      // organizer blobs, tags) — far more than any card grid renders.
+      // Slim cuts the payload to roughly a quarter, which is faster
+      // to transfer AND to parse on low-end phones. Card consumers
+      // (Discover, Home, related, landing stats) need nothing else;
+      // detail/organizer/registration reads keep the full shape.
+      // The organizer object is reduced to id+name here, so slim can
+      // never leak an organizer email to any viewer.
+      const slim = firstQuery(req.query, "slim") === "1";
+      const data = slim ? pageItems.map((e: any) => ({
+        id: e.id, slug: e.slug, title: e.title, summary: e.summary,
+        coverImage: e.coverImage, category: e.category,
+        startDate: e.startDate, endDate: e.endDate,
+        city: e.city, state: e.state, country: e.country,
+        neighborhood: e.neighborhood, venueName: e.venueName,
+        price: e.price, capacity: e.capacity,
+        registeredCount: e.registeredCount, status: e.status,
+        isFeatured: e.isFeatured,
+        organizer: e.organizer ? { id: e.organizer.id, name: e.organizer.name } : undefined,
+      })) : pageItems;
       return sendJson(res, 200, {
-        data: filtered.slice(offset, offset + pageSize).map((e: any) => viewEvent(e)),
+        data,
         total, page, pageSize, totalPages,
       });
     } catch (err: any) {
