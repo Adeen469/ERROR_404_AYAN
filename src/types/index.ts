@@ -55,9 +55,9 @@ export interface EventItem {
   // this field and fall back to their organizer's email for ownership.
   createdByEmail?: string;
   price: number; // 0 for free
-  // Organizer's UPI ID for manual-approval payments on paid events
-  // (shown to attendees at registration). Optional: without it, attendees
-  // are told to pay the organizer directly and submit their UTR.
+  // Legacy only: organizer's UPI ID from the old manual-payment flow.
+  // No new event collects one, and nothing in the UI reads it anymore.
+  // Kept so old stored rows still parse.
   upiId?: string;
   // Attendee details gate: when true (or absent — older events predate
   // this flag), registering requires the attendee's name, mobile number
@@ -89,9 +89,9 @@ export interface AttendeeRegistration {
   registeredAt: string;
   ticketCode: string;
   checkedIn: boolean;
-  // Manual-approval payments: the 12-digit UPI reference the attendee
-  // submitted with a paid registration. Empty until approval, when the
-  // ticket code is issued. Only present on paid registrations.
+  // Legacy only: the 12-digit UPI reference from the old
+  // manual-payment flow. No new registration collects one.
+  // Kept so old stored rows still parse.
   utr?: string;
   // Attendee contact details, shared with the organizer only, for
   // events that require them (see EventItem.requireAttendeeDetails).

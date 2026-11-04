@@ -1,4 +1,3 @@
-// SECURITY FIX — Finding 2/1: getEventPayment() fetches UPI only via
 // the session-only /events?payment=1 endpoint; adjustRegisteredCount()
 // is now a cache-clear no-op because counts are owned server-side by
 // api/registrations.ts (direct count PATCHes are refused with 403).
@@ -510,7 +509,6 @@ export const eventsService = {
       country: payload.country,
       createdByEmail: payload.createdByEmail,
       price: Number(payload.price) || 0,
-      upiId: payload.upiId || undefined,
       // Older events predate this flag and behave as if it were on.
       requireAttendeeDetails: payload.requireAttendeeDetails ?? true,
       capacity: Number(payload.capacity) || 50,
@@ -629,7 +627,8 @@ export const eventsService = {
   },
 
   // SECURITY FIX: counts are now updated server-side inside
-  // api/registrations.ts (POST confirmed / approval / cancellation).
+  // api/registrations.ts (POST confirmed / cancellation) and
+  // api/payments.ts (verified payment).
   // This method only clears the cache so the next fetch shows the
   // server count. It no longer PATCHes /events, because a direct
   // count PATCH is now refused (403) for every caller.
@@ -652,11 +651,7 @@ export const eventsService = {
     return lastListFromLocal;
   },
 
-  // Session-only payment info for checkout (Finding 2). Returns only
-  // id/title/price/upiId, and only to a signed-in user; guests get 401.
-  async getEventPayment(id: string): Promise<{ id: string; title: string; price: number; upiId: string | null }> {
-    return apiClient.get<{ id: string; title: string; price: number; upiId: string | null }>('/events', { payment: '1', id });
-  },
+
 
   async searchLiveRealEvents(city: string, query?: string): Promise<{ success: boolean; data: EventItem[]; count: number }> {
     return apiClient.post<{ success: boolean; data: EventItem[]; count: number }>('/events/search-live', {

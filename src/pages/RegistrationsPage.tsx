@@ -73,7 +73,7 @@ export function RegistrationsPage() {
     }
   };
 
-  // Upcoming = confirmed passes plus payments awaiting organizer approval.
+  // Upcoming = confirmed passes plus payments awaiting Razorpay completion.
   // Past = cancelled, rejected, and waitlisted records.
   const upcomingList = registrations.filter((r) => r.status === 'confirmed' || r.status === 'pending');
   const pastList = registrations.filter((r) => r.status !== 'confirmed' && r.status !== 'pending');
@@ -217,7 +217,7 @@ export function RegistrationsPage() {
                 ) : reg.status === 'pending' ? (
                   <>
                     <span className="text-xs font-medium text-amber-800 px-3 py-1 bg-amber-50 rounded-md border border-amber-200">
-                      Payment pending · UTR {reg.utr || '—'}
+                      Payment pending · Razorpay
                     </span>
                     <button
                       type="button"

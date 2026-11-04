@@ -19,7 +19,7 @@ export function OrganizerEventsPage() {
 
   const [deleteTarget, setDeleteTarget] = useState<EventItem | null>(null);
   const [deleting, setDeleting] = useState(false);
-  // Pending manual-approval payments per event (shared table only).
+  // Pending Razorpay payments per event (shared table only).
   const [pendingCounts, setPendingCounts] = useState<Record<string, number>>({});
 
   // Ownership for this list: an organizer sees only their own events;

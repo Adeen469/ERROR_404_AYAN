@@ -112,14 +112,14 @@ export const registrationsService = {
   },
 
   // Free events only: instant confirmed pass. Paid events must go through
-  // registerWithPayment — a paid event must never get an instant pass.
+  // registerWithRazorpay — a paid event must never get an instant pass.
   async register(event: EventItem): Promise<AttendeeRegistration> {
     const user = authService.getCurrentUser();
     if (!user) {
       throw new Error('Please sign in or select a demo user profile to register for events.');
     }
     if (event.price > 0) {
-      throw new Error('This is a paid event. Please pay and submit your payment for organizer approval.');
+      throw new Error('This is a paid event. Please pay with Razorpay.');
     }
 
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -223,95 +223,13 @@ export const registrationsService = {
     return existing || newReg;
   },
 
-  // Paid events: the attendee pays the organizer directly (UPI) and
-  // submits the 12-digit UTR. This creates a PENDING registration that
-  // holds NO spot while the organizer decides — a request that ends in
-  // rejection must never have blocked a seat. The slot is taken only
-  // on approval (approveRegistration, capacity-guarded). Pending rows
-  // created before this change predate holdsSpot and are treated as
-  // holding a spot (see AttendeeRegistration.holdsSpot).
-  async registerWithPayment(event: EventItem, utr: string): Promise<AttendeeRegistration> {
-    const user = authService.getCurrentUser();
-    if (!user) {
-      throw new Error('Please sign in or select a demo user profile to register for events.');
-    }
-    const cleanUtr = (utr || '').replace(/\s+/g, '');
-    if (!/^\d{12}$/.test(cleanUtr)) {
-      throw new Error('Enter the 12-digit UTR from your UPI payment.');
-    }
-    if (event.registeredCount >= event.capacity) {
-      throw new Error('This event is at full capacity. Join the waitlist or explore nearby alternatives.');
-    }
 
-    // Merged-state check (see register): a pending row created on
-    // another device must be reused, not duplicated.
-    if (!isDemoMode()) {
-      const merged = await this.getRegistrationForEvent(event.id);
-      if (merged && (merged.status === 'confirmed' || merged.status === 'pending')) return merged;
-    }
 
-    const all = getStoredRegistrations();
-    const existing = all.find((r) => r.eventId === event.id && r.userId === user.id);
-    if (existing && (existing.status === 'confirmed' || existing.status === 'pending')) {
-      return existing;
-    }
-
-    const newReg: AttendeeRegistration = {
-      id: `reg-${Date.now()}`,
-      eventId: event.id,
-      event,
-      userId: user.id,
-      userName: user.name,
-      userEmail: user.email,
-      // Saved by the details gate before registration; shared with the
-      // organizer only, for events that require attendee details.
-      userPhone: user.phone || undefined,
-      // Snapshot of the profile's verified flag; the server re-checks
-      // it against the verification rows before storing.
-      phoneVerified: user.phoneVerified || undefined,
-      // No slot held while the organizer decides (see holdsSpot).
-      holdsSpot: false,
-      status: 'pending',
-      registeredAt: new Date().toISOString(),
-      ticketCode: '',
-      checkedIn: false,
-      utr: cleanUtr,
-    };
-
-    // Server first in non-demo mode (see register): only a 503 falls
-    // back to a local pending row; other failures are thrown.
-    if (!isDemoMode()) {
-      try {
-        const saved = await apiClient.post<AttendeeRegistration>('/registrations', newReg);
-        const row = saved || newReg;
-        all.unshift(row);
-        saveStoredRegistrations(all);
-        return row;
-      } catch (err) {
-        if (err instanceof ApiError && err.status === 503) {
-          console.warn('Shared registration unavailable (backend unconfigured), keeping local pending registration:', err);
-        } else {
-          throw err;
-        }
-      }
-    }
-
-    all.unshift(newReg);
-    saveStoredRegistrations(all);
-
-    // No count change: a pending payment holds no spot. The slot is
-    // taken only if the organizer approves (approveRegistration).
-
-    return newReg;
-  },
-
-  // Razorpay path: same pending row as registerWithPayment, but no
-  // UTR and no organizer approval. The row is created pending with
-  // paymentMethod 'razorpay'; api/payments.ts then creates the order
-  // for this row and confirms it (issuing the pass) only after a
-  // verified captured payment. The server skips the approval emails
-  // for razorpay rows (see api/registrations.ts), so the organizer is
-  // never asked to approve a Razorpay payment.
+  // Razorpay path (the ONLY paid path): the row is created pending
+  // with paymentMethod 'razorpay'; api/payments.ts then creates the
+  // order for this row and confirms it (issuing the pass) only after
+  // a verified captured payment. There is no organizer approval step
+  // anywhere in this flow.
   async registerWithRazorpay(event: EventItem): Promise<AttendeeRegistration> {
     const user = authService.getCurrentUser();
     if (!user) {
@@ -487,156 +405,15 @@ export const registrationsService = {
     return localTarget;
   },
 
-  // Organizer approves a pending payment: the pass is issued now (the
-  // ticket code is generated here, not at payment time). Slot rule: a
-  // pending payment that holds no spot (holdsSpot: false, i.e. all new
-  // ones) takes a slot on approval, so approval is refused when the
-  // event is already full. A legacy pending payment already holds its
-  // slot, so approving it changes no count.
-  async approveRegistration(registrationId: string, approverEmail: string): Promise<AttendeeRegistration> {
-    const ticketCode = newTicketCode();
-    // Load the record first: approval needs to know whether this
-    // registration holds a spot before it can check capacity.
-    let record: AttendeeRegistration | undefined;
-    if (!isDemoMode()) {
-      try {
-        record = await apiClient.get<AttendeeRegistration>('/registrations', { id: registrationId });
-      } catch {
-        record = undefined;
-      }
-    }
-    if (!record) {
-      const all = getStoredRegistrations();
-      record = all.find((r) => r.id === registrationId);
-    }
-    const needsSpot = record?.holdsSpot === false;
-    let event: EventItem | null = null;
-    if (needsSpot && record) {
-      try {
-        event = await eventsService.getEventById(record.eventId);
-      } catch {
-        event = null;
-      }
-      if (event && event.registeredCount >= event.capacity) {
-        throw new Error('This event is at full capacity. Free a spot (a cancellation or rejection) before approving.');
-      }
-    }
-    if (!isDemoMode()) {
-      try {
-        const updated = await apiClient.patch<AttendeeRegistration>(
-          '/registrations',
-          { status: 'confirmed' },
-          { id: registrationId },
-        );
-        const all = getStoredRegistrations();
-        const localTarget = all.find((r) => r.id === registrationId);
-        if (localTarget) {
-          localTarget.status = 'confirmed';
-          // The pass code comes from the server response, never from
-          // the locally generated one: the two used to disagree, and
-          // the organizer's toast showed a code the attendee never got.
-          localTarget.ticketCode = updated.ticketCode || ticketCode;
-          saveStoredRegistrations(all);
-        }
-        if (needsSpot && event) {
-          try {
-            await eventsService.adjustRegisteredCount(
-              event.id,
-              Math.min(event.capacity, event.registeredCount + 1),
-            );
-          } catch (e) {
-            console.warn('Could not increment event registered count:', e);
-          }
-        }
-        return updated;
-      } catch (err) {
-        // A deliberate refusal (full event, or not the event's owner)
-        // is a decision, not an outage: surface it instead of falling
-        // back to a local approval that would bypass it. Same for any
-        // other non-503 failure — a local approval the server never
-        // saw would show the organizer a confirmed pass the attendee
-        // does not have. Only a 503 (backend unconfigured) still
-        // falls back to the local row.
-        if (err instanceof ApiError && err.status !== 503) {
-          throw err;
-        }
-        console.warn('Shared approval unavailable (backend unconfigured), approving locally:', err);
-      }
-    }
-    const all = getStoredRegistrations();
-    const target = all.find((r) => r.id === registrationId);
-    if (!target) throw new Error('Registration record not found');
-    target.status = 'confirmed';
-    target.ticketCode = ticketCode;
-    saveStoredRegistrations(all);
-    if (target.holdsSpot === false) {
-      try {
-        const ev = await eventsService.getEventById(target.eventId);
-        if (ev && ev.registeredCount < ev.capacity) {
-          await eventsService.adjustRegisteredCount(ev.id, ev.registeredCount + 1);
-        }
-      } catch (e) {
-        console.warn('Could not increment event registered count:', e);
-      }
-    }
-    return target;
-  },
 
-  // Organizer rejects a pending payment: a legacy held spot is
-  // released; new pending payments held none, so rejecting one changes
-  // no count.
-  async rejectRegistration(registrationId: string, approverEmail: string): Promise<AttendeeRegistration> {
-    if (!isDemoMode()) {
-      try {
-        const updated = await apiClient.patch<AttendeeRegistration>(
-          '/registrations',
-          { status: 'rejected' },
-          { id: registrationId },
-        );
-        const all = getStoredRegistrations();
-        const localTarget = all.find((r) => r.id === registrationId);
-        if (localTarget) {
-          localTarget.status = 'rejected';
-          saveStoredRegistrations(all);
-        }
-        if (updated.holdsSpot !== false) await this.releaseSpot(updated.eventId);
-        return updated;
-      } catch (err) {
-        // Same honesty rule as approve: only a 503 (backend
-        // unconfigured) falls back to a local rejection. Any other
-        // failure is thrown — a local rejection the server never saw
-        // would hide a still-pending payment from the organizer.
-        if (err instanceof ApiError && err.status !== 503) {
-          throw err;
-        }
-        console.warn('Shared rejection unavailable (backend unconfigured), rejecting locally:', err);
-      }
-    }
-    const all = getStoredRegistrations();
-    const target = all.find((r) => r.id === registrationId);
-    if (!target) throw new Error('Registration record not found');
-    target.status = 'rejected';
-    saveStoredRegistrations(all);
-    if (target.holdsSpot !== false) await this.releaseSpot(target.eventId);
-    return target;
-  },
 
-  // Release one held spot (legacy pending payments only; new pending
-  // payments never held one).
-  async releaseSpot(eventId: string): Promise<void> {
-    try {
-      const event = await eventsService.getEventById(eventId);
-      if (event && event.registeredCount > 0) {
-        await eventsService.adjustRegisteredCount(eventId, event.registeredCount - 1);
-      }
-    } catch (e) {
-      console.warn('Could not release event spot:', e);
-    }
-  },
 
-  // Pending-payment counts per event, for the organizer list badge.
-  // Empty when the shared table is not set up (local pending payments
-  // are same-browser only, so they are not counted here).
+
+
+
+  // Pending-payment counts per event, for the organizer list badge
+  // (pending = Razorpay checkout not yet completed). Empty when the
+  // shared table is not set up.
   async getPendingCounts(): Promise<Record<string, number>> {
     if (isDemoMode()) return {};
     try {

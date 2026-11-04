@@ -18,7 +18,6 @@ import {
   MessageCircle,
 } from 'lucide-react';
 import { EventItem, AttendeeRegistration } from '../types';
-import QRCode from 'qrcode';
 import { eventsService, isEventOwner } from '../services/events-service';
 import { registrationsService } from '../services/registrations-service';
 import { paymentsService } from '../services/payments-service';
@@ -91,7 +90,7 @@ export function EventDetailsPage() {
   // Attendee details gate state: which registration flow to continue
   // once the user has provided/confirmed their details.
   const [detailsGateOpen, setDetailsGateOpen] = useState(false);
-  // Aggregate pending-approval count for the capacity block
+  // Aggregate pending-payment count for the capacity block
   // (pending / approved / total). No attendee details, and a failure
   // here never blocks the event itself.
   const [pendingCount, setPendingCount] = useState(0);
@@ -103,68 +102,10 @@ export function EventDetailsPage() {
       .catch(() => {});
   }, [eventId]);
   const [detailsGateTarget, setDetailsGateTarget] = useState<'free' | 'paid' | null>(null);
-  // Manual-approval payment dialog state (paid events only).
+  // Razorpay payment dialog state (paid events only). There is no
+  // manual payment path anymore: no UPI ID, no QR, no UTR.
   const [paymentOpen, setPaymentOpen] = useState(false);
-  const [utr, setUtr] = useState('');
-  const [utrError, setUtrError] = useState('');
   const [razorpayError, setRazorpayError] = useState('');
-  const [copiedUpi, setCopiedUpi] = useState(false);
-  const [upiQr, setUpiQr] = useState('');
-  // SECURITY FIX (Finding 2): UPI is no longer in the public event
-  // object. It is fetched, only when the paid checkout opens and only
-  // for a signed-in user, from /events?payment=1. On failure there is
-  // no fallback to a public UPI value — the dialog says unavailable.
-  const [paymentUpiId, setPaymentUpiId] = useState<string | null>(null);
-  const [paymentLoading, setPaymentLoading] = useState(false);
-  const [paymentError, setPaymentError] = useState('');
-
-  useEffect(() => {
-    if (!paymentOpen || !event || event.price <= 0) return;
-    let active = true;
-    setPaymentLoading(true);
-    setPaymentError('');
-    setPaymentUpiId(null);
-    eventsService.getEventPayment(event.id)
-      .then((info) => { if (active) setPaymentUpiId(info.upiId || null); })
-      .catch(() => { if (active) setPaymentError('Payment info is unavailable right now. Please try again, or pay the organizer directly and enter your UTR below.'); })
-      .finally(() => { if (active) setPaymentLoading(false); });
-    return () => { active = false; };
-  }, [paymentOpen, event?.id]);
-
-  // UPI deep link: tapping it opens the user's UPI app with the payee,
-  // amount and note prefilled. The same string is encoded in the QR
-  // code below, so desktop users can scan it with their phone.
-  const upiUri = event && paymentUpiId
-    ? `upi://pay?pa=${encodeURIComponent(paymentUpiId)}&pn=${encodeURIComponent(event.organizer?.name || 'Locora Organizer')}&am=${event.price}&cu=INR&tn=${encodeURIComponent((event.title || 'Event payment').slice(0, 60))}`
-    : '';
-
-  // Render the QR code client-side (no third-party QR service sees the
-  // organizer's UPI ID or the amount). Themed to the site: Deep Forest
-  // modules on white. Error correction 'H' (~30% recoverable) is what
-  // lets the center logo overlay below stay scannable — it covers
-  // under a quarter of the width, well inside what 'H' recovers.
-  useEffect(() => {
-    if (!upiUri) {
-      setUpiQr('');
-      return;
-    }
-    let active = true;
-    QRCode.toDataURL(upiUri, {
-      margin: 2,
-      width: 440,
-      errorCorrectionLevel: 'H',
-      color: { dark: '#1E3F35', light: '#FFFFFF' },
-    })
-      .then((url) => {
-        if (active) setUpiQr(url);
-      })
-      .catch(() => {
-        if (active) setUpiQr('');
-      });
-    return () => {
-      active = false;
-    };
-  }, [upiUri]);
 
   useEffect(() => {
     async function loadEventData() {
@@ -297,36 +238,7 @@ export function EventDetailsPage() {
     }
   };
 
-  const handlePaymentSubmit = async () => {
-    const cleanUtr = utr.replace(/\s+/g, '');
-    if (!/^\d{12}$/.test(cleanUtr)) {
-      setUtrError('Enter the 12-digit UTR from your UPI payment.');
-      return;
-    }
-    setUtrError('');
-    setActionLoading(true);
-    try {
-      const reg = await registrationsService.registerWithPayment(event, cleanUtr);
-      setRegistration(reg);
-      // No count change: a pending payment holds no spot. The count
-      // rises only if the organizer approves.
-      setPaymentOpen(false);
-      setUtr('');
-      toast({
-        type: 'success',
-        title: 'Payment submitted',
-        description: 'Your payment is awaiting organizer approval. Your pass will appear here once it is approved.',
-      });
-    } catch (err: unknown) {
-      toast({
-        type: 'error',
-        title: 'Payment submission failed',
-        description: err instanceof Error ? err.message : 'Please try again.',
-      });
-    } finally {
-      setActionLoading(false);
-    }
-  };
+
 
   // Razorpay Standard Checkout: the pass is issued automatically, but
   // ONLY after the server verifies the payment (signature + captured
@@ -415,7 +327,7 @@ export function EventDetailsPage() {
           toast({
             type: 'info',
             title: 'Payment cancelled',
-            description: 'Your registration is still pending — you can try again or pay via UPI below.',
+            description: 'Your registration is still pending — you can try again with the Pay Now button.',
           });
         },
         onError: (message) => {
@@ -428,7 +340,7 @@ export function EventDetailsPage() {
       setRazorpayError(
         err instanceof Error
           ? err.message
-          : 'Could not start Razorpay payment. Please try again or pay via UPI below.',
+          : 'Could not start Razorpay payment. Please try again.',
       );
     }
   };
@@ -708,7 +620,7 @@ export function EventDetailsPage() {
               </p>
               {pendingCount > 0 && (
                 <p className="text-[11px] text-[#8C887E]">
-                  {pendingCount} pending approval — these do not hold a spot
+                  {pendingCount} awaiting payment — these do not hold a spot
                 </p>
               )}
             </div>
@@ -774,15 +686,9 @@ export function EventDetailsPage() {
                 <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2.5">
                   <Clock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
                   <div className="text-xs text-amber-800">
-                    <p className="font-semibold">
-                      {registration?.paymentMethod === 'razorpay'
-                        ? 'Payment pending'
-                        : 'Payment pending approval'}
-                    </p>
+                    <p className="font-semibold">Payment pending</p>
                     <p className="text-[11px] mt-0.5">
-                      {registration?.paymentMethod === 'razorpay'
-                        ? 'Your Razorpay payment is not complete yet. Pay now and your pass will be issued automatically once the payment is verified.'
-                        : `UTR ${registration?.utr} submitted. The organizer will verify your payment and approve your pass — it will appear here once approved.`}
+                      Your Razorpay payment is not complete yet. Pay now and your pass will be issued automatically once the payment is verified.
                     </p>
                   </div>
                 </div>
@@ -817,7 +723,7 @@ export function EventDetailsPage() {
                   <div className="text-xs text-rose-700">
                     <p className="font-semibold">Payment not approved</p>
                     <p className="text-[11px] mt-0.5">
-                      The organizer did not approve this payment. You can pay again and resubmit below.
+                      This payment was not approved. You can pay again with Razorpay below.
                     </p>
                   </div>
                 </div>
@@ -883,7 +789,7 @@ export function EventDetailsPage() {
             <div className="pt-2 text-center">
               <p className="text-[11px] text-[#8C887E]">
                 {isPaidEvent
-                  ? 'Payment verified by the organizer · Digital entry after approval'
+                  ? 'Payment verified by Razorpay · Digital entry'
                   : 'Instant confirmation · No booking fees · Digital entry'}
               </p>
             </div>
@@ -956,26 +862,27 @@ export function EventDetailsPage() {
         confirmLabel={isPaymentPending ? 'Yes, Withdraw Request' : 'Yes, Cancel RSVP'}
       />
 
-      {/* Payment dialog (paid events only): Razorpay for an automatic
-          pass, or the original manual UPI/UTR flow for organizer
-          approval. Both paths create the same pending registration
-          shape; only the confirmation step differs. */}
+      {/* Payment dialog (paid events only): Razorpay Standard
+          Checkout is the ONLY way to pay. The manual UPI/UTR flow
+          and organizer approval were removed in full — no QR code,
+          no UPI ID, no UTR field. Dismissing the checkout or a
+          failed payment leaves the registration pending, so the
+          attendee retries from the Pay Now button. */}
       <Modal
         isOpen={paymentOpen}
         onClose={() => {
           setPaymentOpen(false);
-          setUtrError('');
           setRazorpayError('');
         }}
         title="Pay & Register"
-        description={`This is a paid event (${formatPrice(event.price)}). Pay with Razorpay for an automatic pass, or pay via UPI and enter your 12-digit UTR below for organizer approval.`}
+        description={`This is a paid event (${formatPrice(event.price)}). Pay securely with Razorpay — your pass is issued automatically once the payment is verified.`}
       >
         <div className="space-y-4">
           <div className="p-4 bg-[#EAF1ED] border border-[#D0E2D9] rounded-lg space-y-2">
             <p className="text-xs font-semibold text-[#1E3F35]">Pay with Razorpay — automatic pass</p>
             <p className="text-[11px] text-[#5F635D] leading-relaxed">
               Pay by UPI, card, or netbanking in the Razorpay checkout. Your pass is issued
-              automatically once the payment is verified — no UTR needed, no organizer approval.
+              automatically once the payment is verified — no organizer approval needed.
             </p>
             <button
               type="button"
@@ -987,125 +894,11 @@ export function EventDetailsPage() {
             </button>
             {razorpayError && <p className="text-[11px] text-rose-600">{razorpayError}</p>}
           </div>
-
-          <p className="text-[11px] font-semibold text-[#5F635D] text-center">
-            Or pay manually via UPI
+          <p className="text-[11px] text-[#5F635D] text-center leading-relaxed">
+            Payments go through Razorpay to the event account. If your payment
+            succeeds but no pass appears, use Pay Now again — it recovers
+            the payment instead of charging you twice.
           </p>
-
-          <div className="p-4 bg-[#F4F1EA] border border-[#E2DFD8] rounded-lg space-y-2">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-[#5F635D]">Amount to pay</span>
-              <span className="font-editorial text-lg font-bold text-[#1E2320]">{formatPrice(event.price)}</span>
-            </div>
-            {paymentLoading ? (
-              <p className="text-xs text-[#5F635D]">Loading payment info…</p>
-            ) : paymentError ? (
-              <p className="text-xs text-rose-700">{paymentError}</p>
-            ) : paymentUpiId ? (
-              <>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs text-[#5F635D]">Pay to UPI ID</span>
-                  <span className="flex items-center gap-1.5">
-                    <span className="font-mono text-xs font-semibold text-[#1E2320] break-all">{paymentUpiId}</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard.writeText(paymentUpiId || '');
-                        setCopiedUpi(true);
-                        setTimeout(() => setCopiedUpi(false), 2000);
-                      }}
-                      className="px-2 py-1 bg-[#1E3F35] text-white rounded-md text-[11px] font-medium hover:bg-[#163028] flex items-center gap-1 shrink-0"
-                    >
-                      {copiedUpi ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                      <span>{copiedUpi ? 'Copied' : 'Copy'}</span>
-                    </button>
-                  </span>
-                </div>
-                {upiQr && (
-                  <div className="pt-2 flex flex-col items-center gap-2">
-                    {/* Themed frame: the rounded corners live on this card
-                        and on the logo patch, NOT on the QR image — the
-                        QR itself stays square so its corner finder
-                        patterns are never clipped. The logo patch sits
-                        centered over the code (pointer-events-none: it
-                        is display only) with curvy corners on both the
-                        patch and the logo image. Fluid width: the frame
-                        caps at the old 194px but shrinks on narrow
-                        screens (aspect-square keeps the QR square), so
-                        the block can never push its card out of frame. */}
-                    <div className="bg-white rounded-2xl border border-[#E2DFD8] p-2 shadow-sm w-full max-w-[194px]">
-                      <div className="relative w-full aspect-square">
-                        <img
-                          src={upiQr}
-                          alt={`QR code to pay ${formatPrice(event.price)} to ${paymentUpiId}`}
-                          className="w-full h-full block"
-                        />
-                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                          <div
-                            className="bg-white rounded-2xl border border-[#E7E3DB] shadow-sm p-1 flex items-center justify-center"
-                            style={{ width: '24%', height: '24%' }}
-                          >
-                            <img
-                              src="/locora-logo.png"
-                              alt="Locora"
-                              className="w-full h-full object-contain rounded-xl"
-                            />
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                    <p className="text-[11px] text-[#5F635D] text-center">
-                      Scan with any UPI app — the amount is prefilled. Pay the
-                      full ticket amount: the QR only suggests it, so check
-                      the amount in your UPI app before confirming.
-                    </p>
-                    <a
-                      href={upiUri}
-                      className="px-4 py-2 bg-[#1E3F35] text-white rounded-lg text-xs font-semibold hover:bg-[#163028] transition-colors"
-                    >
-                      Pay via UPI app
-                    </a>
-                  </div>
-                )}
-              </>
-            ) : (
-              <p className="text-xs text-[#5F635D]">
-                The organizer hasn't shared a UPI ID — pay them directly via UPI and enter your UTR below.
-              </p>
-            )}
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
-              UTR (12 digits) *
-            </label>
-            <input
-              type="text"
-              inputMode="numeric"
-              value={utr}
-              onChange={(e) => {
-                setUtr(e.target.value.replace(/[^0-9\s]/g, ''));
-                setUtrError('');
-              }}
-              placeholder="e.g. 123456789012"
-              className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] ${
-                utrError ? 'border-rose-500' : 'border-[#E2DFD8]'
-              }`}
-            />
-            {utrError && <p className="text-[11px] text-rose-600 mt-1">{utrError}</p>}
-            <p className="text-[11px] text-[#8C887E] mt-1">
-              Find it in your UPI app under the payment's transaction details.
-            </p>
-          </div>
-
-          <button
-            type="button"
-            disabled={actionLoading}
-            onClick={handlePaymentSubmit}
-            className="w-full py-3 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors disabled:opacity-60"
-          >
-            {actionLoading ? 'Submitting…' : 'Submit Payment for Approval'}
-          </button>
         </div>
       </Modal>
 

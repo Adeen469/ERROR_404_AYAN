@@ -1,9 +1,9 @@
-# Shared Registrations Setup (manual-approval payments)
+# Shared Registrations Setup (Razorpay-only payments)
 
 Registrations used to live only in each browser's localStorage, so an
-organizer could never see — let alone approve — a payment submitted from
-another device. The new `api/registrations.ts` function stores them in
-Supabase instead, using the same pattern as the shared events table.
+organizer could never see a registration submitted from another device.
+The `api/registrations.ts` function stores them in Supabase instead,
+using the same pattern as the shared events table.
 
 ## One-time setup (Supabase, ~2 minutes)
 
@@ -27,37 +27,37 @@ create table if not exists registrations (
 ## How it works after setup
 
 - **Free events** — unchanged: instant confirmed pass with a ticket code.
-- **Paid events** — the attendee pays the organizer directly via UPI
-  (the organizer's UPI ID from the event form, if they set one), enters
-  the 12-digit UTR, and gets a **pending** registration. A pending
-  payment holds a spot (the event's registered count goes up), but no
-  pass is issued yet.
-- **Organizer approval** — the event's Attendees page shows a "Pending
-  payment approvals" section. The organizer checks the UTR in their own
-  bank/UPI app, then **Approve & Issue Pass** (pass + ticket code
-  issued) or **Reject** (held spot released). The organizer's event list
-  also shows a "N pending" badge per event.
+- **Paid events** — Razorpay Standard Checkout ONLY. The attendee pays
+  in the Razorpay checkout and gets a **pending** registration until
+  Razorpay confirms a captured payment; then `api/payments.ts` issues
+  the pass automatically. A pending payment holds NO spot. There is no
+  manual UPI payment, no UTR, and no organizer approval anywhere:
+  the organizer cannot approve or reject a payment, in the UI or by
+  direct API call — the server refuses organizer status changes.
+- **Organizer view** — the event's Attendees page shows an "Awaiting
+  Razorpay payment" section (read-only: name, email, order id, date)
+  and the organizer's event list shows a "N pending" badge per event.
+  Nothing for the organizer to do; unpaid rows block no seats.
 - **Attendee view** — My Registrations shows pending payments under
-  Upcoming with their UTR; the event page shows "Payment pending
-  approval" until approved, or "Payment not approved" with a retry
-  button if rejected. Pending and confirmed registrations can both be
-  cancelled (releasing the held spot).
+  Upcoming; the event page shows "Payment pending" with a Pay Now
+  button that retries (or recovers an already-paid order) via
+  Razorpay. Pending registrations can be withdrawn by the attendee,
+  which releases nothing (they held no spot).
+- **Legacy rows** — manual pending rows created before approval was
+  removed stay pending. Their owners can convert them by pressing
+  Pay Now (Razorpay create-order attaches an order to the existing
+  row) or withdraw them. They can never be approved by an organizer.
 
 ## Before the table exists
 
 `/api/registrations` returns a 503 "not configured" JSON and the app
 falls back to per-browser local registrations — exactly like events did
-before their table existed. In that mode a pending payment is only
-visible on the device that submitted it, so cross-device approval does
-not work until the table above is created. Nothing breaks; approval
-just can't cross devices yet.
+before their table existed. Nothing breaks; cross-device registrations
+just don't work until the table above is created.
 
 ## Security note
 
-There is no session auth yet, so the API's approve/reject checks trust
-the approver email the caller sends (it must match the event owner's
-email or an admin email, checked against the stored event row). That
-stops casual misuse from the app's UI, which only ever sends the
-signed-in user's email — but it is not proof of identity the way a
-signed session would be. In-app ownership gating is the real control
-until server-side session auth exists.
+Identity comes from the verified session cookie, and organizer
+management (check-in, roster) additionally requires the organizer to
+still be approved. Payment fields, ticket codes, and holdsSpot are
+server-only and never caller-writable.

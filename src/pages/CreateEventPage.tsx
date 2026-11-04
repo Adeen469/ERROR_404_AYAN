@@ -210,10 +210,6 @@ export function CreateEventPage() {
   const [venueName, setVenueName] = useState('');
   const [address, setAddress] = useState('');
   const [price, setPrice] = useState('0');
-  // Organizer's UPI ID for manual-approval payments on paid events.
-  // Shown to attendees at registration; blank means "pay the organizer
-  // directly" with no specific ID.
-  const [upiId, setUpiId] = useState('');
   // Attendee details gate: on by default. When on, registering requires
   // the attendee's name, mobile number and email, plus a confirmation
   // that those details are shared with the organizer only.
@@ -250,10 +246,6 @@ export function CreateEventPage() {
 
     const priceNum = Number(price);
     if (isNaN(priceNum) || priceNum < 0) errs.price = 'Price cannot be negative.';
-    // Paid events need a UPI ID: it is what powers the QR code and the
-    // tap-to-pay UPI link in the payment dialog. Free events (price 0)
-    // leave it optional.
-    if (priceNum > 0 && !upiId.trim()) errs.upiId = 'UPI ID is required for paid events — attendees pay via the QR code and UPI link.';
 
     setErrors(errs);
     return Object.keys(errs).length === 0;
@@ -317,7 +309,6 @@ export function CreateEventPage() {
         state: location.state.trim() || undefined,
         country: location.country.trim() || undefined,
         price: Number(price),
-        upiId: upiId.trim() || undefined,
         requireAttendeeDetails,
         capacity: Number(capacity),
         tags,
@@ -699,24 +690,6 @@ export function CreateEventPage() {
               <span className="text-[11px] text-[#8C887E]">Set 0 for free community RSVP</span>
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
-                Organizer UPI ID {Number(price) > 0 ? '*' : '(for paid events)'}
-              </label>
-              <input
-                type="text"
-                value={upiId}
-                onChange={(e) => setUpiId(e.target.value)}
-                placeholder="e.g. yourname@okhdfcbank"
-                className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] ${
-                  errors.upiId ? 'border-rose-500' : 'border-[#E2DFD8]'
-                }`}
-              />
-              {errors.upiId && <p className="text-[11px] text-rose-600 mt-1">{errors.upiId}</p>}
-              <span className="text-[11px] text-[#8C887E]">
-                Shown to attendees of paid events as a QR code and UPI link so they can pay you directly. Optional for free events.
-              </span>
-            </div>
 
             <div className="flex items-start gap-3 bg-[#FAF8F5] border border-[#E5E1D8] rounded-xl p-4">
               <input

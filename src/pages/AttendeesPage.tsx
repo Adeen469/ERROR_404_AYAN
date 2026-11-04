@@ -6,7 +6,7 @@ import { eventsService, canManageEvent } from '../services/events-service';
 import { authService } from '../services/auth-service';
 import { isAdminEmail } from '../services/roles-service';
 import { registrationsService } from '../services/registrations-service';
-import { formatEventDate, formatPrice } from '../utils/formatters';
+import { formatEventDate } from '../utils/formatters';
 import { useToast } from '../components/ui/Toast';
 import { TableSkeleton } from '../components/ui/LoadingSkeleton';
 
@@ -20,7 +20,6 @@ export function AttendeesPage() {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'confirmed' | 'checked_in'>('all');
-  const [busyId, setBusyId] = useState<string | null>(null);
   // True when the event belongs to another organizer. The attendee list
   // is never loaded or shown in that case.
   const [notOwner, setNotOwner] = useState(false);
@@ -55,47 +54,9 @@ export function AttendeesPage() {
     loadData();
   }, [eventId]);
 
-  const handleApprove = async (reg: AttendeeRegistration) => {
-    const email = currentUser?.email;
-    if (!email) return;
-    setBusyId(reg.id);
-    try {
-      const updated = await registrationsService.approveRegistration(reg.id, email);
-      setAttendees((prev) => prev.map((a) => (a.id === reg.id ? updated : a)));
-      toast({
-        type: 'success',
-        title: 'Payment approved',
-        description: `${reg.userName}'s pass ${updated.ticketCode} is now active.`,
-      });
-    } catch (err: unknown) {
-      toast({
-        type: 'error',
-        title: 'Could not approve payment',
-        description: err instanceof Error ? err.message : undefined,
-      });
-    } finally {
-      setBusyId(null);
-    }
-  };
 
-  const handleReject = async (reg: AttendeeRegistration) => {
-    const email = currentUser?.email;
-    if (!email) return;
-    setBusyId(reg.id);
-    try {
-      const updated = await registrationsService.rejectRegistration(reg.id, email);
-      setAttendees((prev) => prev.map((a) => (a.id === reg.id ? updated : a)));
-      toast({
-        type: 'info',
-        title: 'Payment rejected',
-        description: `${reg.userName}'s payment request was rejected.`,
-      });
-    } catch {
-      toast({ type: 'error', title: 'Could not reject payment' });
-    } finally {
-      setBusyId(null);
-    }
-  };
+
+
 
   const handleToggleCheckIn = async (regId: string) => {
     try {
@@ -111,28 +72,13 @@ export function AttendeesPage() {
     }
   };
 
-  // Pending payments live in their own sections below; the roster table
+  // Pending rows live in their own section below; the roster table
   // (and its export) covers confirmed and rejected registrations only.
+  // Pending means exactly one thing now: a Razorpay checkout that has
+  // not completed yet. There is no approval action for the organizer
+  // to take — the pass is issued automatically on verified payment,
+  // and unpaid rows hold no spot, so they need no decision at all.
   const pendingRegs = attendees.filter((a) => a.status === 'pending');
-  // Razorpay pendings are NOT approvable: their pass is issued
-  // automatically by the server once Razorpay confirms payment, and
-  // the server now rejects a manual approve of such a row. They get a
-  // read-only section (order id, no Approve button) instead of being
-  // mixed into the UTR approvals, where one click used to approve an
-  // unpaid row.
-  const razorpayPendingRegs = pendingRegs.filter(
-    (a) => a.paymentMethod === 'razorpay' && !a.razorpayPaymentId,
-  );
-  const manualPendingRegs = pendingRegs.filter(
-    (a) => !(a.paymentMethod === 'razorpay' && !a.razorpayPaymentId),
-  );
-  // Duplicate-UTR flag: the server deliberately does not hard-reject a
-  // reused UTR (a retry after a rejection legitimately reuses it), so
-  // the organizer sees the warning here instead.
-  const utrCounts = new Map<string, number>();
-  for (const a of manualPendingRegs) {
-    if (a.utr) utrCounts.set(a.utr, (utrCounts.get(a.utr) || 0) + 1);
-  }
   const tableAttendees = attendees.filter((a) => a.status !== 'pending');
   // Pending / approved / total split for the summary line. Approved
   // here is the true confirmed count from the roster, not the stored
@@ -286,19 +232,25 @@ export function AttendeesPage() {
         {approvedCount} approved · {pendingRegs.length} pending · {event.capacity} total spots
       </p>
 
-      {/* Pending payment approvals — manual UPI/UTR flow only.
-          Approve issues the pass and takes a spot; reject frees a held
-          spot (new pending requests hold none). */}
-      {manualPendingRegs.length > 0 && (
-        <div className="bg-amber-50/60 rounded-2xl border border-amber-200 p-5 space-y-3 shadow-xs">
+      {/* Awaiting Razorpay payment — informational only. These
+          attendees started Razorpay checkout but no payment has been
+          confirmed yet. There is NO action for the organizer here:
+          no Approve, no Reject. The pass is issued automatically once
+          Razorpay confirms, and unpaid rows hold no spot, so they
+          block nothing. If a row stays here, the attendee's payment
+          did not complete — ask them to use the Pay Now button on
+          the event page. Attendees can withdraw their own request
+          from My Registrations. */}
+      {pendingRegs.length > 0 && (
+        <div className="bg-slate-50 rounded-2xl border border-slate-200 p-5 space-y-3 shadow-xs">
           <h2 className="font-editorial text-base font-bold text-[#1E2320]">
-            Pending payment approvals ({manualPendingRegs.length})
+            Awaiting Razorpay payment ({pendingRegs.length})
           </h2>
           <p className="text-xs text-[#5F635D]">
-            These attendees paid via UPI and submitted a 12-digit UTR. Verify each payment in your bank or UPI app, then approve to issue their pass — or reject to release the spot.
+            No action needed — the pass is issued automatically once Razorpay confirms the payment.
           </p>
           <div className="space-y-2">
-            {manualPendingRegs.map((reg) => (
+            {pendingRegs.map((reg) => (
               <div
                 key={reg.id}
                 className="bg-white rounded-xl border border-[#E5E1D8] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
@@ -315,93 +267,11 @@ export function AttendeesPage() {
                     </p>
                   )}
                   <p className="text-[#5F635D]">
-                    UTR: <span className="font-mono font-semibold text-[#1E2320]">{reg.utr || '—'}</span>
-                    <span aria-hidden="true"> · </span>
+                    {reg.razorpayOrderId ? (
+                      <>Order: <span className="font-mono font-semibold text-[#1E2320]">{reg.razorpayOrderId}</span><span aria-hidden="true"> · </span></>
+                    ) : null}
                     {formatEventDate(reg.registeredAt)}
                   </p>
-                  {reg.amountPaise ? (
-                    <p className="text-[#5F635D]">
-                      Expected: <span className="font-semibold text-[#1E2320]">{formatPrice(reg.amountPaise / 100)}</span> — check this amount in your bank or UPI app
-                    </p>
-                  ) : null}
-                  {reg.utr && (utrCounts.get(reg.utr) || 0) > 1 ? (
-                    <p className="text-amber-700 font-semibold">
-                      Same UTR as {(utrCounts.get(reg.utr) || 0) - 1} other pending request(s) — verify carefully before approving.
-                    </p>
-                  ) : null}
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    disabled={
-                      busyId === reg.id ||
-                      (event.registeredCount >= event.capacity && reg.holdsSpot === false)
-                    }
-                    title={
-                      event.registeredCount >= event.capacity && reg.holdsSpot === false
-                        ? 'Event is at full capacity — free a spot before approving'
-                        : undefined
-                    }
-                    onClick={() => handleApprove(reg)}
-                    className="px-3.5 py-2 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors disabled:opacity-60"
-                  >
-                    Approve & Issue Pass
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busyId === reg.id}
-                    onClick={() => handleReject(reg)}
-                    className="px-3.5 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-lg transition-colors disabled:opacity-60"
-                  >
-                    Reject
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Awaiting Razorpay payment — read-only. These attendees started
-          Razorpay checkout but no payment has been confirmed yet, so
-          there is deliberately no Approve button: the server issues
-          their pass automatically once Razorpay confirms, and rejects
-          a manual approve of such a row. Reject only withdraws the
-          request. If a row stays here, the attendee's payment did not
-          complete — ask them to use the Pay Now button on the event
-          page. */}
-      {razorpayPendingRegs.length > 0 && (
-        <div className="bg-slate-50 rounded-2xl border border-slate-200 p-5 space-y-3 shadow-xs">
-          <h2 className="font-editorial text-base font-bold text-[#1E2320]">
-            Awaiting Razorpay payment ({razorpayPendingRegs.length})
-          </h2>
-          <p className="text-xs text-[#5F635D]">
-            No action needed — the pass is issued automatically once Razorpay confirms the payment.
-          </p>
-          <div className="space-y-2">
-            {razorpayPendingRegs.map((reg) => (
-              <div
-                key={reg.id}
-                className="bg-white rounded-xl border border-[#E5E1D8] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-              >
-                <div className="text-xs space-y-0.5">
-                  <p className="font-semibold text-[#1E2320] text-sm">{reg.userName}</p>
-                  <p className="text-[#5F635D]">{reg.userEmail}</p>
-                  <p className="text-[#5F635D]">
-                    Order: <span className="font-mono font-semibold text-[#1E2320]">{reg.razorpayOrderId || '—'}</span>
-                    <span aria-hidden="true"> · </span>
-                    {formatEventDate(reg.registeredAt)}
-                  </p>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    disabled={busyId === reg.id}
-                    onClick={() => handleReject(reg)}
-                    className="px-3.5 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-lg transition-colors disabled:opacity-60"
-                  >
-                    Reject
-                  </button>
                 </div>
               </div>
             ))}
