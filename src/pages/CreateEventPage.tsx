@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { ArrowLeft, Image, AlertCircle, Sparkles, Check } from 'lucide-react';
 import { EventCategory, EventItem } from '../types';
@@ -139,9 +139,46 @@ export function CreateEventPage() {
   const [location, setLocation] = useState({ country: '', state: '', city: '' });
 
   // Hover preview for preset covers: the enlarged image, fitted to the
-  // viewport, over a blurred backdrop. Leaving the enlarged picture (or
-  // clicking the backdrop) closes it again.
+  // viewport, with NO blurred or dimmed background — the page behind it
+  // stays exactly as it is. The preview only appears after the cursor
+  // has rested on a cover for 3 seconds, so merely passing over the grid
+  // never pops a preview up. Leaving the enlarged picture (or clicking
+  // outside it) closes it again.
   const [hoveredCover, setHoveredCover] = useState<string | null>(null);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelHoverPreview = () => {
+    if (hoverTimer.current) {
+      clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
+    }
+  };
+
+  const startHoverPreview = (url: string) => {
+    // A different cover: drop any preview already showing, then wait the
+    // full 3 seconds for this one. Leaving the card cancels the timer
+    // (see onMouseLeave on the preset button) without closing a preview
+    // that is already showing — that one closes on its own mouse-leave.
+    setHoveredCover(null);
+    cancelHoverPreview();
+    hoverTimer.current = setTimeout(() => {
+      setHoveredCover(url);
+      hoverTimer.current = null;
+    }, 3000);
+  };
+
+  // Close the preview on Escape as well as on mouse-leave / outside click.
+  useEffect(() => {
+    if (!hoveredCover) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setHoveredCover(null);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [hoveredCover]);
+
+  // Never let a pending preview timer fire after leaving the page.
+  useEffect(() => cancelHoverPreview, []);
 
   // Country/state/city from the organizer's IP address, filled once on
   // open. Only fills blank fields: if the organizer has already picked a
@@ -418,8 +455,12 @@ export function CreateEventPage() {
                 <button
                   key={preset.name}
                   type="button"
-                  onMouseEnter={() => setHoveredCover(preset.url)}
+                  onMouseEnter={() => startHoverPreview(preset.url)}
+                  onMouseLeave={cancelHoverPreview}
                   onClick={() => {
+                    // Clicking selects at once — a preview must not pop up
+                    // 3 seconds later for a cover the user already picked.
+                    cancelHoverPreview();
                     // Picking a preset also switches back to its category,
                     // so a custom category can never sit under a preset.
                     setCoverImage(preset.url);
@@ -470,20 +511,35 @@ export function CreateEventPage() {
           </div>
         </div>
 
-        {/* Hover preview: enlarged cover fitted to the viewport over a
-            blurred backdrop. Leaving the enlarged picture (or clicking
-            the backdrop) minimises it back to the grid. */}
+        {/* Hover preview, preview only: no dimming, no backdrop blur —
+            the page behind stays fully visible. The wrapper (not just the
+            image) owns the mouse-leave, so the Close button below the
+            image can actually be clicked without the preview vanishing
+            first. Clicking outside the picture, or pressing Escape, also
+            closes it. */}
         {hoveredCover && (
           <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-[#1E2320]/60 backdrop-blur-md p-4"
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
             onClick={() => setHoveredCover(null)}
           >
-            <img
-              src={hoveredCover}
-              alt="Cover preview"
+            <div
+              className="flex flex-col items-center gap-2"
               onMouseLeave={() => setHoveredCover(null)}
-              className="max-w-[90vw] max-h-[90vh] w-auto h-auto object-contain rounded-2xl shadow-2xl"
-            />
+              onClick={(e) => e.stopPropagation()}
+            >
+              <img
+                src={hoveredCover}
+                alt="Cover preview"
+                className="max-w-[90vw] max-h-[85vh] w-auto h-auto object-contain rounded-2xl shadow-2xl"
+              />
+              <button
+                type="button"
+                onClick={() => setHoveredCover(null)}
+                className="px-3 py-1.5 text-xs font-semibold text-white bg-[#1E2320]/90 hover:bg-[#1E2320] rounded-lg cursor-pointer"
+              >
+                Close preview
+              </button>
+            </div>
           </div>
         )}
 
