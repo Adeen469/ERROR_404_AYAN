@@ -36,16 +36,25 @@ export interface AccessInfo {
   status: 'approved' | 'pending' | 'rejected' | 'none' | 'admin';
 }
 
+// Returns null ONLY when the access record is unavailable (503 =
+// organizer_access table not created yet, or a network failure) — the
+// one case where the Google-admin fallback may still apply. Any other
+// error status (401/403/500) THROWS, so callers cannot mistake it for
+// "unavailable" and fall back to a locally stored 'admin' claim: anyone
+// can write locora_current_user = { admin email, role: 'admin' } into
+// localStorage, and the old code trusted exactly that on ANY failure.
 export async function fetchAccess(email: string): Promise<AccessInfo | null> {
+  let res: Response;
   try {
-    const res = await fetch(
+    res = await fetch(
       `/api/organizer-access?email=${encodeURIComponent(email.trim().toLowerCase())}`,
     );
-    if (!res.ok) return null;
-    return (await res.json()) as AccessInfo;
   } catch {
     return null;
   }
+  if (res.ok) return (await res.json()) as AccessInfo;
+  if (res.status === 503) return null;
+  throw new Error(`Organizer access check failed (${res.status})`);
 }
 
 export async function requestOrganizerAccess(

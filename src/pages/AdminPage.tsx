@@ -48,7 +48,15 @@ export function AdminPage() {
       setState('guest');
       return;
     }
-    const access = await fetchAccess(currentUser.email);
+    let access;
+    try {
+      access = await fetchAccess(currentUser.email);
+    } catch {
+      // Error status from the access record: fail closed, no local
+      // 'admin' claim fallback (see roles-service.ts).
+      setState('denied');
+      return;
+    }
     if (access?.role === 'admin') {
       setState('allowed');
       await loadLists(currentUser.email);

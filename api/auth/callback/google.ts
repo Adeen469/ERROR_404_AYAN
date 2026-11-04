@@ -821,7 +821,10 @@ export default async function handler(req: any, res: any) {
     }
   } catch {}
   const profileJson = escapeForScript(JSON.stringify(profile));
-  const tokenJson = escapeForScript(JSON.stringify(tokenData.id_token));
+  // The Google ID token is deliberately NOT stored anymore: the app
+  // never needs it after the callback (the session cookie is the
+  // credential), and persisting it in localStorage only widened the
+  // blast radius of an XSS or a shared-device leak.
   const secure = redirectUri.startsWith("https://") ? "; Secure" : "";
   res.writeHead(200, {
     "Content-Type": "text/html; charset=utf-8",
@@ -852,7 +855,9 @@ export default async function handler(req: any, res: any) {
         var saved = false;
         try {
           localStorage.setItem('locora_current_user', JSON.stringify(profile));
-          localStorage.setItem('locora_auth_token', ${tokenJson});
+          // Old installs may still hold a locora_auth_token from before
+          // this change; drop it so no stale credential lingers.
+          try { localStorage.removeItem('locora_auth_token'); } catch (e) {}
           saved = localStorage.getItem('locora_current_user') !== null;
         } catch (e) { saved = false; }
         var status = document.getElementById('status');

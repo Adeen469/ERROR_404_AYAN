@@ -57,9 +57,10 @@ export default function handler(req: any, res: any) {
     );
   }
 
-  // Role comes from the signup page's attendee/organizer choice. Anything
-  // else falls back to attendee so a crafted URL cannot inject a role.
-  const role = req.query?.role === "organizer" ? "organizer" : "attendee";
+  // No role parameter anymore: the callback assigns 'admin' to admin
+  // emails and 'attendee' to everyone else, and the old ?role= value
+  // was parsed into state and then ignored by the callback — a dead
+  // parameter that only invited confusion. It is not read at all now.
 
   // Only allow same-site return paths, never an external URL.
   const rawReturnTo =
@@ -72,7 +73,7 @@ export default function handler(req: any, res: any) {
   // CSRF protection: a random token is stored in an HttpOnly cookie and
   // echoed back inside `state`. The callback only proceeds if they match.
   const csrf = randomToken();
-  const state = base64urlEncode(JSON.stringify({ csrf, role, returnTo }));
+  const state = base64urlEncode(JSON.stringify({ csrf, returnTo }));
 
   const configured = getEnv("GOOGLE_REDIRECT_URI");
   const proto = req.headers?.["x-forwarded-proto"] || "https";

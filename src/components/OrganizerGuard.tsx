@@ -33,7 +33,16 @@ export function OrganizerGuard({ children }: { children: React.ReactNode }) {
         setState('guest');
         return;
       }
-      const access = await fetchAccess(user.email);
+      let access;
+      try {
+        access = await fetchAccess(user.email);
+      } catch {
+        // The access record answered with an error (401/403/500): fail
+        // closed. A locally stored 'admin' claim must NOT open the page
+        // in that case — only a 503/network null keeps the exception.
+        setState('denied');
+        return;
+      }
       if (access) {
         if (access.role === 'admin' || access.role === 'organizer') {
           setState('allowed');
