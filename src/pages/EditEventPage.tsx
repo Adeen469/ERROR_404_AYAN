@@ -102,7 +102,7 @@ export function EditEventPage() {
     const end = new Date(endDate);
     if (isNaN(start.getTime())) errs.startDate = 'Valid start date & time required.';
     if (isNaN(end.getTime())) errs.endDate = 'Valid end date & time required.';
-    if (end <= start) errs.endDate = 'End time must be after start time.';
+    if (end < start) errs.endDate = 'End date & time must be the same as or after the start date & time.';
 
     const capNum = Number(capacity);
     if (isNaN(capNum) || capNum <= 0) errs.capacity = 'Capacity must be at least 1 spot.';

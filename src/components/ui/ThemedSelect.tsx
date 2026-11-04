@@ -22,6 +22,14 @@ interface ThemedSelectProps {
   // 'bar': compact filter-bar trigger. 'form': full-width form field.
   // 'drawer': full-width, taller, for the mobile filter drawer.
   size?: 'bar' | 'form' | 'drawer';
+  // Optional free-text entry rendered INSIDE the dropdown popover, not as
+  // a separate field on the page. Typing here must not close the popover.
+  // The caller owns the text (customValue) and what it means; the trigger
+  // shows it when it is non-empty because it matches no option.
+  customValue?: string;
+  onCustomChange?: (value: string) => void;
+  customPlaceholder?: string;
+  customLabel?: string;
 }
 
 export function ThemedSelect({
@@ -31,6 +39,10 @@ export function ThemedSelect({
   ariaLabel,
   disabled,
   size = 'form',
+  customValue,
+  onCustomChange,
+  customPlaceholder,
+  customLabel,
 }: ThemedSelectProps) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -114,6 +126,27 @@ export function ThemedSelect({
               </button>
             );
           })}
+          {onCustomChange && (
+            <div
+              className="border-t border-[#E7E3DB] px-3 py-2"
+              // Clicking into the input must not close the popover: the
+              // outside-click handler only closes on mousedown outside
+              // this wrapper, and this block is inside it.
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <label className="block text-[11px] font-semibold text-[#5F635D] mb-1">
+                {customLabel || 'Or type a custom value'}
+              </label>
+              <input
+                type="text"
+                value={customValue || ''}
+                onChange={(e) => onCustomChange(e.target.value)}
+                placeholder={customPlaceholder}
+                aria-label={customLabel || 'Custom value'}
+                className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg px-3 py-2 text-[#1E2320] focus:border-[#1E3F35] focus:ring-1 focus:ring-[#1E3F35] outline-none"
+              />
+            </div>
+          )}
         </div>
       )}
     </div>

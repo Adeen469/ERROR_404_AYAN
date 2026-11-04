@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { ArrowLeft, Image, AlertCircle, Sparkles, Check } from 'lucide-react';
 import { EventCategory, EventItem } from '../types';
@@ -7,6 +7,7 @@ import { LocationPicker } from '../components/LocationPicker';
 import { ThemedSelect } from '../components/ui/ThemedSelect';
 import { ImageUploadField } from '../components/events/ImageUploadField';
 import { eventsService } from '../services/events-service';
+import { detectLocationByIp } from '../services/location-service';
 import { authService } from '../services/auth-service';
 import { useToast } from '../components/ui/Toast';
 
@@ -132,11 +133,36 @@ export function CreateEventPage() {
   // Earliest selectable date/time, recomputed on each render so the
   // native picker greys out past dates/times.
   const minDateTime = toLocalInput(new Date());
-  const [venueName, setVenueName] = useState('');
-  const [address, setAddress] = useState('');
+
   // Worldwide event location (Country -> State -> City). Previously every
   // event was silently fixed to 'Metro City' with no way to change it.
   const [location, setLocation] = useState({ country: '', state: '', city: '' });
+
+  // Hover preview for preset covers: the enlarged image, fitted to the
+  // viewport, over a blurred backdrop. Leaving the enlarged picture (or
+  // clicking the backdrop) closes it again.
+  const [hoveredCover, setHoveredCover] = useState<string | null>(null);
+
+  // Country/state/city from the organizer's IP address, filled once on
+  // open. Only fills blank fields: if the organizer has already picked a
+  // location, their choice is never overwritten. Fails silently (the
+  // manual picker stays) when the lookup service is unreachable.
+  const [locationAutoFilled, setLocationAutoFilled] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void detectLocationByIp().then((loc) => {
+      if (cancelled || !loc) return;
+      setLocation((prev) =>
+        prev.country || prev.state || prev.city ? prev : loc,
+      );
+      setLocationAutoFilled(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const [venueName, setVenueName] = useState('');
+  const [address, setAddress] = useState('');
   const [price, setPrice] = useState('0');
   // Organizer's UPI ID for manual-approval payments on paid events.
   // Shown to attendees at registration; blank means "pay the organizer
@@ -167,7 +193,7 @@ export function CreateEventPage() {
     else if (start < now) errs.startDate = 'Start date & time cannot be in the past.';
     if (isNaN(end.getTime())) errs.endDate = 'Valid end date & time required.';
     else if (end < now) errs.endDate = 'End date & time cannot be in the past.';
-    else if (end <= start) errs.endDate = 'End time must be strictly after start time.';
+    else if (end < start) errs.endDate = 'End date & time must be the same as or after the start date & time.';
 
     const capNum = Number(capacity);
     if (isNaN(capNum) || capNum <= 0) errs.capacity = 'Capacity must be at least 1 spot.';
@@ -333,11 +359,15 @@ export function CreateEventPage() {
                 Category *
               </label>
               <ThemedSelect
-                value={category}
+                value={customCategory.trim() ? customCategory : category}
                 options={DEMO_CATEGORIES.map((cat) => ({ value: cat, label: cat }))}
                 onChange={handleCategoryChange}
                 ariaLabel="Category"
                 size="form"
+                customValue={customCategory}
+                onCustomChange={handleCustomCategoryChange}
+                customPlaceholder="e.g. Charity Run"
+                customLabel="Or type a custom category"
               />
             </div>
 
@@ -353,24 +383,6 @@ export function CreateEventPage() {
                 className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
               />
             </div>
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
-              Or Custom Category
-            </label>
-            <input
-              type="text"
-              value={customCategory}
-              onChange={(e) => handleCustomCategoryChange(e.target.value)}
-              placeholder="e.g. Charity Run"
-              className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
-            />
-            <p className="text-[11px] text-[#5F635D] mt-1">
-              Leave blank to use the dropdown category. Typing here overrides
-              the dropdown and clears the cover selection below — upload your
-              own cover, or pick a dropdown category again to restore its cover.
-            </p>
           </div>
 
           <div>
@@ -406,6 +418,7 @@ export function CreateEventPage() {
                 <button
                   key={preset.name}
                   type="button"
+                  onMouseEnter={() => setHoveredCover(preset.url)}
                   onClick={() => {
                     // Picking a preset also switches back to its category,
                     // so a custom category can never sit under a preset.
@@ -456,6 +469,23 @@ export function CreateEventPage() {
             />
           </div>
         </div>
+
+        {/* Hover preview: enlarged cover fitted to the viewport over a
+            blurred backdrop. Leaving the enlarged picture (or clicking
+            the backdrop) minimises it back to the grid. */}
+        {hoveredCover && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-[#1E2320]/60 backdrop-blur-md p-4"
+            onClick={() => setHoveredCover(null)}
+          >
+            <img
+              src={hoveredCover}
+              alt="Cover preview"
+              onMouseLeave={() => setHoveredCover(null)}
+              className="max-w-[90vw] max-h-[90vh] w-auto h-auto object-contain rounded-2xl shadow-2xl"
+            />
+          </div>
+        )}
 
         {/* Section: Date, Time & Venue */}
         <div className="space-y-4">
@@ -530,6 +560,8 @@ export function CreateEventPage() {
             <p className="text-[11px] text-[#5F635D] mt-1">
               Pick anywhere in the world. If left blank, the event stays
               listed under Metro City as before.
+              {locationAutoFilled &&
+                ' Country and state were filled from your connection — change them if the event is elsewhere.'}
             </p>
           </div>
 

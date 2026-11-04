@@ -28,33 +28,102 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
-async function compressToDataUrl(file: File): Promise<string> {
+function readAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error('read'));
+    reader.readAsDataURL(file);
+  });
+}
+
+// Why a dropped image could fail before this fix: the only decode path
+// was <img> from an object URL. Browsers cannot decode some image formats
+// that way at all (iPhone HEIC, TIFF, many RAW files), so a perfectly
+// valid dropped file hit img.onerror and the user got the generic
+// "Couldn't read that image" with no way forward. Now decoding tries, in
+// order: <img> from an object URL, createImageBitmap (a different decode
+// path that handles some formats <img> rejects, with EXIF orientation
+// honoured where supported), then <img> from a data URL. Only if all
+// three fail does the caller report the error — with a format-specific
+// message for the known-undecodable formats.
+async function decodeSource(
+  file: File,
+): Promise<HTMLImageElement | ImageBitmap> {
   const objectUrl = URL.createObjectURL(file);
   try {
-    const img = await loadImage(objectUrl);
-    const scale = Math.min(1, MAX_DIMENSION / Math.max(img.width, img.height));
-    const width = Math.max(1, Math.round(img.width * scale));
-    const height = Math.max(1, Math.round(img.height * scale));
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('canvas');
-    ctx.drawImage(img, 0, 0, width, height);
-    const mime = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
-    const blob = await new Promise<Blob | null>((resolve) =>
-      canvas.toBlob(resolve, mime, 0.85),
-    );
-    if (!blob) throw new Error('encode');
-    return await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result));
-      reader.onerror = () => reject(new Error('read'));
-      reader.readAsDataURL(blob);
-    });
+    return await loadImage(objectUrl);
+  } catch {
+    // Fall through to the next decode path.
   } finally {
     URL.revokeObjectURL(objectUrl);
   }
+  if (typeof createImageBitmap === 'function') {
+    try {
+      return await createImageBitmap(file, { imageOrientation: 'from-image' } as ImageBitmapOptions);
+    } catch {
+      try {
+        return await createImageBitmap(file);
+      } catch {
+        // Fall through to the data-URL path.
+      }
+    }
+  }
+  return await loadImage(await readAsDataUrl(file));
+}
+
+const IMAGE_EXTENSIONS = new Set([
+  'jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg', 'tif', 'tiff',
+]);
+
+function looksLikeImage(file: File): boolean {
+  if (file.type.startsWith('image/')) return true;
+  // Some systems hand dropped files an empty MIME type. Fall back to the
+  // extension, so a real image is not rejected before decoding is tried.
+  const ext = file.name.split('.').pop()?.toLowerCase() || '';
+  return IMAGE_EXTENSIONS.has(ext);
+}
+
+function isUndecodableFormat(file: File): boolean {
+  const ext = file.name.split('.').pop()?.toLowerCase() || '';
+  return (
+    ext === 'heic' || ext === 'heif' ||
+    file.type === 'image/heic' || file.type === 'image/heif'
+  );
+}
+
+async function compressToDataUrl(file: File): Promise<string> {
+  // Decode errors propagate to processFile, which reports them.
+  const source = await decodeSource(file);
+    const naturalWidth = source.width;
+    const naturalHeight = source.height;
+    // SVGs without intrinsic dimensions report 0x0; draw them at a sane
+    // default size instead of producing a 1x1 canvas.
+    const srcWidth = naturalWidth > 0 ? naturalWidth : 1200;
+    const srcHeight = naturalHeight > 0 ? naturalHeight : 900;
+    const scale = Math.min(1, MAX_DIMENSION / Math.max(srcWidth, srcHeight));
+    const width = Math.max(1, Math.round(srcWidth * scale));
+    const height = Math.max(1, Math.round(srcHeight * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('canvas');
+  ctx.drawImage(source, 0, 0, width, height);
+  if ('close' in source && typeof (source as ImageBitmap).close === 'function') {
+    (source as ImageBitmap).close();
+  }
+  const mime = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+  const blob = await new Promise<Blob | null>((resolve) =>
+    canvas.toBlob(resolve, mime, 0.85),
+  );
+  if (!blob) throw new Error('encode');
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error('read'));
+    reader.readAsDataURL(blob);
+  });
 }
 
 interface ImageUploadFieldProps {
@@ -79,7 +148,11 @@ export function ImageUploadField({
     async (file: File | null | undefined) => {
       if (!file) return;
       setError('');
-      if (!file.type.startsWith('image/')) {
+      if (file.size === 0) {
+        setError('That file is empty. Please drop a different image file.');
+        return;
+      }
+      if (!looksLikeImage(file)) {
         setError('That file is not an image. Please drop an image file.');
         return;
       }
@@ -95,7 +168,18 @@ export function ImageUploadField({
         setFileMeta({ name: file.name, size: file.size });
         onUpload(dataUrl);
       } catch {
-        setError("Couldn't read that image. Please try another file.");
+        // Name the real problem instead of the old generic line: some
+        // formats (notably iPhone HEIC) cannot be decoded by any browser
+        // path, so the fix for those is a JPG/PNG export, not retrying.
+        if (isUndecodableFormat(file)) {
+          setError(
+            'This is an iPhone HEIC photo, which browsers cannot read. Please export it as a JPG or PNG first, then drop it here.',
+          );
+        } else {
+          setError(
+            "Couldn't read that image — it may be in a format this browser can't open (TIFF and RAW photos often fail). Please try a JPG, PNG or WebP version.",
+          );
+        }
       } finally {
         setIsProcessing(false);
       }
@@ -267,7 +351,20 @@ export function ImageUploadField({
           e.preventDefault();
           dragDepth.current = 0;
           setIsDragging(false);
-          void processFile(e.dataTransfer.files?.[0]);
+          const file = e.dataTransfer.files?.[0];
+          if (file) {
+            void processFile(file);
+            return;
+          }
+          // Dragging a picture from a website carries a URL, not a file,
+          // so there is nothing to decode. Say so, instead of silently
+          // doing nothing (or the old generic read error).
+          const dragged = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
+          if (dragged.trim()) {
+            setError(
+              "That drag didn't include an image file — pictures dragged from a website can't be read here. Please download the image first, then drop the file here.",
+            );
+          }
         }}
         className={`group relative rounded-xl border-2 border-transparent px-4 py-8 text-center cursor-pointer overflow-hidden outline-none transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] focus-visible:ring-2 focus-visible:ring-[#1E3F35] focus-visible:ring-offset-2 ${
           isDragging
