@@ -428,8 +428,8 @@ async function loadAllRegistrations(): Promise<any[]> {
   return out;
 }
 
-// True when a Telegram-verified row matches this email + phone
-// (see api/telegram-verify.ts). Used to stamp phoneVerified on a
+// True when an OTP-verified row matches this email + phone
+// (see api/phone-otp.ts). Used to stamp phoneVerified on a
 // registration server-side; a client-sent value is never trusted.
 async function hasVerifiedPhone(email: string, phone: string): Promise<boolean> {
   const digits = (s: string) => (s || "").replace(/\D/g, "");

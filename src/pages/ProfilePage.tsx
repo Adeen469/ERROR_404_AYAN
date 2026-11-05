@@ -85,113 +85,122 @@ export function ProfilePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Telegram phone verification (free, no SMS — see
-  // api/telegram-verify.ts). The verified flag here is a display flag
+  // SMS OTP phone verification via Fast2SMS (see
+  // api/phone-otp.ts). The verified flag here is a display flag
   // initialized from the saved profile; the server-attested badge on
   // registrations is checked separately at registration time.
   const [phoneVerified, setPhoneVerified] = useState(currentUser?.phoneVerified || false);
-  const [verifyLink, setVerifyLink] = useState('');
-  const [verifyWaiting, setVerifyWaiting] = useState(false);
-  const [verifyStarting, setVerifyStarting] = useState(false);
+  const [otpSent, setOtpSent] = useState(false);
+  const [otpCode, setOtpCode] = useState('');
+  const [otpSending, setOtpSending] = useState(false);
+  const [otpVerifying, setOtpVerifying] = useState(false);
   const [verifyError, setVerifyError] = useState('');
   const verifyTokenRef = React.useRef<string | null>(null);
-  const verifyTimerRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const stopVerifyPolling = () => {
-    if (verifyTimerRef.current) {
-      clearInterval(verifyTimerRef.current);
-      verifyTimerRef.current = null;
+  const markPhoneVerified = async () => {
+    verifyTokenRef.current = null;
+    localStorage.removeItem('locora-phone-otp-token');
+    setOtpSent(false);
+    setOtpCode('');
+    setPhoneVerified(true);
+    try {
+      await authService.updateProfile({ phoneVerified: true });
+    } catch {
+      // The badge above already reflects the verified state.
     }
+    toast({
+      type: 'success',
+      title: 'Mobile number verified',
+      description: 'Your number is now confirmed via SMS OTP.',
+    });
   };
 
-  const pollVerifyStatus = (token: string) => {
-    stopVerifyPolling();
-    verifyTimerRef.current = setInterval(async () => {
+  // Resume an OTP request started earlier (e.g. the page reloaded
+  // after the code was sent).
+  useEffect(() => {
+    const token = localStorage.getItem('locora-phone-otp-token');
+    if (!token || currentUser?.phoneVerified) return;
+    verifyTokenRef.current = token;
+    (async () => {
       try {
-        const res = await fetch('/api/telegram-verify', {
+        const res = await fetch('/api/phone-otp', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'status', token }),
         });
         const data = await res.json();
         if (data.status === 'verified') {
-          stopVerifyPolling();
-          setVerifyWaiting(false);
-          setVerifyLink('');
+          await markPhoneVerified();
+        } else if (data.status === 'pending') {
+          setOtpSent(true);
+        } else {
           verifyTokenRef.current = null;
-          localStorage.removeItem('locora-telegram-verify-token');
-          setPhoneVerified(true);
-          try {
-            await authService.updateProfile({ phoneVerified: true });
-          } catch {
-            // The badge above already reflects the verified state.
-          }
-          toast({
-            type: 'success',
-            title: 'Mobile number verified',
-            description: 'Your number is now confirmed via Telegram.',
-          });
-        } else if (data.status === 'expired' || data.status === 'not_found') {
-          stopVerifyPolling();
-          setVerifyWaiting(false);
-          setVerifyLink('');
-          verifyTokenRef.current = null;
-          localStorage.removeItem('locora-telegram-verify-token');
-          setVerifyError(
-            data.status === 'expired'
-              ? 'This verification link expired (links last 15 minutes). Get a fresh one below.'
-              : 'Verification link not found. Get a fresh one below.',
-          );
+          localStorage.removeItem('locora-phone-otp-token');
         }
       } catch {
-        // Polling failures are silent; the next tick retries.
+        // Restore is best-effort; the user can request a fresh code.
       }
-    }, 3000);
-  };
-
-  // Resume a verification started earlier (e.g. the page reloaded
-  // while the user was in Telegram).
-  useEffect(() => {
-    const token = localStorage.getItem('locora-telegram-verify-token');
-    if (token && !currentUser?.phoneVerified) {
-      verifyTokenRef.current = token;
-      setVerifyWaiting(true);
-      pollVerifyStatus(token);
-    }
-    return () => stopVerifyPolling();
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleStartVerify = async () => {
+  const handleSendOtp = async () => {
     if (!currentUser || !currentUser.phone) return;
     setVerifyError('');
-    setVerifyStarting(true);
+    setOtpSending(true);
     try {
-      const res = await fetch('/api/telegram-verify', {
+      const res = await fetch('/api/phone-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'start', email: currentUser.email, phone: currentUser.phone }),
+        body: JSON.stringify({ action: 'send', email: currentUser.email, phone: currentUser.phone }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Could not start verification.');
+      if (!res.ok) throw new Error(data.message || 'Could not send the OTP.');
       verifyTokenRef.current = data.token;
-      localStorage.setItem('locora-telegram-verify-token', data.token);
-      setVerifyLink(data.link);
-      setVerifyWaiting(true);
-      pollVerifyStatus(data.token);
+      localStorage.setItem('locora-phone-otp-token', data.token);
+      setOtpCode('');
+      setOtpSent(true);
+      toast({
+        type: 'success',
+        title: 'OTP sent',
+        description: `A 6-digit code is on its way to ${currentUser.phone}.`,
+      });
     } catch (err: unknown) {
-      setVerifyError(err instanceof Error ? err.message : 'Could not start verification.');
+      setVerifyError(err instanceof Error ? err.message : 'Could not send the OTP.');
     } finally {
-      setVerifyStarting(false);
+      setOtpSending(false);
+    }
+  };
+
+  const handleVerifyOtp = async () => {
+    const token = verifyTokenRef.current;
+    if (!token || otpCode.trim().length !== 6) return;
+    setVerifyError('');
+    setOtpVerifying(true);
+    try {
+      const res = await fetch('/api/phone-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'verify', token, otp: otpCode.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Could not verify the OTP.');
+      if (data.status === 'verified') {
+        await markPhoneVerified();
+      }
+    } catch (err: unknown) {
+      setVerifyError(err instanceof Error ? err.message : 'Could not verify the OTP.');
+    } finally {
+      setOtpVerifying(false);
     }
   };
 
   const handleCancelVerify = () => {
-    stopVerifyPolling();
-    setVerifyWaiting(false);
-    setVerifyLink('');
     verifyTokenRef.current = null;
-    localStorage.removeItem('locora-telegram-verify-token');
+    localStorage.removeItem('locora-phone-otp-token');
+    setOtpSent(false);
+    setOtpCode('');
+    setVerifyError('');
   };
 
   const handleRequestAccess = async () => {
@@ -382,45 +391,43 @@ export function ProfilePage() {
                   />
                 </div>
                 {phoneVerified ? (
-                  <span className="text-xs font-semibold text-[#1E3F35] shrink-0">
-                    ✓ {currentUser?.phone} is verified
-                  </span>
-                ) : verifyWaiting ? (
-                  verifyLink ? (
-                    <a
-                      href={verifyLink}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-block px-4 py-2 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors shrink-0 text-center"
-                    >
-                      Open Telegram
-                    </a>
-                  ) : null
-                ) : (
-                  <button
-                    type="button"
-                    onClick={handleStartVerify}
-                    disabled={verifyStarting || !currentUser?.phone || phone.trim() !== currentUser.phone}
-                    className="px-4 py-2.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-60 cursor-pointer shrink-0 w-full sm:w-auto"
-                  >
-                    {verifyStarting ? 'Starting…' : 'Verify via Telegram'}
-                  </button>
-                )}
-              </div>
-              <span className="text-[11px] text-[#8C887E]">
-                Shared with event organizers only, when you register for events that require attendee details.
-              </span>
-              <div className="mt-2 space-y-2">
-                {phoneVerified ? (
                   <p className="text-[11px] text-[#5F635D] leading-relaxed">
-                    Verified via Telegram. Changing the number and saving will remove verification until the new number is confirmed.
+                    Verified via SMS OTP. Changing the number and saving will remove verification until the new number is confirmed.
                   </p>
-                ) : verifyWaiting ? (
+                ) : otpSent ? (
                   <div className="space-y-2">
+                    <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        maxLength={6}
+                        value={otpCode}
+                        onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
+                        placeholder="6-digit OTP"
+                        className="w-full sm:w-44 text-xs bg-white border border-[#E2DFD8] rounded-lg p-2.5 text-[#1E2320] focus:border-[#1E3F35] tracking-[0.3em]"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleVerifyOtp}
+                        disabled={otpVerifying || otpCode.trim().length !== 6}
+                        className="px-4 py-2.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-60 cursor-pointer shrink-0"
+                      >
+                        {otpVerifying ? 'Verifying…' : 'Verify OTP'}
+                      </button>
+                    </div>
                     <p className="text-[11px] text-[#5F635D] leading-relaxed">
-                      Waiting for you to share your number in Telegram. Open the link, tap “Share my phone number”, and this updates automatically. The link lasts 15 minutes.
+                      Enter the 6-digit code sent by SMS to {currentUser?.phone}. It expires in 10 minutes.
                     </p>
-                    <div>
+                    <div className="flex gap-4">
+                      <button
+                        type="button"
+                        onClick={handleSendOtp}
+                        disabled={otpSending}
+                        className="text-[11px] font-semibold text-[#5F635D] hover:text-[#1E2320] transition-colors cursor-pointer disabled:opacity-60"
+                      >
+                        {otpSending ? 'Sending…' : 'Resend OTP'}
+                      </button>
                       <button
                         type="button"
                         onClick={handleCancelVerify}
@@ -432,7 +439,7 @@ export function ProfilePage() {
                   </div>
                 ) : !currentUser?.phone ? (
                   <p className="text-[11px] text-[#8C887E] leading-relaxed">
-                    Save a mobile number first, then verify it here. Verification is free — it uses Telegram, not SMS.
+                    Save a mobile number first, then verify it here with an SMS code.
                   </p>
                 ) : phone.trim() !== currentUser.phone ? (
                   <p className="text-[11px] text-amber-700 leading-relaxed">
@@ -440,7 +447,7 @@ export function ProfilePage() {
                   </p>
                 ) : (
                   <p className="text-[11px] text-[#5F635D] leading-relaxed">
-                    Confirm this number is really yours — free, via Telegram. No SMS code, no cost.
+                    Confirm this number is really yours — we&apos;ll text you a 6-digit code.
                   </p>
                 )}
                 {verifyError && <p className="text-[11px] text-rose-600">{verifyError}</p>}

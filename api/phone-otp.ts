@@ -1,34 +1,37 @@
-// Telegram phone verification — free, no SMS.
+// SMS OTP phone verification via Fast2SMS — replaces the old Telegram
+// contact-share flow (api/telegram-verify.ts, removed).
 //
 // Flow:
-//   1. The Locora profile page calls POST { action: "start", email, phone }.
-//      A one-time token is stored (Supabase phone_verifications table)
-//      and the caller gets a https://t.me/<bot>?start=<token> link.
-//   2. The user opens the link in Telegram. The bot replies with a
-//      "Share my phone number" button (request_contact).
-//   3. The user taps it. Telegram sends the contact (a number Telegram
-//      itself verified at signup) to this same endpoint as a webhook
-//      update. If its digits match the profile number, the row becomes
-//      "verified" and the profile page's status poll sees it.
-//   4. The profile page then marks the profile phoneVerified.
+//   1. The Locora profile page calls POST { action: "send", email, phone }.
+//      A 6-digit OTP is generated here, only its SHA-256 hash is stored
+//      (Supabase phone_verifications table, status "pending_otp", 10-min
+//      expiry), and the code itself is delivered by Fast2SMS
+//      (route "otp" — Fast2SMS's pre-approved OTP template, so no DLT
+//      template of our own is needed to start; see FAST2SMS_OTP_SETUP.md).
+//   2. The user types the code; the page calls
+//      POST { action: "verify", token, otp }. On a hash match (constant-
+//      time compare, max 5 attempts) the row becomes "verified".
+//   3. Verified rows are the attestation record: api/registrations.ts
+//      server-checks them (email + phone digits, status "verified")
+//      before stamping a registration's phoneVerified badge — unchanged
+//      from the Telegram flow, so no changes were needed there.
 //
 // Security notes:
-//   - The webhook is a public URL, so Telegram updates are authenticated
-//     with the secret_token set via setWebhook: every update must carry
-//     the X-Telegram-Bot-Api-Secret-Token header matching
-//     TELEGRAM_WEBHOOK_SECRET. Without that secret configured, updates
-//     are ignored (fail closed) — see TELEGRAM_VERIFICATION_SETUP.md.
-//   - A token alone proves nothing: verification requires a Telegram
-//     contact whose digits match the profile number. A token created
-//     for someone else's email/phone cannot be completed with the
-//     attacker's own Telegram number (digit mismatch).
-//   - Tokens live 15 minutes. Verified rows are kept as the attestation
-//     record (see api/registrations.ts, which server-checks them before
-//     stamping a registration's phoneVerified badge).
+//   - "send" and "verify" require a valid Locora session whose email
+//     matches the verification row (same audit fix the Telegram flow
+//     had: previously anyone could mint tokens for any address).
+//   - The OTP itself is never stored or logged — only its hash, bound
+//     to the row token and phone so a hash cannot be replayed against
+//     another number.
+//   - Sends are rate-limited per email and per phone (rate_limits
+//     table, shared helper pattern with the other api/ handlers).
 //
-// Env (Vercel Production): TELEGRAM_BOT_TOKEN (Sensitive),
-// TELEGRAM_BOT_USERNAME (public), TELEGRAM_WEBHOOK_SECRET (Sensitive).
-// Table: phone_verifications (token text pk, data jsonb, created_at).
+// Env (Vercel Production): FAST2SMS_API_KEY (Sensitive, server-only —
+// never VITE_-prefixed), SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
+// SESSION_SECRET.
+// Table: phone_verifications (token text pk, data jsonb, created_at) —
+// the same table the Telegram flow used; verified rows keep the same
+// { email, phone, status: "verified", verifiedAt } shape.
 
 function getEnv(name: string): string {
   try {
@@ -112,16 +115,10 @@ async function fetchJson(
 }
 
 const TABLE = "phone_verifications";
-const TOKEN_TTL_MS = 15 * 60 * 1000;
+const OTP_TTL_MS = 10 * 60 * 1000;
+const MAX_OTP_ATTEMPTS = 5;
 
-// ---- Session verification (audit fix) ----
-// The start action used to take any email/phone from the body with no
-// session check, so anyone could mint tokens for any address and —
-// because start deletes the victim's pending rows first — repeatedly
-// invalidate a victim's in-progress verification. Now start requires a
-// session whose email matches the body email, plus a per-email rate
-// limit. The Telegram webhook branch below stays session-free (Telegram
-// calls it, authenticated by the secret header instead).
+// ---- Session verification (same scheme as api/telegram-verify.ts) ----
 function norm(email: string): string {
   return (email || "").trim().toLowerCase();
 }
@@ -138,17 +135,6 @@ function parseCookies(req: any): Record<string, string> {
     if (idx > -1) out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
   }
   return out;
-}
-
-// Last x-forwarded-for entry (Vercel appends the real IP last; the
-// first entry is client-spoofable).
-function getClientIp(req: any): string {
-  const fwd = req.headers?.["x-forwarded-for"] || "";
-  if (typeof fwd === "string" && fwd.trim()) {
-    const parts = fwd.split(",").map((s: string) => s.trim()).filter(Boolean);
-    if (parts.length) return parts[parts.length - 1];
-  }
-  return req.headers?.["x-real-ip"] || "unknown";
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -281,12 +267,14 @@ async function insertRow(token: string, data: any): Promise<void> {
 }
 
 async function updateRow(token: string, data: any): Promise<void> {
+  const rest = { ...(data || {}) };
+  delete rest.token;
   await fetchJson(
     `${supabaseBase()}/rest/v1/${TABLE}?token=eq.${encodeURIComponent(token)}`,
     {
       method: "PATCH",
       headers: supabaseHeaders(),
-      body: JSON.stringify({ data }),
+      body: JSON.stringify({ data: rest }),
     },
   );
 }
@@ -302,158 +290,65 @@ function digits(s: string): string {
   return (s || "").replace(/\D/g, "");
 }
 
-function numbersMatch(a: string, b: string): boolean {
-  const da = digits(a);
-  const db = digits(b);
-  if (!da || !db) return false;
-  if (da === db) return true;
-  // Telegram numbers carry the country code (+91…) while a profile
-  // number may not. Matching the last 10 digits covers that gap.
-  if (da.length >= 10 && db.length >= 10) return da.slice(-10) === db.slice(-10);
-  return false;
+// Fast2SMS sends to Indian numbers as bare 10 digits. Accepts the
+// profile's stored forms: "9876543210", "+91 98765 43210",
+// "919876543210", "09876543210". Returns null for anything else.
+function indianTenDigits(phone: string): string | null {
+  let d = digits(phone);
+  if (d.length === 12 && d.startsWith("91")) d = d.slice(2);
+  if (d.length === 11 && d.startsWith("0")) d = d.slice(1);
+  if (d.length === 10 && /^[6-9]/.test(d)) return d;
+  return null;
 }
 
 function isExpired(row: any): boolean {
   const t = Date.parse(row.createdAt || "");
   if (Number.isNaN(t)) return true;
-  return Date.now() - t > TOKEN_TTL_MS;
+  return Date.now() - t > OTP_TTL_MS;
 }
 
-async function telegramSend(
-  chatId: number | string,
-  text: string,
-  replyMarkup?: any,
-): Promise<void> {
-  const token = getEnv("TELEGRAM_BOT_TOKEN");
-  if (!token) return;
-  try {
-    await fetchJson(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-      }),
-    });
-  } catch {
-    // Webhook replies are best-effort; the row state is the truth.
+function generateOtp(): string {
+  const c: any = (globalThis as any).crypto;
+  if (c && typeof c.getRandomValues === "function") {
+    const buf = new Uint32Array(1);
+    c.getRandomValues(buf);
+    return String(100000 + (buf[0] % 900000));
   }
+  return String(100000 + Math.floor(Math.random() * 900000));
 }
 
-const SHARE_KEYBOARD = {
-  keyboard: [[{ text: "Share my phone number", request_contact: true }]],
-  one_time_keyboard: true,
-  resize_keyboard: true,
-};
+function generateToken(): string {
+  const c: any = (globalThis as any).crypto;
+  if (c && typeof c.randomUUID === "function") return c.randomUUID().replace(/-/g, "");
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 14)}`;
+}
 
-async function handleTelegramUpdate(
-  body: any,
-  secretHeader: string,
-): Promise<{ ok: boolean; reason?: string }> {
-  const secret = getEnv("TELEGRAM_WEBHOOK_SECRET");
-  if (!secret || secretHeader !== secret) {
-    return { ok: false, reason: "webhook secret missing or mismatch" };
+// Delivers the OTP through Fast2SMS's bulkV2 API on the "otp" route,
+// which uses Fast2SMS's own pre-approved OTP template — the variable
+// value is our code. Throws with the gateway's message on failure.
+async function sendFast2SmsOtp(tenDigits: string, otp: string): Promise<void> {
+  const apiKey = getEnv("FAST2SMS_API_KEY");
+  const { ok, body } = await fetchJson("https://www.fast2sms.com/dev/bulkV2", {
+    method: "POST",
+    headers: {
+      authorization: apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      route: "otp",
+      variables_values: otp,
+      numbers: tenDigits,
+      flash: 0,
+    }),
+  });
+  if (!ok || !body || body.return !== true) {
+    const msg = Array.isArray(body?.message)
+      ? body.message.join(", ")
+      : typeof body?.message === "string"
+        ? body.message
+        : "SMS gateway rejected the request";
+    throw new Error(msg);
   }
-  const msg = body.message;
-  if (!msg || !msg.chat || msg.chat.id === undefined) return { ok: true };
-  const chatId = msg.chat.id;
-
-  // Contact shared: the verification moment.
-  if (msg.contact && msg.contact.phone_number) {
-    let rows: any[] = [];
-    try {
-      rows = await loadRows();
-    } catch {
-      return { ok: true };
-    }
-    const row = rows.find(
-      (r) =>
-        (r.status === "pending" || r.status === "awaiting_contact") &&
-        String(r.chatId) === String(chatId) &&
-        !isExpired(r),
-    );
-    if (!row) {
-      await telegramSend(
-        chatId,
-        "I don't have a pending verification for this chat. Open Locora → Profile → Verify via Telegram to get your personal link first.",
-      );
-      return { ok: true };
-    }
-    if (numbersMatch(msg.contact.phone_number, row.phone)) {
-      await updateRow(row.token, {
-        ...row,
-        status: "verified",
-        verifiedAt: new Date().toISOString(),
-      });
-      await telegramSend(
-        chatId,
-        "Verified! Your Locora mobile number is confirmed. You can go back to Locora — your profile now shows it as verified.",
-      );
-    } else {
-      await telegramSend(
-        chatId,
-        `That number (+${digits(msg.contact.phone_number)}) doesn't match the number on your Locora profile (+${digits(row.phone)}). Please share the number you registered with, or update it on Locora and get a fresh link.`,
-      );
-    }
-    return { ok: true };
-  }
-
-  const text = typeof msg.text === "string" ? msg.text : "";
-  if (text.startsWith("/start")) {
-    const token = (text.split(/\s+/)[1] || "").trim();
-    if (!token) {
-      await telegramSend(
-        chatId,
-        "Open Locora → Profile → Verify via Telegram to get your personal verification link, then tap it to come back here.",
-      );
-      return { ok: true };
-    }
-    let row: any = null;
-    try {
-      const rows = await loadRows();
-      row = rows.find((r) => r.token === token) || null;
-    } catch {
-      return { ok: true };
-    }
-    if (!row || row.status === "verified") {
-      await telegramSend(
-        chatId,
-        "This link is no longer valid. Get a fresh link from your Locora profile (Profile → Verify via Telegram).",
-      );
-      return { ok: true };
-    }
-    if (row.status !== "pending" && row.status !== "awaiting_contact") {
-      await telegramSend(
-        chatId,
-        "This link is no longer valid. Get a fresh link from your Locora profile (Profile → Verify via Telegram).",
-      );
-      return { ok: true };
-    }
-    if (isExpired(row)) {
-      await updateRow(row.token, { ...row, status: "expired" });
-      await telegramSend(
-        chatId,
-        "This link expired (links last 15 minutes). Get a fresh link from your Locora profile.",
-      );
-      return { ok: true };
-    }
-    await updateRow(row.token, { ...row, chatId, status: "awaiting_contact" });
-    await telegramSend(
-      chatId,
-      `Tap "Share my phone number" below to verify ${row.phone} on Locora. Telegram shares the number it verified when you signed up — nothing else is shared.`,
-      SHARE_KEYBOARD,
-    );
-    return { ok: true };
-  }
-
-  if (text) {
-    await telegramSend(
-      chatId,
-      "Open Locora → Profile → Verify via Telegram to get your personal verification link, then tap it to come back here.",
-    );
-  }
-  return { ok: true };
 }
 
 export default async function handler(req: any, res: any): Promise<void> {
@@ -464,23 +359,12 @@ export default async function handler(req: any, res: any): Promise<void> {
     }
     const body = await readBody(req);
 
-    // Telegram webhook update (no action field, has message). The
-    // secret header is read here: Vercel lowercases header names.
-    if (body && body.message) {
-      const secretHeader =
-        req.headers?.["x-telegram-bot-api-secret-token"] || "";
-      const result = await handleTelegramUpdate(body, secretHeader);
-      // Always 200 for Telegram so it does not retry a handled update.
-      sendJson(res, 200, result);
-      return;
-    }
-
     if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) {
       sendJson(res, 503, { message: "Verification is not set up yet (Supabase env missing)" });
       return;
     }
 
-    if (body.action === "start") {
+    if (body.action === "send") {
       const session = await verifySession(req);
       if (!session) {
         sendJson(res, 401, { message: "Sign in required" });
@@ -488,27 +372,31 @@ export default async function handler(req: any, res: any): Promise<void> {
       }
       const email = typeof body.email === "string" ? body.email.trim() : "";
       const phone = typeof body.phone === "string" ? body.phone.trim() : "";
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      if (!isEmail(email)) {
         sendJson(res, 400, { message: "A valid email is required" });
         return;
       }
       if (norm(email) !== session.email) {
-        sendJson(res, 403, { message: "You can only verify your own email" });
+        sendJson(res, 403, { message: "You can only verify your own number" });
         return;
       }
-      const rl = await checkRateLimit(`telegram:start:${session.email}`, 5, 60 * 60 * 1000);
-      if (!rl.allowed && !rl.tableMissing) {
-        sendJson(res, 429, { message: "Too many verification attempts. Try again later." });
+      const ten = indianTenDigits(phone);
+      if (!ten) {
+        sendJson(res, 400, { message: "Enter a valid Indian mobile number (10 digits)" });
         return;
       }
-      const d = digits(phone);
-      if (d.length < 7 || d.length > 15) {
-        sendJson(res, 400, { message: "A valid mobile number is required" });
+      if (!getEnv("FAST2SMS_API_KEY")) {
+        sendJson(res, 503, { message: "SMS verification is not set up yet (Fast2SMS key missing — see FAST2SMS_OTP_SETUP.md)" });
         return;
       }
-      const username = getEnv("TELEGRAM_BOT_USERNAME");
-      if (!username) {
-        sendJson(res, 503, { message: "Telegram verification is not set up yet (bot username missing)" });
+      const rlEmail = await checkRateLimit(`phoneotp:send:${session.email}`, 5, 60 * 60 * 1000);
+      if (!rlEmail.allowed && !rlEmail.tableMissing) {
+        sendJson(res, 429, { message: "Too many OTP requests. Try again later." });
+        return;
+      }
+      const rlPhone = await checkRateLimit(`phoneotp:send:phone:${ten}`, 5, 60 * 60 * 1000);
+      if (!rlPhone.allowed && !rlPhone.tableMissing) {
+        sendJson(res, 429, { message: "Too many OTP requests for this number. Try again later." });
         return;
       }
       let rows: any[];
@@ -516,41 +404,134 @@ export default async function handler(req: any, res: any): Promise<void> {
         rows = await loadRows();
       } catch {
         sendJson(res, 503, {
-          message: "Verification table is not set up yet (see TELEGRAM_VERIFICATION_SETUP.md)",
+          message: "Verification table is not set up yet (see FAST2SMS_OTP_SETUP.md)",
         });
         return;
       }
-      // One pending token per email: drop stale ones first.
+      // One live OTP per email: drop earlier pending ones first.
       for (const r of rows) {
-        if (r.email === email && (r.status === "pending" || r.status === "awaiting_contact")) {
+        if (r.email === email && r.status === "pending_otp") {
           try {
             await deleteRow(r.token);
           } catch {
-            // Best-effort; the new token still works.
+            // Best-effort; the new OTP still works.
           }
         }
       }
-      const token = (globalThis as any).crypto
-        ? (globalThis as any).crypto.randomUUID().replace(/-/g, "")
-        : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 14)}`;
+      const token = generateToken();
+      const otp = generateOtp();
+      const otpHash = await sha256Hex(`${token}:${ten}:${otp}`);
       try {
         await insertRow(token, {
           email,
           phone,
-          status: "pending",
+          status: "pending_otp",
+          otpHash,
+          attempts: 0,
           createdAt: new Date().toISOString(),
         });
       } catch {
         sendJson(res, 503, {
-          message: "Verification table is not set up yet (see TELEGRAM_VERIFICATION_SETUP.md)",
+          message: "Verification table is not set up yet (see FAST2SMS_OTP_SETUP.md)",
         });
         return;
       }
-      sendJson(res, 200, {
-        link: `https://t.me/${username}?start=${token}`,
-        token,
-        expiresInSec: Math.floor(TOKEN_TTL_MS / 1000),
+      try {
+        await sendFast2SmsOtp(ten, otp);
+      } catch (err) {
+        // No live row for a code that never went out.
+        try {
+          await deleteRow(token);
+        } catch {}
+        sendJson(res, 502, {
+          message: `Could not send the SMS: ${err instanceof Error ? err.message : "gateway error"}`,
+        });
+        return;
+      }
+      sendJson(res, 200, { token, expiresInSec: Math.floor(OTP_TTL_MS / 1000) });
+      return;
+    }
+
+    if (body.action === "verify") {
+      const session = await verifySession(req);
+      if (!session) {
+        sendJson(res, 401, { message: "Sign in required" });
+        return;
+      }
+      const token = typeof body.token === "string" ? body.token.trim() : "";
+      const otp = typeof body.otp === "string" ? body.otp.trim() : "";
+      if (!token || !/^\d{6}$/.test(otp)) {
+        sendJson(res, 400, { message: "Enter the 6-digit code" });
+        return;
+      }
+      let rows: any[];
+      try {
+        rows = await loadRows();
+      } catch {
+        sendJson(res, 503, {
+          message: "Verification table is not set up yet (see FAST2SMS_OTP_SETUP.md)",
+        });
+        return;
+      }
+      const row = rows.find((r) => r.token === token) || null;
+      if (!row) {
+        sendJson(res, 400, { message: "This code request is no longer valid. Send a new OTP." });
+        return;
+      }
+      if (norm(row.email || "") !== session.email) {
+        sendJson(res, 403, { message: "You can only verify your own number" });
+        return;
+      }
+      if (row.status === "verified") {
+        sendJson(res, 200, { status: "verified" });
+        return;
+      }
+      if (row.status !== "pending_otp") {
+        sendJson(res, 400, { message: "This code request is no longer valid. Send a new OTP." });
+        return;
+      }
+      if (isExpired(row)) {
+        try {
+          await updateRow(row.token, { ...row, status: "expired", otpHash: "" });
+        } catch {
+          // Best-effort.
+        }
+        sendJson(res, 400, { message: "This OTP expired (codes last 10 minutes). Send a new one." });
+        return;
+      }
+      const attempts = typeof row.attempts === "number" ? row.attempts : 0;
+      if (attempts >= MAX_OTP_ATTEMPTS) {
+        sendJson(res, 400, { message: "Too many wrong attempts. Send a new OTP." });
+        return;
+      }
+      const ten = indianTenDigits(row.phone || "") || digits(row.phone || "");
+      const candidate = await sha256Hex(`${token}:${ten}:${otp}`);
+      if (!row.otpHash || !ctEqual(candidate, row.otpHash)) {
+        const nextAttempts = attempts + 1;
+        const locked = nextAttempts >= MAX_OTP_ATTEMPTS;
+        try {
+          await updateRow(row.token, {
+            ...row,
+            attempts: nextAttempts,
+            ...(locked ? { status: "locked", otpHash: "" } : {}),
+          });
+        } catch {
+          // Best-effort; the response below still refuses.
+        }
+        sendJson(res, 400, {
+          message: locked
+            ? "Too many wrong attempts. Send a new OTP."
+            : `Incorrect OTP. ${MAX_OTP_ATTEMPTS - nextAttempts} attempt${MAX_OTP_ATTEMPTS - nextAttempts === 1 ? "" : "s"} left.`,
+        });
+        return;
+      }
+      await updateRow(row.token, {
+        ...row,
+        status: "verified",
+        verifiedAt: new Date().toISOString(),
+        otpHash: "",
       });
+      sendJson(res, 200, { status: "verified" });
       return;
     }
 
@@ -565,7 +546,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         rows = await loadRows();
       } catch {
         sendJson(res, 503, {
-          message: "Verification table is not set up yet (see TELEGRAM_VERIFICATION_SETUP.md)",
+          message: "Verification table is not set up yet (see FAST2SMS_OTP_SETUP.md)",
         });
         return;
       }
@@ -578,22 +559,26 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 200, { status: "verified" });
         return;
       }
-      if (isExpired(row)) {
-        try {
-          await updateRow(row.token, { ...row, status: "expired" });
-        } catch {
-          // Best-effort.
+      if (row.status === "pending_otp") {
+        if (isExpired(row)) {
+          try {
+            await updateRow(row.token, { ...row, status: "expired", otpHash: "" });
+          } catch {
+            // Best-effort.
+          }
+          sendJson(res, 200, { status: "expired" });
+          return;
         }
-        sendJson(res, 200, { status: "expired" });
+        sendJson(res, 200, { status: "pending" });
         return;
       }
-      sendJson(res, 200, { status: row.status });
+      sendJson(res, 200, { status: "expired" });
       return;
     }
 
     sendJson(res, 400, { message: "Unknown request" });
   } catch (err) {
-    try { console.error("Telegram verify failed:", err instanceof Error ? err.message : err); } catch {}
+    try { console.error("Phone OTP failed:", err instanceof Error ? err.message : err); } catch {}
     sendJson(res, 500, { message: "Verification failed" });
   }
 }
