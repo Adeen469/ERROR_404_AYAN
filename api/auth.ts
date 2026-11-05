@@ -378,7 +378,7 @@ async function sendResetMail(to: string, rawToken: string): Promise<boolean> {
     const transporter = nodemailer.createTransport({ service: "gmail", auth: { user, pass: pass.replace(/\s+/g, "") } });
     const link = `${SITE_URL}/reset-password?token=${encodeURIComponent(rawToken)}`;
     await transporter.sendMail({
-      from: user, to,
+      from: `"Locora" <${user}>`, to,
       subject: "Reset your Locora password",
       text: `You asked to reset your Locora password. Use this link within 1 hour (it can only be used once):\n\n${link}\n\nIf you did not ask for this, ignore this email — your password has not changed.`,
       html: `<div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;padding:24px;"><h2 style="color:#1E3F35;">Reset your Locora password</h2><p>Use this link within 1 hour (it can only be used once):</p><p><a href="${link}" style="display:inline-block;background:#1E3F35;color:#fff;padding:12px 24px;border-radius:999px;text-decoration:none;">Reset password</a></p><p>If you did not ask for this, ignore this email — your password has not changed.</p></div>`,

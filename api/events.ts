@@ -385,7 +385,7 @@ async function sendEventRecommendationEmails(event: any, organizerEmail: string)
     const link = `${SITE_URL}/events/${event?.id}`;
     const sends = recipients.map((to) =>
       transporter.sendMail({
-        from: user,
+        from: `"Locora" <${user}>`,
         to,
         subject: `New event for you: ${title}`,
         text: `A new event matching your interest in ${event.category} was just added on Locora: "${title}"${when ? ` on ${when}` : ""}${where ? ` at ${where}` : ""} (${price}). See it here: ${link}`,
@@ -416,7 +416,7 @@ async function sendEventCancelledEmail(to: string, event: any, refunded: boolean
     const title = event?.title || "your event";
     const when = event?.startDate ? new Date(event.startDate).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "";
     await transporter.sendMail({
-      from: user,
+      from: `"Locora" <${user}>`,
       to,
       subject: `Event cancelled: ${title}`,
       text: `The event "${title}"${when ? ` scheduled for ${when}` : ""} has been cancelled by the organizer.${refunded ? " If you paid via Razorpay, your refund has been initiated." : ""} We are sorry for the inconvenience.`,

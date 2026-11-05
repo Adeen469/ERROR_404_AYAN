@@ -544,7 +544,7 @@ async function sendMail(mail: { to: string; subject: string; text: string; html:
       service: "gmail",
       auth: { user, pass: pass.replace(/\s+/g, "") },
     });
-    await transporter.sendMail({ from: user, ...mail });
+    await transporter.sendMail({ from: `"Locora" <${user}>`, ...mail });
     return true;
   } catch (err) {
     console.warn("Account email failed:", err);
