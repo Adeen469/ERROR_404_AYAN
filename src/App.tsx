@@ -81,6 +81,15 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
+  // Once per page load, re-check the stored session against the
+  // server (see authService.validateSession): without this, a session
+  // revoked elsewhere — "sign out everywhere", password reset — kept
+  // showing as signed in on this browser, because the app only ever
+  // read localStorage.
+  useEffect(() => {
+    void authService.validateSession();
+  }, []);
+
   return (
     <BrowserRouter>
       <ToastProvider>

@@ -141,6 +141,39 @@ export const authService = {
     return result;
   },
 
+  // Re-check the stored session against the server (GET /me). The
+  // server is the only authority on whether a session is still valid,
+  // but nothing in the app ever asked it: getCurrentUser() reads
+  // localStorage only, so after "sign out everywhere" on another
+  // device (or a password reset) this browser kept showing the user
+  // as signed in until some authenticated call happened to 401 — and
+  // updateProfile even swallows that 401 into a local fallback. This
+  // runs once per page load (see App.tsx) so a revoked session flips
+  // the whole UI to signed-out instead of lingering. Only a 401/403
+  // means "signed out": a network failure or timeout leaves the local
+  // state alone, so a flaky connection never logs the user out.
+  // Demo mode has no server session to check, and with no stored user
+  // there is nothing to validate.
+  async validateSession(): Promise<boolean> {
+    if (isDemoMode()) return true;
+    if (!this.getCurrentUser()) return false;
+    try {
+      const me = await apiClient.get<UserProfile>('/me');
+      const merged = restoreSavedProfile(localStorage, me);
+      localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(merged));
+      notify(merged);
+      return true;
+    } catch (err: any) {
+      if (err && (err.status === 401 || err.status === 403)) {
+        localStorage.removeItem(USER_STORAGE_KEY);
+        localStorage.removeItem(TOKEN_STORAGE_KEY);
+        notify(null);
+        return false;
+      }
+      return true;
+    }
+  },
+
   async updateProfile(updates: Partial<UserProfile>): Promise<UserProfile> {
     // Role and auth provider can never be changed through a profile edit;
     // they are set only by sign-in (admin) and admin approval (organizer).

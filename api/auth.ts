@@ -517,6 +517,19 @@ async function handleLogout(req: any, res: any): Promise<void> {
             method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: updated }),
           });
           everywhere = up.ok;
+        } else {
+          // No profile row yet (e.g. a Google sign-in from before rows
+          // were recorded, or row creation failed silently): the bump
+          // above silently did nothing, so "sign out everywhere" only
+          // ever signed out this device — exactly the reported bug.
+          // Create the row stamped at version 1: every session issued
+          // so far carries v 0 (or no version at all), so the version
+          // check in verifySession now rejects all of them.
+          const created = await fetchJson(`${supabaseBase()}/rest/v1/locora_users`, {
+            method: "POST", headers: supabaseHeaders(),
+            body: JSON.stringify({ id: `usr-${Date.now()}`, data: { email: session.email, name: "Community Member", role: session.role, authProvider: session.authProvider, sessionVersion: 1, createdAt: new Date().toISOString() } }),
+          });
+          everywhere = created.ok;
         }
       }
     }
