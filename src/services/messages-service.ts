@@ -33,6 +33,11 @@ export interface ReplySnapshot {
 
 export interface EventMessage {
   id: string;
+  // Row kind in the messages table: absent for private messages,
+  // "community" for group-chat rows. The private inbox filters
+  // community rows out (server-side, and defensively in
+  // getMessages below); the community chat shows only them.
+  type?: string;
   eventId: string;
   eventTitle?: string;
   senderEmail: string;
@@ -167,7 +172,12 @@ export interface SendMessageInput {
 export const messagesService = {
   async getMessages(_userEmail?: string): Promise<EventMessage[]> {
     const data = await apiClient.request<{ messages: EventMessage[] }>('/messages');
-    return Array.isArray(data.messages) ? data.messages : [];
+    const list = Array.isArray(data.messages) ? data.messages : [];
+    // Defense in depth: the server already excludes community rows
+    // from the private inbox, but a community row must never render
+    // as a private thread even if a server filter is ever missed —
+    // its recipient is the "community:<eventId>" marker, not a user.
+    return list.filter((m) => m.type !== 'community');
   },
 
   // Returns null on failure so callers can keep the previous count:
@@ -295,4 +305,58 @@ export const messagesService = {
       throw new ApiError(`Upload failed (${res.status})`, res.status);
     }
   },
+
+  // ---- Community chat (one group chat per event) ----
+  // Same /api/messages endpoint, ?community=1. The server enforces
+  // membership (confirmed registrant / organizer / admin) on every
+  // call; a 403 here means "locked", not a broken chat — callers
+  // should render the locked placeholder, not an error banner.
+  // No email alerts are sent for community messages, by design.
+  async getCommunityMessages(
+    eventId: string,
+  ): Promise<{ messages: EventMessage[]; member: boolean; canPost: boolean; isOrganizer: boolean }> {
+    const data = await apiClient.request<{
+      messages: EventMessage[];
+      member: boolean;
+      canPost: boolean;
+      isOrganizer: boolean;
+    }>('/messages', { params: { community: 1, eventId } });
+    return {
+      messages: Array.isArray(data.messages) ? data.messages : [],
+      member: data.member === true,
+      canPost: data.canPost === true,
+      isOrganizer: data.isOrganizer === true,
+    };
+  },
+
+  async sendCommunityMessage(input: {
+    eventId: string;
+    text?: string;
+    attachment?: { name: string; size: number; type: string; path: string };
+    idempotencyKey?: string;
+    replyToId?: string;
+  }): Promise<EventMessage> {
+    const data = await apiClient.request<{ message: EventMessage }>('/messages', {
+      method: 'POST',
+      body: JSON.stringify({ community: true, ...input }),
+    });
+    return data.message;
+  },
+
+  async requestCommunityUploadUrl(input: {
+    eventId: string;
+    fileName: string;
+    fileSize: number;
+    fileType: string;
+  }): Promise<{ uploadUrl: string; publicUrl: string; path: string }> {
+    return apiClient.request('/messages', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'upload-url', community: true, ...input }),
+    });
+  },
+
+  // Edit own community message (server enforces 1h window + current
+  // membership). Delete (DELETE ?id=) is shared with private
+  // messages: the server tombstones it, and the organizer/admin may
+  // delete any community message.
 };

@@ -506,6 +506,100 @@ function replyTargetError(quoted: any, eventId: string, sender: string, recipien
   return null;
 }
 
+// ---- Community chat (one group chat per event) ----
+// Community messages live in the SAME `messages` table as private
+// messages — no new table, no new Vercel function (Hobby 12-function
+// limit). They are distinguished by type:"community" and by a
+// recipientEmail that can NEVER be a real email:
+//   recipientEmail = "community:<eventId>"
+// isEmail("community:evt-1") is false (no @), so the marker can never
+// pass as a mail recipient, never match a private thread pair, and
+// never be returned by loadMessagesFor(realEmail). The private GET
+// below also filters type:"community" out explicitly — a sender's own
+// community rows would otherwise match loadMessagesFor(sender) and
+// leak into their private inbox. Community GET returns ONLY
+// community rows for that event. No email alerts are ever sent for
+// community messages (one mail per message to every attendee would
+// be spam); the send branch returns before any sendMail call.
+function communityRecipient(eventId: string): string {
+  return `community:${String(eventId || "")}`;
+}
+function isCommunityMessage(m: any): boolean {
+  return !!m && m.type === "community";
+}
+
+// Pure membership rule, kept separate so it is unit-testable (see
+// test_community.mts). A member is: an admin, the event's organizer
+// (createdByEmail, or organizer.email for legacy events without
+// createdByEmail), or a user with a CONFIRMED registration for this
+// event. Pending (unpaid Razorpay) and cancelled registrations are
+// NOT members. Guests and signed-in non-registered users are not.
+function isCommunityMember(event: any, email: string, registrations: any[]): boolean {
+  if (!event || !email) return false;
+  if (isAdmin(email)) return true;
+  if (isEventOwner(event, email)) return true;
+  const me = norm(email);
+  return (registrations || []).some(
+    (r: any) =>
+      String(r?.eventId || "") === String(event.id || "") &&
+      norm(r?.userEmail || "") === me &&
+      r?.status === "confirmed",
+  );
+}
+
+// Pure community-reply validation (same shape as replyTargetError,
+// but for the group chat): the quoted message must be a COMMUNITY
+// message in the SAME event. A private message's replyToId is refused
+// here even if it is in the same event — private and community
+// conversations never quote across each other.
+function communityReplyTargetError(quoted: any, eventId: string): string | null {
+  if (!quoted || typeof quoted !== "object") return "Quoted message not found";
+  if (quoted.type === "block") return "Quoted message not found";
+  if (!isCommunityMessage(quoted)) return "You can only reply to a message in this community chat";
+  if (String(quoted.eventId || "") !== String(eventId || "")) {
+    return "You can only reply to a message in this community chat";
+  }
+  if (quoted.deletedForEveryone) return "The message you are replying to was deleted";
+  return null;
+}
+
+// Registrations for one event, targeted jsonb lookup first (same
+// data->> pattern as loadMessagesFor), paginated full-read fallback.
+async function loadRegistrationsForEvent(eventId: string): Promise<any[]> {
+  try {
+    const { ok, body } = await fetchJson(
+      `${supabaseBase()}/rest/v1/registrations?select=id,data&data->>eventId=eq.${encodeURIComponent(eventId)}&limit=1000`,
+      { headers: supabaseHeaders() },
+    );
+    if (ok && Array.isArray(body)) return body.map((row: any) => row.data).filter(Boolean);
+  } catch { /* fall through to the paginated read */ }
+  const out: any[] = [];
+  for (let page = 0; page < 10; page++) {
+    const { ok, body } = await fetchJson(
+      `${supabaseBase()}/rest/v1/registrations?select=id,data&limit=1000&offset=${page * 1000}`,
+      { headers: supabaseHeaders() },
+    );
+    if (!ok) throw new Error("registrations table read failed");
+    const rows = Array.isArray(body) ? body.map((row: any) => row.data) : [];
+    out.push(...rows);
+    if (rows.length < 1000) break;
+  }
+  return out.filter((r: any) => String(r?.eventId || "") === String(eventId || ""));
+}
+
+// Community rows for one event, targeted jsonb lookup first.
+async function loadCommunityMessages(eventId: string): Promise<any[]> {
+  try {
+    const { ok, body } = await fetchJson(
+      `${supabaseBase()}/rest/v1/messages?select=id,data&data->>type=eq.community&data->>eventId=eq.${encodeURIComponent(eventId)}&limit=1000`,
+      { headers: supabaseHeaders() },
+    );
+    if (ok && Array.isArray(body)) return body.map((row: any) => row.data).filter(Boolean);
+  } catch { /* fall through to the full read */ }
+  const all = await loadAllMessages();
+  return all.filter((m: any) => isCommunityMessage(m) && String(m.eventId || "") === String(eventId || ""));
+}
+
 // Extension -> expected MIME family. The server checks the extension
 // (the client also checks File.type); a mismatch is rejected.
 const ALLOWED_EXTENSIONS: Record<string, string[]> = {
@@ -838,6 +932,64 @@ export default async function handler(req: any, res: any): Promise<void> {
     }
     const me = session.email;
 
+    // ---- GET: community chat (?community=1&eventId=x) ----
+    // Membership-gated: only confirmed registrants, the organizer
+    // and admins see anything. Everyone else gets 403 with
+    // member:false — the client renders the locked placeholder from
+    // that, never an error banner. No messages leak to non-members.
+    if (req.method === "GET" && req.query?.community === "1") {
+      const rlC = await checkRateLimit(`msg:community-get:${getClientIp(req)}:${me}`, 300, 10 * 60 * 1000);
+      if (!rlC.allowed && !rlC.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlC.retryAfter) });
+        return;
+      }
+      const eventId = String(req.query?.eventId || "");
+      if (!eventId) {
+        sendJson(res, 400, { message: "eventId is required" });
+        return;
+      }
+      const event = await loadEvent(eventId);
+      if (!event) {
+        sendJson(res, 404, { message: "Event not found" });
+        return;
+      }
+      let regs: any[];
+      try {
+        regs = await loadRegistrationsForEvent(eventId);
+      } catch {
+        sendJson(res, 503, { message: "Messages are not set up yet" });
+        return;
+      }
+      if (!isCommunityMember(event, me, regs)) {
+        sendJson(res, 403, { message: "Register to join the community chat", member: false, canPost: false });
+        return;
+      }
+      let rows: any[];
+      try {
+        rows = await loadCommunityMessages(eventId);
+      } catch {
+        sendJson(res, 503, { message: "Messages are not set up yet" });
+        return;
+      }
+      const visible = rows
+        .filter(
+          (m: any) =>
+            !((m.hiddenFor || []) as string[]).includes(me),
+        )
+        .map((m: any) => stripMessageForViewer(m, me));
+      visible.sort((a: any, b: any) =>
+        (a.createdAt || "").localeCompare(b.createdAt || "") ||
+        (a.id || "").localeCompare(b.id || ""),
+      );
+      sendJson(res, 200, {
+        messages: visible,
+        member: true,
+        canPost: true,
+        isOrganizer: mayManageEvent(event, me),
+      });
+      return;
+    }
+
     // ---- GET: list / unread count ----
     if (req.method === "GET") {
       // userEmail query param is IGNORED (it was the P2-3 trust vector).
@@ -861,6 +1013,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         .filter(
           (m: any) =>
             m.type !== "block" &&
+            m.type !== "community" &&
             (m.senderEmail === userEmail || m.recipientEmail === userEmail) &&
             !((m.hiddenFor || []) as string[]).includes(userEmail),
         )
@@ -906,7 +1059,17 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 404, { message: "Message not found" });
         return;
       }
-      if (msg.senderEmail !== userEmail) {
+      // Community moderation: the organizer / admin may delete ANY
+      // community message (no 24h window — moderation is not a
+      // personal undo), while a sender deleting their own community
+      // message keeps the same 24h window as a private message.
+      // Private messages stay sender-only, as before.
+      let canModerateCommunity = false;
+      if (isCommunityMessage(msg)) {
+        const event = await loadEvent(msg.eventId);
+        canModerateCommunity = !!event && mayManageEvent(event, userEmail);
+      }
+      if (msg.senderEmail !== userEmail && !canModerateCommunity) {
         sendJson(res, 403, { message: "Only the sender can delete for everyone" });
         return;
       }
@@ -916,7 +1079,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       // tombstone — the other side's conversation just lost messages
       // without explanation.)
       const ageMs = Date.now() - Date.parse(msg.createdAt || "");
-      if (Number.isFinite(ageMs) && ageMs > 24 * 60 * 60 * 1000) {
+      if (!canModerateCommunity && Number.isFinite(ageMs) && ageMs > 24 * 60 * 60 * 1000) {
         sendJson(res, 403, { message: "Messages can only be deleted for everyone within 24 hours of sending" });
         return;
       }
@@ -1112,16 +1275,23 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 400, { message: "eventId and fileName are required" });
         return;
       }
+      // Community uploads reuse this exact path: the recipient is
+      // the community marker (never a real email, never mailed), and
+      // membership replaces authorizeContact. Size/type checks and
+      // the magic-byte verification at send time are unchanged.
+      const isCommunityUpload = body.community === true;
       // Recipient: if organizerId is given, resolve it from the stored
       // event (P2-4); otherwise fall back to a caller recipient that
       // authorizeContact() still validates against the stored event.
       const eventForRecipient = await loadEvent(eventId);
       let recipient = norm(body.recipientEmail || "");
-      if (body.organizerId && eventForRecipient) {
+      if (isCommunityUpload) {
+        recipient = communityRecipient(eventId);
+      } else if (body.organizerId && eventForRecipient) {
         const orgEmail = organizerEmailOf(eventForRecipient);
         if (orgEmail) recipient = orgEmail;
       }
-      if (!isEmail(recipient)) {
+      if (!isCommunityUpload && !isEmail(recipient)) {
         sendJson(res, 400, { message: "A valid recipient is required" });
         return;
       }
@@ -1149,17 +1319,31 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
       }
-      const denied = authorizeContact(event, sender, recipient, existing);
-      if (denied) {
-        sendJson(res, 403, { message: denied });
-        return;
-      }
-      // First messages need a published event; replies in an existing
-      // thread keep working even if the event is later cancelled, so a
-      // conversation is not cut off mid-discussion.
-      if (event.status && event.status !== "published" && !threadPairExists(existing, eventId, sender, recipient)) {
-        sendJson(res, 409, { message: "This event is not open for new messages" });
-        return;
+      if (isCommunityUpload) {
+        let regs: any[];
+        try {
+          regs = await loadRegistrationsForEvent(eventId);
+        } catch {
+          sendJson(res, 503, { message: "Messages are not set up yet" });
+          return;
+        }
+        if (!isCommunityMember(event, sender, regs)) {
+          sendJson(res, 403, { message: "Register to join the community chat" });
+          return;
+        }
+      } else {
+        const denied = authorizeContact(event, sender, recipient, existing);
+        if (denied) {
+          sendJson(res, 403, { message: denied });
+          return;
+        }
+        // First messages need a published event; replies in an existing
+        // thread keep working even if the event is later cancelled, so a
+        // conversation is not cut off mid-discussion.
+        if (event.status && event.status !== "published" && !threadPairExists(existing, eventId, sender, recipient)) {
+          sendJson(res, 409, { message: "This event is not open for new messages" });
+          return;
+        }
       }
       const path = `${sanitizePathSegment(eventId)}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
       // Upload signed URLs are a DIFFERENT endpoint from download
@@ -1204,6 +1388,151 @@ export default async function handler(req: any, res: any): Promise<void> {
         publicUrl: `${supabaseBase()}/storage/v1/object/public/${BUCKET}/${path}`,
         path,
       });
+      return;
+    }
+
+    // ---- POST: send a COMMUNITY message ----
+    // Group chat for one event. No email alerts are ever sent here
+    // (one mail per message to every attendee would be spam) — this
+    // branch returns before any sendMail call. Membership, reply
+    // validation and attachment verification mirror the private
+    // send; the only differences are the community marker recipient
+    // and the membership gate in place of authorizeContact.
+    if (req.method === "POST" && body.community === true) {
+      const rlCommunity = await checkRateLimit(`msg:community-send:${me}`, 60, 60 * 60 * 1000);
+      if (!rlCommunity.allowed && !rlCommunity.tableMissing) {
+        sendJson(res, 429, { message: "Too many messages. Try again shortly." }, { "Retry-After": String(rlCommunity.retryAfter) });
+        return;
+      }
+      const eventId = String(body.eventId || "");
+      const sender = me;
+      let senderName = sender;
+      try {
+        const profile = await loadUserByEmail(sender);
+        if (profile && typeof profile.data?.name === "string" && profile.data.name.trim()) {
+          senderName = profile.data.name.trim().slice(0, 80);
+        }
+      } catch { /* fall back to the email address */ }
+      const text = String(body.text || "").trim().slice(0, MAX_TEXT_CHARS);
+      const attachment = body.attachment || null;
+      if (!eventId) {
+        sendJson(res, 400, { message: "eventId is required" });
+        return;
+      }
+      const event = await loadEvent(eventId);
+      if (!event) {
+        sendJson(res, 404, { message: "Event not found" });
+        return;
+      }
+      let regs: any[];
+      try {
+        regs = await loadRegistrationsForEvent(eventId);
+      } catch {
+        sendJson(res, 503, { message: "Messages are not set up yet" });
+        return;
+      }
+      if (!isCommunityMember(event, sender, regs)) {
+        sendJson(res, 403, { message: "Register to join the community chat" });
+        return;
+      }
+      if (!text && !attachment) {
+        sendJson(res, 400, { message: "Write a message or attach a file" });
+        return;
+      }
+      let cleanAttachment: any = null;
+      if (attachment) {
+        const name = String(attachment.name || "");
+        const size = Number(attachment.size || 0);
+        const type = String(attachment.type || "");
+        const path = String(attachment.path || "");
+        const ext = extensionOf(name);
+        const allowed = ALLOWED_EXTENSIONS[ext];
+        const pathOk =
+          path.startsWith(`${sanitizePathSegment(eventId)}/`) &&
+          /^[A-Za-z0-9_-]+\/[0-9]+-[a-z0-9]+\.[A-Za-z0-9]+$/.test(path) &&
+          path.endsWith(`.${ext}`);
+        if (
+          !name || name.length > 200 || !Number.isFinite(size) ||
+          size <= 0 || size > MAX_ATTACHMENT_BYTES ||
+          !allowed || (type && !allowed.includes(type)) || !pathOk
+        ) {
+          sendJson(res, 400, {
+            message: "Attachment not allowed — video, image, PDF, Word or spreadsheet, max 20MB",
+          });
+          return;
+        }
+        cleanAttachment = {
+          name,
+          size,
+          type,
+          path,
+          url: `${supabaseBase()}/storage/v1/object/public/${BUCKET}/${path}`,
+        };
+      }
+      // Community replies: the quoted message must be a COMMUNITY
+      // message in this same event. A private message's id is refused
+      // even for the same event (see communityReplyTargetError).
+      let replyToId = "";
+      let replySnapshot: any = null;
+      if (body.replyToId !== undefined && body.replyToId !== null && String(body.replyToId).trim() !== "") {
+        replyToId = String(body.replyToId).trim().slice(0, 200);
+        let quoted: any = null;
+        try { quoted = await loadMessage(replyToId); } catch { quoted = null; }
+        if (!quoted) {
+          sendJson(res, 400, { message: "Quoted message not found" });
+          return;
+        }
+        const replyError = communityReplyTargetError(quoted, eventId);
+        if (replyError) {
+          sendJson(res, 400, { message: replyError });
+          return;
+        }
+        replySnapshot = buildReplySnapshot(quoted);
+      }
+      const idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.slice(0, 100) : "";
+      if (idempotencyKey) {
+        let communityRows: any[] = [];
+        try { communityRows = await loadCommunityMessages(eventId); } catch { communityRows = []; }
+        const prior = communityRows.find((m: any) => m.idempotencyKey === idempotencyKey && m.senderEmail === sender);
+        if (prior) {
+          sendJson(res, 200, { message: stripMessageForViewer(prior, sender), idempotent: true });
+          return;
+        }
+      }
+      if (cleanAttachment) {
+        const sniffError = await verifyAttachment(cleanAttachment.path, extensionOf(cleanAttachment.name));
+        if (sniffError) {
+          sendJson(res, 400, { message: sniffError });
+          return;
+        }
+      }
+      const msg: any = {
+        id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        type: "community",
+        eventId,
+        eventTitle: event.title || "",
+        senderEmail: sender,
+        senderName,
+        recipientEmail: communityRecipient(eventId),
+        text: text || "",
+        attachment: cleanAttachment,
+        read: false,
+        hiddenFor: [],
+        createdAt: new Date().toISOString(),
+      };
+      if (idempotencyKey) msg.idempotencyKey = idempotencyKey;
+      if (replyToId) {
+        msg.replyToId = replyToId;
+        msg.replySnapshot = replySnapshot;
+      }
+      try {
+        await storeMessage(msg);
+      } catch {
+        sendJson(res, 503, { message: "Messages are not set up yet" });
+        return;
+      }
+      // No email alert for community messages, by design.
+      sendJson(res, 200, { message: stripMessageForViewer(msg, sender) });
       return;
     }
 
@@ -1337,7 +1666,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       // row instead of storing a second one.
       const idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.slice(0, 100) : "";
       if (idempotencyKey) {
-        const prior = existing.find((m: any) => m.idempotencyKey === idempotencyKey && m.senderEmail === sender);
+        const prior = existing.find((m: any) => m.type !== "community" && m.idempotencyKey === idempotencyKey && m.senderEmail === sender);
         if (prior) {
           sendJson(res, 200, { message: stripMessageForViewer(prior, sender), mailed: false, idempotent: true });
           return;
@@ -1428,6 +1757,28 @@ export default async function handler(req: any, res: any): Promise<void> {
         if (msg.deletedForEveryone) {
           sendJson(res, 403, { message: "A deleted message cannot be edited" });
           return;
+        }
+        // Community edits need CURRENT membership: a member who
+        // cancelled after posting can no longer edit (or post) in
+        // the group chat. Organizer/admin keep access via the
+        // membership rule itself.
+        if (isCommunityMessage(msg)) {
+          const event = await loadEvent(msg.eventId);
+          if (!event) {
+            sendJson(res, 404, { message: "Event not found" });
+            return;
+          }
+          let regs: any[];
+          try {
+            regs = await loadRegistrationsForEvent(msg.eventId);
+          } catch {
+            sendJson(res, 503, { message: "Messages are not set up yet" });
+            return;
+          }
+          if (!isCommunityMember(event, editor, regs)) {
+            sendJson(res, 403, { message: "Register to join the community chat" });
+            return;
+          }
         }
         const ageMs = Date.now() - Date.parse(msg.createdAt || "");
         if (!Number.isFinite(ageMs) || ageMs > 60 * 60 * 1000) {

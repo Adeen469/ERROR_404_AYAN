@@ -79,19 +79,17 @@ function channelName(email: string): string {
   return `inbox:${email.toLowerCase()}`;
 }
 
-// Subscribe the current user's inbox to instant pings. Returns an
-// unsubscribe function. onStatus reports 'SUBSCRIBED' when live — the
-// page uses it to slow polling to a 30s safety net while Realtime
-// works. onEvent receives pings only; the caller must refetch via the
-// session-authenticated API — never trust a ping's payload as data.
-export function subscribeToInbox(
-  email: string,
+// Subscribe to content-free pings on one channel. Shared by the
+// inbox and community channels below; onEvent receives pings only,
+// the caller must refetch via the session-authenticated API.
+function subscribePing(
+  channelName: string,
   onEvent: (event: RealtimeEvent) => void,
   onStatus?: (status: string) => void,
 ): () => void {
   const sb = getRealtimeClient();
   if (!sb) return () => {};
-  const channel: RealtimeChannel = sb.channel(channelName(email));
+  const channel: RealtimeChannel = sb.channel(channelName);
   const handlePing = (type: RealtimeEvent['type']) => ({ payload }: { payload?: { id?: unknown } }) => {
     if (typeof payload?.id === 'string' && payload.id) onEvent({ type, id: payload.id } as RealtimeEvent);
   };
@@ -105,24 +103,21 @@ export function subscribeToInbox(
   };
 }
 
-// Push one content-free ping to the recipient's inbox channel.
-// Fire-and-forget safe: never throws, never blocks the sender's UI
-// (a stuck subscription resolves after 3s at the latest). Only ever
-// called AFTER the server call succeeded, so a ping always refers to
-// a genuinely stored message — never an optimistic fake.
+// Push one content-free ping to one channel. Fire-and-forget safe:
+// never throws, never blocks the sender's UI (a stuck subscription
+// resolves after 3s at the latest). Only ever called AFTER the
+// server call succeeded, so a ping always refers to a genuinely
+// stored message — never an optimistic fake.
 //
 // SECURITY: the payload is built from the id ONLY. Even if a caller
 // passes an object with a `message` property, it is dropped here.
-export async function broadcastToInbox(
-  recipientEmail: string,
-  event: RealtimeEvent,
-): Promise<void> {
+async function broadcastPing(channelName: string, event: RealtimeEvent): Promise<void> {
   const sb = getRealtimeClient();
   if (!sb) return;
   const id = typeof event?.id === 'string' ? event.id : '';
-  if (!id || !recipientEmail) return;
+  if (!id || !channelName) return;
   try {
-    const channel: RealtimeChannel = sb.channel(channelName(recipientEmail));
+    const channel: RealtimeChannel = sb.channel(channelName);
     const payload = { id };
     await new Promise<void>((resolve) => {
       const done = window.setTimeout(resolve, 3000);
@@ -139,4 +134,57 @@ export async function broadcastToInbox(
   } catch {
     // Broadcast is speed only; the poll picks everything up anyway.
   }
+}
+
+// Subscribe the current user's inbox to instant pings. Returns an
+// unsubscribe function. onStatus reports 'SUBSCRIBED' when live — the
+// page uses it to slow polling to a 30s safety net while Realtime
+// works. onEvent receives pings only; the caller must refetch via the
+// session-authenticated API — never trust a ping's payload as data.
+export function subscribeToInbox(
+  email: string,
+  onEvent: (event: RealtimeEvent) => void,
+  onStatus?: (status: string) => void,
+): () => void {
+  return subscribePing(channelName(email), onEvent, onStatus);
+}
+
+// Subscribe to one event's community-chat pings. Channel:
+//   community:<eventId>
+// The event id is public (Discover lists it), so the channel name
+// leaks nothing a stranger could not already see — and the ping
+// itself carries only an opaque message id. A non-member subscriber
+// learns WHEN a community message was posted, and nothing else: the
+// refetch goes through the session-authenticated community GET,
+// which enforces membership server-side. Same hard gate as the
+// inbox: without VITE_SUPABASE_* this is a silent no-op and the
+// community chat keeps working on 3s polling.
+export function subscribeToCommunity(
+  eventId: string,
+  onEvent: (event: RealtimeEvent) => void,
+  onStatus?: (status: string) => void,
+): () => void {
+  if (!eventId) return () => {};
+  return subscribePing(`community:${eventId}`, onEvent, onStatus);
+}
+
+// Push one content-free ping to the recipient's inbox channel.
+export async function broadcastToInbox(
+  recipientEmail: string,
+  event: RealtimeEvent,
+): Promise<void> {
+  if (!recipientEmail) return;
+  return broadcastPing(channelName(recipientEmail), event);
+}
+
+// Push one content-free ping to an event's community channel, so
+// every member subscribed to that event refetches immediately.
+// Same id-only rule as broadcastToInbox: no text, no sender, no
+// event title, no attachment name or URL on the channel.
+export async function broadcastToCommunity(
+  eventId: string,
+  event: RealtimeEvent,
+): Promise<void> {
+  if (!eventId) return;
+  return broadcastPing(`community:${eventId}`, event);
 }

@@ -87,6 +87,48 @@ one exception — see the hard gate above. Do not add them yet.)
   `text: "", deleted: true`. The reply then shows "This message was
   deleted" in its quote and its tap-to-jump does nothing.
 
+## Community chat (one group chat per event)
+
+- Shown as a "Community Chat" section on the EventDetailsPage, below
+  the organizer card (the private "Message organizer" button is
+  unchanged). No new Supabase table and no new Vercel function:
+  community rows live in the same `messages` table with
+  `type: "community"` and `recipientEmail: "community:<eventId>"`
+  (that marker is not an email — `isEmail` is false for it — so it
+  can never be a mail recipient or match a private thread pair).
+- **Who can see/post:** confirmed registrants for that event, the
+  event organizer, and admins. Guests, signed-in non-registered
+  users, pending (unpaid Razorpay) and cancelled registrations get
+  403 with `member: false` and see a locked placeholder ("Join this
+  event to chat with attendees" / "Register to join the community
+  chat"). Membership is checked server-side on every community call.
+- **No cross-leak:** the private GET filters `type: "community"` out
+  explicitly (a sender's own community rows would otherwise match
+  `loadMessagesFor(sender)`), and the community GET returns only
+  community rows for that event. Unread counts and thread grouping
+  never see community rows.
+- **No email alerts** for community messages, by design — one mail
+  per message to every attendee would be spam.
+- **Replies** work the same as private replies (same-event community
+  quote only; a private message's `replyToId` is refused in the
+  community chat, and vice versa). **Edits:** own message, within
+  1 hour, and still a member. **Deletes:** own message within 24h,
+  or ANY community message for the organizer/admin (moderation, no
+  24h window). Deleted originals scrub quotes on both sides.
+- **Attachments** reuse the private upload-url + magic-byte path
+  (`community: true` on the upload-url call). Same 20MB / type
+  limits, same verification at send time.
+- **Realtime:** per-event ping channel `community:<eventId>`,
+  id-only pings (`{ type, id }`), same design as the inbox. The
+  event id is public (Discover lists it), so the channel name leaks
+  nothing new; a non-member subscriber learns only WHEN a message
+  was posted — the refetch is membership-gated. Polling is 3s while
+  the section is open, 30s once SUBSCRIBED; without
+  `VITE_SUPABASE_*` it stays polling-only (same hard gate as above).
+- **Privacy:** the chat shows sender NAMES only, never emails or
+  phones. Rows go through the same `stripMessageForViewer`
+  whitelist as private messages.
+
 ## Realtime (ping-only — fixes DB-H1)
 
 - `src/services/realtime-service.ts` broadcasts **only a content-free

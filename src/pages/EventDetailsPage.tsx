@@ -30,6 +30,7 @@ import { ConfirmDialog, Modal } from '../components/ui/Modal';
 import { EventDetailsSkeleton } from '../components/ui/LoadingSkeleton';
 import { EventCard } from '../components/events/EventCard';
 import Avatar from '../components/ui/Avatar';
+import { CommunityChat } from '../components/events/CommunityChat';
 
 // "Add to Google Calendar" link. This uses Google Calendar's public template
 // URL, which prefills an event in the visitor's own Google Calendar — no
@@ -567,6 +568,18 @@ export function EventDetailsPage() {
               </Link>
             )}
           </div>
+
+          {/* Community Chat: one group chat per event, below the
+              organizer card. Membership is enforced server-side
+              (confirmed registrants + organizer + admins); everyone
+              else sees a locked placeholder inside the section. The
+              private "Message organizer" button above is unchanged. */}
+          <CommunityChat
+            eventId={event.id}
+            eventTitle={event.title}
+            isRegistered={isRegistered}
+            isOwner={isOwner}
+          />
         </div>
 
         {/* Right Column (4 cols): Registration Card & Status */}
