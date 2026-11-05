@@ -759,20 +759,15 @@ export default async function handler(req: any, res: any) {
       // If the rate_limits table is missing, allow (public data is
       // already stripped) rather than breaking Discover; the limit
       // takes effect once the table exists (see SECURITY_FIX_SETUP.md).
-      const rl = await checkRateLimit(`events:get:${getClientIp(req)}`, 600, 10 * 60 * 1000);
-      if (!rl.allowed && !rl.tableMissing) {
-        return sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rl.retryAfter) });
-      }
-      // Ownership-aware reads: resolve the viewer from the session
-      // cookie (null for guests; verifySession never throws). The
-      // event's owner or an admin receives the unstripped record so
-      // the hub/edit owner filter can match; every other viewer still
-      // gets the stripped public shape, so no organiser email leaks to
-      // other users. Guests see exactly what they saw before.
-      const viewer = await verifySession(req);
-      const viewerEmail = viewer ? viewer.email : null;
-      const viewEvent = (e: any) =>
-        viewerEmail && mayManageEvent(e, viewerEmail) ? e : stripEventPublic(e);
+      // Latency: the rate-limit check, the session lookup and the
+      // event fetch are independent, so they run concurrently.
+      // Measured live 2026-11-05: each Supabase round-trip from the
+      // function costs ~1s, and running them one after another made
+      // every list/detail read take ~3.5s before the first byte.
+      // (fetchAllEvents still throws on a Supabase failure, exactly
+      // as before — the outer try/catch turns it into a 502.)
+      const rlPromise = checkRateLimit(`events:get:${getClientIp(req)}`, 600, 10 * 60 * 1000);
+      const viewerPromise = verifySession(req);
       const singleId = firstQuery(req.query, "id");
       // The ?payment=1 UPI endpoint was REMOVED with the manual
       // payment flow: there is no UPI ID to hand out anymore, and
@@ -783,8 +778,22 @@ export default async function handler(req: any, res: any) {
       if (singleId && firstQuery(req.query, "payment") === "1") {
         return sendJson(res, 404, { message: "Manual payments are no longer supported" });
       }
+      const fetchPromise = singleId ? fetchEvent(singleId) : fetchAllEvents();
+      const [rl, viewer, fetched] = await Promise.all([rlPromise, viewerPromise, fetchPromise]);
+      if (!rl.allowed && !rl.tableMissing) {
+        return sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rl.retryAfter) });
+      }
+      // Ownership-aware reads: resolve the viewer from the session
+      // cookie (null for guests; verifySession never throws). The
+      // event's owner or an admin receives the unstripped record so
+      // the hub/edit owner filter can match; every other viewer still
+      // gets the stripped public shape, so no organiser email leaks to
+      // other users. Guests see exactly what they saw before.
+      const viewerEmail = viewer ? viewer.email : null;
+      const viewEvent = (e: any) =>
+        viewerEmail && mayManageEvent(e, viewerEmail) ? e : stripEventPublic(e);
       if (singleId) {
-        const event = await fetchEvent(singleId);
+        const event = fetched;
         if (!event) return sendJson(res, 404, { message: "Event not found" });
         // Drafts are not public: a non-published event is visible only
         // to its owner or an admin (the hub reads this same endpoint).
@@ -794,7 +803,7 @@ export default async function handler(req: any, res: any) {
         }
         return sendJson(res, 200, viewEvent(event));
       }
-      const all = await fetchAllEvents();
+      const all = fetched;
       // Same draft rule for the list, applied BEFORE pagination so
       // totals only count what the viewer may actually see. Rows with
       // no status field are legacy published events.
