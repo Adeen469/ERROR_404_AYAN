@@ -129,7 +129,7 @@ export async function signSession(email: string, role: string, authProvider: str
 export async function verifySession(req: any): Promise<SessionUser | null> {
   try {
     const secret = getEnv("SESSION_SECRET");
-    if (!secret) return null;
+    if (!secret || secret.length < 32) return null;
     const token = parseCookies(req).locora_session;
     if (!token) return null;
     const parts = token.split(".");
@@ -146,7 +146,11 @@ export async function verifySession(req: any): Promise<SessionUser | null> {
         const exp = rev.body[0].data?.expiresAt;
         if (!exp || new Date(exp).getTime() > Date.now()) return null;
       }
-    } catch {}
+    } catch {
+      // Fail CLOSED: a Supabase error must not silently skip the
+      // revocation check (sign-out-everywhere would stop working).
+      return null;
+    }
     try {
       const userRow = await loadUserByEmail(email);
       if (userRow && userRow.data && typeof userRow.data.sessionVersion === "number") {
@@ -157,7 +161,11 @@ export async function verifySession(req: any): Promise<SessionUser | null> {
           return null;
         }
       }
-    } catch {}
+    } catch {
+      // Fail CLOSED: a Supabase error must not silently skip the
+      // session-version check (sign-out-everywhere would stop working).
+      return null;
+    }
     return { email, role: payload.role || "attendee", authProvider: payload.authProvider || "local", sessionVersion: typeof payload.v === "number" ? payload.v : undefined };
   } catch {
     return null;
@@ -209,21 +217,71 @@ export async function fetchJson(url: string, init?: any): Promise<{ ok: boolean;
   try { body = await res.json(); } catch { body = null; }
   return { ok: res.ok, status: res.status, body };
 }
+// Largest request body accepted (1 MB). Event cover images are
+// rasterised client-side and arrive as data URLs, so a legitimate
+// create/update stays well under this; anything larger is a
+// storage-flooding attempt, not a real event.
+export const MAX_BODY_BYTES = 1024 * 1024;
 export function readBody(req: any): Promise<any> {
   return new Promise((resolve) => {
     try {
       const b = (req as any).body;
       if (b && typeof b === "object") return resolve(b);
       if (typeof b === "string" && b.length > 0) {
+        if (b.length > MAX_BODY_BYTES) { (req as any).__bodyTooLarge = true; return resolve({}); }
         try { return resolve(JSON.parse(b)); } catch { return resolve({}); }
       }
       let data = "";
+      let tooLarge = false;
       const timer = setTimeout(() => resolve({}), 3000);
-      req.on("data", (chunk: any) => { data += chunk; });
+      req.on("data", (chunk: any) => {
+        if (tooLarge) return;
+        data += chunk;
+        if (data.length > MAX_BODY_BYTES) {
+          tooLarge = true;
+          (req as any).__bodyTooLarge = true;
+          try { req.destroy?.(); } catch {}
+          clearTimeout(timer);
+          resolve({});
+        }
+      });
       req.on("end", () => { clearTimeout(timer); try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); } });
       req.on("error", () => { clearTimeout(timer); resolve({}); });
     } catch { resolve({}); }
   });
+}
+
+// Fail-CLOSED rate-limit helper for mutations: when the rate_limits
+// table is missing, mutations return 503 (not 429) so the admin knows
+// to run the setup SQL instead of silently running unprotected. GETs
+// keep the existing fail-open pattern for availability.
+function limited(res: any, rl: { allowed: boolean; retryAfter: number; tableMissing: boolean }, message: string): boolean {
+  if (rl.tableMissing) {
+    sendJson(res, 503, { message: "Rate limiting is not configured. Please ask the admin to run the rate_limits setup SQL." });
+    return true;
+  }
+  if (!rl.allowed) {
+    sendJson(res, 429, { message }, { "Retry-After": String(rl.retryAfter) });
+    return true;
+  }
+  return false;
+}
+
+// Cover images are only ever rendered in an <img> src: accept
+// same-origin bundled paths (/assets/…), http(s) URLs, and rasterised
+// data:image/ uploads. Anything else (javascript:, data:text/html,
+// giant strings) is rejected.
+function isValidCoverImage(v: string): boolean {
+  if (!v) return true;
+  if (v.length > 1024 * 1024) return false;
+  return v.startsWith("/") || v.startsWith("http://") || v.startsWith("https://") || v.startsWith("data:image/");
+}
+
+// Email subjects are built from stored titles: strip CR/LF so a
+// crafted title cannot inject headers (defence in depth — titles are
+// also stripped at POST/PATCH validation).
+function cleanSubject(s: string): string {
+  return (s || "").replace(/[\r\n]+/g, " ").trim();
 }
 
 // ---- Passwords (PBKDF2-SHA256 via WebCrypto, per-user salt, constant-time compare) ----
@@ -254,7 +312,35 @@ export function randomTokenHex(bytes = 32): string {
 // ---- Rate limiting (Supabase-backed counter, table rate_limits) ----
 export async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
   try {
+    // Bound the key: it embeds unauthenticated emails/IPs, so an
+    // unbounded key is unbounded row size (distinct keys are still
+    // pruned by the retention SQL in supabase-setup.sql §6).
+    key = String(key || "").slice(0, 512);
     if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
+    // Atomic path first: the rate_limit_hit RPC (see
+    // SUPABASE_RPC_SETUP.md) increments and checks in one Postgres
+    // call, so parallel bursts cannot all read the same count and
+    // slip under the limit. Falls back to the read-modify-write path
+    // below when the RPC has not been created yet.
+    try {
+      const rpc = await fetchJson(`${supabaseBase()}/rest/v1/rpc/rate_limit_hit`, {
+        method: "POST",
+        headers: supabaseHeaders(),
+        body: JSON.stringify({ p_key: key, p_limit: limit, p_window_ms: windowMs }),
+      });
+      if (rpc.ok) {
+        const r = rpc.body;
+        if (typeof r === "boolean") return { allowed: r, retryAfter: 0, tableMissing: false };
+        if (r && typeof r === "object") return { allowed: r.allowed !== false, retryAfter: Number(r.retry_after || 0), tableMissing: false };
+      }
+      if (rpc.status === 404 || rpc.status === 400) {
+        // RPC (or the rate_limits table) does not exist yet: the
+        // legacy path below reports tableMissing properly.
+      } else if (!rpc.ok) {
+        // Transient RPC error: fall through to the legacy path rather
+        // than guessing.
+      }
+    } catch { /* fall through to the legacy path */ }
     const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
     const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
     if (!ok) {
@@ -328,6 +414,24 @@ async function refundRazorpayPayment(paymentId: string): Promise<{ ok: boolean; 
     });
     const body = await res.json().catch(() => null);
     if (res.ok && body?.id) return { ok: true, refundId: body.id };
+    // Re-check: Razorpay rejects a duplicate full refund, so a failed
+    // POST may still mean the money moved (parallel delete/cancel).
+    // Re-reading the payment keeps the row honest instead of recording
+    // a phantom "failed" refund.
+    try {
+      const pay = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, {
+        headers: { Authorization: auth },
+      });
+      const payBody = await pay.json().catch(() => null);
+      if (pay.ok && payBody && Number(payBody.amount_refunded || 0) > 0) {
+        const list = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}/refunds`, {
+          headers: { Authorization: auth },
+        });
+        const listBody = await list.json().catch(() => null);
+        const first = Array.isArray(listBody?.items) ? listBody.items[0] : null;
+        return { ok: true, refundId: first?.id };
+      }
+    } catch { /* fall through to failure */ }
     return { ok: false };
   } catch {
     return { ok: false };
@@ -382,12 +486,12 @@ async function sendEventRecommendationEmails(event: any, organizerEmail: string)
     const when = event?.startDate ? new Date(event.startDate).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "";
     const where = [event?.venueName, event?.city].filter(Boolean).join(", ");
     const price = typeof event?.price === "number" && event.price > 0 ? `₹${event.price}` : "Free";
-    const link = `${SITE_URL}/events/${event?.id}`;
+    const link = `${SITE_URL}/events/${encodeURIComponent(String(event?.id || ""))}`;
     const sends = recipients.map((to) =>
       transporter.sendMail({
         from: user,
         to,
-        subject: `New event for you: ${title}`,
+        subject: `New event for you: ${cleanSubject(title)}`,
         text: `A new event matching your interest in ${event.category} was just added on Locora: "${title}"${when ? ` on ${when}` : ""}${where ? ` at ${where}` : ""} (${price}). See it here: ${link}`,
         html: `<div style="font-family:Georgia,serif;max-width:560px;margin:0 auto;background:#FAF8F5;padding:24px;"><div style="background:#fff;border:1px solid #E7E3DB;border-radius:16px;padding:24px;"><h2 style="color:#1E3F35;">New event for you: ${esc(title)}</h2><p style="color:#1E2320;">A new event matching your interest in <strong>${esc(String(event.category))}</strong> was just added on Locora.</p><p style="color:#5F635D;">${when ? `${esc(when)} · ` : ""}${esc(where)} · ${esc(price)}</p><p><a href="${link}" style="display:inline-block;background:#1E3F35;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none;">View event &amp; RSVP</a></p><p style="color:#5F635D;font-size:12px;">You get this because “${esc(String(event.category))}” is one of your saved interests on Locora. Update your interests any time on your Profile page.</p></div></div>`,
       }).then(() => true).catch(() => false),
@@ -418,7 +522,7 @@ async function sendEventCancelledEmail(to: string, event: any, refunded: boolean
     await transporter.sendMail({
       from: user,
       to,
-      subject: `Event cancelled: ${title}`,
+      subject: `Event cancelled: ${cleanSubject(title)}`,
       text: `The event "${title}"${when ? ` scheduled for ${when}` : ""} has been cancelled by the organizer.${refunded ? " If you paid via Razorpay, your refund has been initiated." : ""} We are sorry for the inconvenience.`,
       html: `<div style="font-family:Georgia,serif;max-width:560px;margin:0 auto;background:#FAF8F5;padding:24px;"><div style="background:#fff;border:1px solid #E7E3DB;border-radius:16px;padding:24px;"><h2 style="color:#1E3F35;">Event cancelled: ${esc(title)}</h2><p style="color:#1E2320;">The organizer has cancelled this event${when ? `, which was scheduled for ${esc(when)}` : ""}.${refunded ? " If you paid via Razorpay, your refund has been initiated." : ""}</p><p style="color:#5F635D;">We are sorry for the inconvenience.</p></div></div>`,
     });
@@ -432,8 +536,10 @@ export function stripEventPublic(event: any): any {
   const { createdByEmail: _c, upiId: _u, organizer, ...rest } = event;
   let org = organizer;
   if (organizer && typeof organizer === "object") {
-    const { email: _e, ...orgRest } = organizer;
-    org = orgRest;
+    const { email: _e, website: _w, ...orgRest } = organizer;
+    // Drop a non-http(s) organizer website: legacy rows can carry a
+    // `javascript:` URL, and OrganizerProfilePage renders it as an href.
+    org = (typeof _w === "string" && /^https?:\/\//.test(_w)) ? { ...orgRest, website: _w } : orgRest;
   }
   return { ...rest, organizer: org };
 }
@@ -680,9 +786,20 @@ export default async function handler(req: any, res: any) {
       if (singleId) {
         const event = await fetchEvent(singleId);
         if (!event) return sendJson(res, 404, { message: "Event not found" });
+        // Drafts are not public: a non-published event is visible only
+        // to its owner or an admin (the hub reads this same endpoint).
+        // A 404 (not 403) avoids confirming the draft exists.
+        if (event.status && event.status !== "published" && !(viewerEmail && mayManageEvent(event, viewerEmail))) {
+          return sendJson(res, 404, { message: "Event not found" });
+        }
         return sendJson(res, 200, viewEvent(event));
       }
-      const filtered = applyFilters(await fetchAllEvents(), req.query || {});
+      const all = await fetchAllEvents();
+      // Same draft rule for the list, applied BEFORE pagination so
+      // totals only count what the viewer may actually see. Rows with
+      // no status field are legacy published events.
+      const visible = all.filter((e: any) => !e.status || e.status === "published" || (viewerEmail && mayManageEvent(e, viewerEmail)));
+      const filtered = applyFilters(visible, req.query || {});
       const page = Math.max(1, parseInt(String(req.query?.page || "1"), 10) || 1);
       // pageSize was uncapped: ?pageSize=100000 returned up to the
       // 1,000-row fetch cap in one response.
@@ -731,11 +848,16 @@ export default async function handler(req: any, res: any) {
         return sendJson(res, 403, { message: "Only approved organizers and admins can post events." });
       }
       const rlPost = await checkRateLimit(`events:post:${session.email}`, 20, 60 * 60 * 1000);
-      if (!rlPost.allowed && !rlPost.tableMissing) {
-        return sendJson(res, 429, { message: "Too many events created. Try again shortly." }, { "Retry-After": String(rlPost.retryAfter) });
-      }
+      if (limited(res, rlPost, "Too many events created. Try again shortly.")) return;
       const p = await readBody(req);
+      if ((req as any).__bodyTooLarge) return sendJson(res, 413, { message: "Request body is too large" });
+      // The client-supplied id is interpolated into email hrefs and
+      // used as the row key: it must be a plain identifier, not
+      // markup or a path. (The server-generated fallback matches it.)
       const id = typeof p.id === "string" && p.id ? p.id : "evt-" + Date.now();
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id)) {
+        return sendJson(res, 400, { message: "Event id must be letters, digits, - or _ (max 64 characters)" });
+      }
       // Idempotency: a retry/replay carrying the same client id returns
       // the existing event instead of creating a duplicate listing.
       // (The frontend now sends a client-generated id on every create.)
@@ -752,11 +874,27 @@ export default async function handler(req: any, res: any) {
       // prices were stored and then treated as "free" instant passes,
       // negative capacities stored as instantly-full events, past and
       // end-before-start dates accepted verbatim, unbounded text).
-      const title = typeof p.title === "string" ? p.title.trim() : "";
+      // Titles are used in email subjects: strip CR/LF at the source.
+      const title = typeof p.title === "string" ? p.title.trim().replace(/[\r\n]+/g, " ") : "";
       if (!title) return sendJson(res, 400, { message: "Title is required" });
       if (title.length > 150) return sendJson(res, 400, { message: "Title must be 150 characters or fewer" });
       const description = typeof p.description === "string" ? p.description : "";
       if (description.length > 5000) return sendJson(res, 400, { message: "Description must be 5000 characters or fewer" });
+      const summary = typeof p.summary === "string" ? p.summary.trim() : "";
+      if (summary.length > 500) return sendJson(res, 400, { message: "Summary must be 500 characters or fewer" });
+      const category = typeof p.category === "string" ? p.category.trim() : "Food & Community";
+      if (category.length > 80) return sendJson(res, 400, { message: "Category must be 80 characters or fewer" });
+      const slug = typeof p.slug === "string" && p.slug ? p.slug : slugify(title);
+      if (!/^[a-z0-9][a-z0-9-]{0,99}$/.test(slug)) return sendJson(res, 400, { message: "Slug must be lowercase letters, digits or hyphens" });
+      const coverImage = typeof p.coverImage === "string" ? p.coverImage : "";
+      if (!isValidCoverImage(coverImage)) return sendJson(res, 400, { message: "Cover image must be a same-site path, http(s) URL or data:image upload (max 1 MB)" });
+      const city = typeof p.city === "string" && p.city.trim() ? p.city.trim() : "Metro City";
+      const state = typeof p.state === "string" ? p.state.trim() : "";
+      const country = typeof p.country === "string" ? p.country.trim() : "";
+      const neighborhood = typeof p.neighborhood === "string" ? p.neighborhood.trim() : "";
+      for (const [label, v] of [["City", city], ["State", state], ["Country", country], ["Neighborhood", neighborhood]] as const) {
+        if (v.length > 100) return sendJson(res, 400, { message: `${label} must be 100 characters or fewer` });
+      }
       const venueName = typeof p.venueName === "string" ? p.venueName : "Community Hall";
       if (venueName.length > 200) return sendJson(res, 400, { message: "Venue name must be 200 characters or fewer" });
       // Optional exact map link: must be an http(s) URL when given.
@@ -770,7 +908,7 @@ export default async function handler(req: any, res: any) {
         if (!okUrl) return sendJson(res, 400, { message: "Map link must be a valid http(s) URL" });
       }
       const price = p.price === undefined || p.price === null || p.price === "" ? 0 : Number(p.price);
-      if (!Number.isFinite(price) || price < 0) return sendJson(res, 400, { message: "Price must be zero or more" });
+      if (!Number.isFinite(price) || price < 0 || price > 1000000) return sendJson(res, 400, { message: "Price must be between 0 and 1000000" });
       const capacity = p.capacity === undefined || p.capacity === null || p.capacity === "" ? 50 : Number(p.capacity);
       if (!Number.isInteger(capacity) || capacity < 1 || capacity > 10000) return sendJson(res, 400, { message: "Capacity must be between 1 and 10000" });
       const startRaw = p.startDate || new Date(Date.now() + 86400000 * 7).toISOString();
@@ -780,28 +918,39 @@ export default async function handler(req: any, res: any) {
       if (Number.isNaN(startMs) || Number.isNaN(endMs)) return sendJson(res, 400, { message: "Start and end dates must be valid dates" });
       if (endMs < startMs) return sendJson(res, 400, { message: "End date must be after the start date" });
       if (startMs < Date.now() - 5 * 60 * 1000) return sendJson(res, 400, { message: "Start date cannot be in the past" });
-      // Organizer display name comes from the account profile, not the
-      // request body — previously any approved organizer could post an
-      // event displaying as "Posted by" another organizer or brand.
+      // Organizer identity is built from the account profile, never
+      // from the request body: the client-supplied organizer object is
+      // ignored entirely. Previously any approved organizer could post
+      // an event displaying as "Posted by" another organizer or brand,
+      // with that organizer's id/slug/avatar/bio — a profile-page
+      // confusion primitive. The body name is only a fallback when the
+      // account has no saved profile name.
       let organizerName = "Community Organizer";
+      let organizerAvatar = "";
+      let organizerBio = "Community organizer.";
+      let organizerLocation = "Metro City";
+      let organizerId = "org-community";
       try {
         const profile = await loadUserByEmail(session.email);
-        if (profile && typeof profile.data?.name === "string" && profile.data.name.trim()) {
-          organizerName = profile.data.name.trim().slice(0, 80);
-        } else if (p.organizer && typeof p.organizer.name === "string" && p.organizer.name.trim()) {
-          organizerName = p.organizer.name.trim().slice(0, 80);
-        }
-      } catch { /* profile lookup failure falls back to the body name */ }
+        const pd = profile?.data || {};
+        if (typeof pd.name === "string" && pd.name.trim()) organizerName = pd.name.trim().slice(0, 80);
+        else if (p.organizer && typeof p.organizer.name === "string" && p.organizer.name.trim()) organizerName = p.organizer.name.trim().slice(0, 80);
+        if (typeof pd.avatar === "string" && pd.avatar.trim() && /^https?:\/\//.test(pd.avatar.trim())) organizerAvatar = pd.avatar.trim().slice(0, 2048);
+        if (typeof pd.bio === "string" && pd.bio.trim()) organizerBio = pd.bio.trim().slice(0, 500);
+        const locParts = [pd.city, pd.state, pd.country].filter((x: any) => typeof x === "string" && x.trim()).map((x: string) => x.trim());
+        if (locParts.length > 0) organizerLocation = locParts.join(", ").slice(0, 200);
+        if (profile && typeof profile.id === "string" && profile.id) organizerId = profile.id;
+      } catch { /* profile lookup failure keeps the defaults */ }
       const event = {
-        id, title, slug: p.slug || slugify(title),
-        summary: p.summary || (description ? description.slice(0, 140) : "Local community gathering."),
-        description, category: p.category || "Food & Community",
-        coverImage: p.coverImage || "", startDate: startRaw,
+        id, title, slug,
+        summary: summary || (description ? description.slice(0, 140) : "Local community gathering."),
+        description, category,
+        coverImage, startDate: startRaw,
         endDate: endRaw,
         venueName, address: typeof p.address === "string" ? p.address.slice(0, 300) : "100 Main Street",
         mapUrl: mapUrl || undefined,
-        neighborhood: p.state ? (p.city || "") : "", city: p.city || "Metro City",
-        state: p.state || undefined, country: p.country || undefined,
+        neighborhood, city,
+        state: state || undefined, country: country || undefined,
         // Ownership is forced from the session, never from the body.
         createdByEmail: session.email,
         price,
@@ -811,9 +960,15 @@ export default async function handler(req: any, res: any) {
         requireAttendeeDetails: p.requireAttendeeDetails ?? true,
         capacity, registeredCount: 0, status: "published",
         organizer: {
-          ...(p.organizer || { id: "org-community", name: organizerName, slug: "community-organizer", avatar: "", bio: "Community organizer.", location: "Metro City", eventsCount: 0, totalAttendeesServed: 0 }),
+          id: organizerId,
           name: organizerName,
+          slug: slugify(organizerName) || "community-organizer",
+          avatar: organizerAvatar,
+          bio: organizerBio,
+          location: organizerLocation,
           email: session.email,
+          eventsCount: 0,
+          totalAttendeesServed: 0,
         },
         tags: Array.isArray(p.tags) && p.tags.length > 0 ? p.tags.slice(0, 10).map((t: any) => String(t).slice(0, 40)) : ["Local", "Community"],
         isFeatured: false,
@@ -840,14 +995,13 @@ export default async function handler(req: any, res: any) {
       const session = await verifySession(req);
       if (!session) return sendJson(res, 401, { message: "Sign in required" });
       const rlPatch = await checkRateLimit(`events:patch:${session.email}`, 60, 60 * 60 * 1000);
-      if (!rlPatch.allowed && !rlPatch.tableMissing) {
-        return sendJson(res, 429, { message: "Too many event updates. Try again shortly." }, { "Retry-After": String(rlPatch.retryAfter) });
-      }
+      if (limited(res, rlPatch, "Too many event updates. Try again shortly.")) return;
       const singleId = firstQuery(req.query, "id");
       if (!singleId) return sendJson(res, 400, { message: "Missing event id" });
       const existing = await fetchEvent(singleId);
       if (!existing) return sendJson(res, 404, { message: "Event not found" });
       const updates = await readBody(req);
+      if ((req as any).__bodyTooLarge) return sendJson(res, 413, { message: "Request body is too large" });
       const keys = Object.keys(updates || {});
       // Counts are now owned by the registrations server (see
       // api/registrations.ts bumpEventCount). A direct count PATCH from
@@ -872,9 +1026,19 @@ export default async function handler(req: any, res: any) {
       // event can still have its other details fixed.
       if (updates.title !== undefined) {
         if (typeof updates.title !== "string" || !updates.title.trim()) return sendJson(res, 400, { message: "Title is required" });
-        if (updates.title.trim().length > 150) return sendJson(res, 400, { message: "Title must be 150 characters or fewer" });
+        updates.title = updates.title.trim().replace(/[\r\n]+/g, " ");
+        if (updates.title.length > 150) return sendJson(res, 400, { message: "Title must be 150 characters or fewer" });
       }
       if (updates.description !== undefined && typeof updates.description === "string" && updates.description.length > 5000) return sendJson(res, 400, { message: "Description must be 5000 characters or fewer" });
+      if (updates.summary !== undefined && typeof updates.summary === "string" && updates.summary.length > 500) return sendJson(res, 400, { message: "Summary must be 500 characters or fewer" });
+      if (updates.category !== undefined && typeof updates.category === "string" && updates.category.length > 80) return sendJson(res, 400, { message: "Category must be 80 characters or fewer" });
+      if (updates.slug !== undefined && (typeof updates.slug !== "string" || !/^[a-z0-9][a-z0-9-]{0,99}$/.test(updates.slug))) return sendJson(res, 400, { message: "Slug must be lowercase letters, digits or hyphens" });
+      if (updates.coverImage !== undefined && (typeof updates.coverImage !== "string" || !isValidCoverImage(updates.coverImage))) return sendJson(res, 400, { message: "Cover image must be a same-site path, http(s) URL or data:image upload (max 1 MB)" });
+      if (updates.address !== undefined && typeof updates.address === "string" && updates.address.length > 300) return sendJson(res, 400, { message: "Address must be 300 characters or fewer" });
+      for (const f of ["city", "state", "country", "neighborhood"] as const) {
+        if (updates[f] !== undefined && typeof updates[f] === "string" && updates[f].length > 100) return sendJson(res, 400, { message: `${f} must be 100 characters or fewer` });
+      }
+      if (updates.tags !== undefined && (!Array.isArray(updates.tags) || updates.tags.length > 10 || updates.tags.some((t: any) => typeof t !== "string" || t.length > 40))) return sendJson(res, 400, { message: "Tags must be at most 10 strings of 40 characters" });
       if (updates.venueName !== undefined && typeof updates.venueName === "string" && updates.venueName.length > 200) return sendJson(res, 400, { message: "Venue name must be 200 characters or fewer" });
       if (updates.mapUrl !== undefined) {
         if (typeof updates.mapUrl !== "string") return sendJson(res, 400, { message: "Map link must be a valid http(s) URL" });
@@ -891,7 +1055,14 @@ export default async function handler(req: any, res: any) {
       }
       if (updates.price !== undefined) {
         const pr = Number(updates.price);
-        if (!Number.isFinite(pr) || pr < 0) return sendJson(res, 400, { message: "Price must be zero or more" });
+        if (!Number.isFinite(pr) || pr < 0 || pr > 1000000) return sendJson(res, 400, { message: "Price must be between 0 and 1000000" });
+      }
+      // Status is an enum, and "cancelled" is NOT settable here: a
+      // PATCH to cancelled used to bypass the cancellation flow
+      // entirely (no refunds, no attendee emails). Cancel via DELETE.
+      if (updates.status !== undefined) {
+        if (typeof updates.status !== "string" || !["published", "draft", "cancelled", "completed"].includes(updates.status)) return sendJson(res, 400, { message: "Invalid status" });
+        if (updates.status === "cancelled") return sendJson(res, 400, { message: "Use the cancel/delete flow to cancel an event so attendees are refunded and emailed." });
       }
       if (updates.capacity !== undefined) {
         const cap = Number(updates.capacity);
@@ -908,12 +1079,56 @@ export default async function handler(req: any, res: any) {
           return sendJson(res, 400, { message: "Start date cannot be moved into the past" });
         }
       }
-      const { createdByEmail: _c, registeredCount: _r, isFeatured: _f, upiId: _u, ...safeUpdates } = updates;
+      // PATCH used an exclusion merge: any field not on the strip list
+      // was persisted verbatim (arbitrary fields, uncapped strings, a
+      // client-supplied organizer object). Only the fields below are
+      // accepted now; everything else is dropped.
+      const PATCH_FIELDS = ["title", "description", "summary", "category", "slug", "coverImage", "startDate", "endDate", "venueName", "address", "mapUrl", "neighborhood", "city", "state", "country", "price", "capacity", "requireAttendeeDetails", "tags", "status", "organizer"] as const;
+      const safeUpdates: any = {};
+      for (const k of PATCH_FIELDS) { if (updates[k] !== undefined) safeUpdates[k] = updates[k]; }
+      if (Array.isArray(safeUpdates.tags)) safeUpdates.tags = safeUpdates.tags.slice(0, 10).map((t: any) => String(t).slice(0, 40));
+      // Store the COERCED numbers, not the raw body values: "0x32",
+      // true, or "1e3" all pass the Number() checks above yet are not
+      // valid Postgres int literals, so adjust_event_count's ::int
+      // cast would throw on every seat-count call for the event and
+      // silently degrade to the racy fallback.
+      if (safeUpdates.price !== undefined) safeUpdates.price = Number(safeUpdates.price);
+      if (safeUpdates.capacity !== undefined) safeUpdates.capacity = Number(safeUpdates.capacity);
+      if (safeUpdates.requireAttendeeDetails !== undefined && typeof safeUpdates.requireAttendeeDetails !== "boolean") {
+        return sendJson(res, 400, { message: "requireAttendeeDetails must be true or false" });
+      }
+      if (safeUpdates.organizer !== undefined && (typeof safeUpdates.organizer !== "object" || safeUpdates.organizer === null || Array.isArray(safeUpdates.organizer))) {
+        return sendJson(res, 400, { message: "organizer must be an object" });
+      }
       if (safeUpdates.organizer && typeof safeUpdates.organizer === "object") {
-        const orgName = typeof safeUpdates.organizer.name === "string" && safeUpdates.organizer.name.trim()
-          ? safeUpdates.organizer.name.trim().slice(0, 80)
-          : (existing.organizer?.name || "Community Organizer");
-        safeUpdates.organizer = { ...safeUpdates.organizer, name: orgName, email: existing.organizer?.email || existing.createdByEmail };
+        // Organizer identity on edit is rebuilt from the stored record
+        // + the caller's profile: the body can change no identity
+        // field (id/slug/avatar/bio/location/email all come from the
+        // stored event or the profile).
+        let patchOrgName = existing.organizer?.name || "Community Organizer";
+        let patchOrgAvatar = existing.organizer?.avatar || "";
+        let patchOrgBio = existing.organizer?.bio || "Community organizer.";
+        let patchOrgLocation = existing.organizer?.location || "Metro City";
+        try {
+          const profile = await loadUserByEmail(session.email);
+          const pd = profile?.data || {};
+          if (typeof pd.name === "string" && pd.name.trim()) patchOrgName = pd.name.trim().slice(0, 80);
+          if (typeof pd.avatar === "string" && pd.avatar.trim() && /^https?:\/\//.test(pd.avatar.trim())) patchOrgAvatar = pd.avatar.trim().slice(0, 2048);
+          if (typeof pd.bio === "string" && pd.bio.trim()) patchOrgBio = pd.bio.trim().slice(0, 500);
+          const locParts = [pd.city, pd.state, pd.country].filter((x: any) => typeof x === "string" && x.trim()).map((x: string) => x.trim());
+          if (locParts.length > 0) patchOrgLocation = locParts.join(", ").slice(0, 200);
+        } catch { /* profile lookup failure keeps the stored values */ }
+        safeUpdates.organizer = {
+          id: existing.organizer?.id || "org-community",
+          name: patchOrgName,
+          slug: existing.organizer?.slug || slugify(patchOrgName) || "community-organizer",
+          avatar: patchOrgAvatar,
+          bio: patchOrgBio,
+          location: patchOrgLocation,
+          email: existing.organizer?.email || existing.createdByEmail,
+          eventsCount: typeof existing.organizer?.eventsCount === "number" ? existing.organizer.eventsCount : 0,
+          totalAttendeesServed: typeof existing.organizer?.totalAttendeesServed === "number" ? existing.organizer.totalAttendeesServed : 0,
+        };
       }
       // isFeatured is admin-only (server-enforced): previously PATCH
       // stripped it always, so the Home featured section could never
@@ -940,9 +1155,7 @@ export default async function handler(req: any, res: any) {
       const session = await verifySession(req);
       if (!session) return sendJson(res, 401, { message: "Sign in required" });
       const rlDel = await checkRateLimit(`events:delete:${session.email}`, 20, 60 * 60 * 1000);
-      if (!rlDel.allowed && !rlDel.tableMissing) {
-        return sendJson(res, 429, { message: "Too many event deletions. Try again shortly." }, { "Retry-After": String(rlDel.retryAfter) });
-      }
+      if (limited(res, rlDel, "Too many event deletions. Try again shortly.")) return;
       const singleId = firstQuery(req.query, "id");
       if (!singleId) return sendJson(res, 400, { message: "Missing event id" });
       const existing = await fetchEvent(singleId);
@@ -955,41 +1168,64 @@ export default async function handler(req: any, res: any) {
       // cancels all active registrations, refunds confirmed Razorpay
       // passes, and emails every affected attendee (all best-effort
       // except the event delete itself, which is last).
-      const regRes = await fetchJson(
-        `${supabaseBase()}/rest/v1/registrations?select=id,data&limit=1000`,
-        { headers: supabaseHeaders() },
-      );
-      const rows = regRes.ok && Array.isArray(regRes.body) ? regRes.body.map((r: any) => r.data).filter(Boolean) : [];
-      const affected = rows.filter((r: any) => r.eventId === singleId && (r.status === "pending" || r.status === "confirmed"));
       let cancelledCount = 0;
       let refundedCount = 0;
       const refundFailed: string[] = [];
       const emailed = new Set<string>();
       let emailedCount = 0;
-      for (const r of affected) {
-        const next: any = { ...r, status: "cancelled", cancelledReason: "event_deleted" };
-        if (r.status === "confirmed" && r.paymentMethod === "razorpay" && r.razorpayPaymentId && !r.refundId) {
-          const rf = await refundRazorpayPayment(r.razorpayPaymentId);
-          if (rf.ok) {
-            next.refundStatus = "initiated";
-            next.refundId = rf.refundId;
-            refundedCount++;
-          } else {
-            next.refundStatus = "failed";
-            refundFailed.push(r.razorpayPaymentId);
+      // All registrations for THIS event, paged: the old code read only
+      // the first 1,000 rows of the whole table, so an event with more
+      // than 1,000 registrations silently left live passes behind.
+      async function fetchEventRegistrations(): Promise<any[]> {
+        const out: any[] = [];
+        for (let page = 0; page < 10; page++) {
+          const res = await fetchJson(
+            `${supabaseBase()}/rest/v1/registrations?select=id,data&data->>eventId=eq.${encodeURIComponent(singleId)}&order=id&limit=1000&offset=${page * 1000}`,
+            { headers: supabaseHeaders() },
+          );
+          if (!res.ok || !Array.isArray(res.body)) break;
+          out.push(...res.body.map((r: any) => r.data).filter(Boolean));
+          if (res.body.length < 1000) break;
+        }
+        return out;
+      }
+      async function cancelPass(): Promise<number> {
+        const rows = await fetchEventRegistrations();
+        const active = rows.filter((r: any) => r.eventId === singleId && (r.status === "pending" || r.status === "confirmed"));
+        for (const r of active) {
+          const next: any = { ...r, status: "cancelled", cancelledReason: "event_deleted" };
+          if (r.status === "confirmed" && r.paymentMethod === "razorpay" && r.razorpayPaymentId && !r.refundId) {
+            const rf = await refundRazorpayPayment(r.razorpayPaymentId);
+            if (rf.ok) {
+              next.refundStatus = "initiated";
+              next.refundId = rf.refundId;
+              refundedCount++;
+            } else {
+              next.refundStatus = "failed";
+              refundFailed.push(r.razorpayPaymentId);
+            }
+          }
+          const patched = await fetchJson(
+            `${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(r.id)}`,
+            { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: next }) },
+          );
+          if (patched.ok) cancelledCount++;
+          if (r.userEmail && !emailed.has(norm(r.userEmail))) {
+            emailed.add(norm(r.userEmail));
+            try {
+              if (await sendEventCancelledEmail(r.userEmail, existing, next.refundStatus === "initiated")) emailedCount++;
+            } catch { /* best-effort */ }
           }
         }
-        const patched = await fetchJson(
-          `${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(r.id)}`,
-          { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: next }) },
-        );
-        if (patched.ok) cancelledCount++;
-        if (r.userEmail && !emailed.has(norm(r.userEmail))) {
-          emailed.add(norm(r.userEmail));
-          try {
-            if (await sendEventCancelledEmail(r.userEmail, existing, next.refundStatus === "initiated")) emailedCount++;
-          } catch { /* best-effort */ }
-        }
+        return active.length;
+      }
+      await cancelPass();
+      // Re-scan: a registration confirmed while the delete was running
+      // would otherwise keep a live pass for a deleted event. Two
+      // extra passes bound the loop; the window is seconds wide.
+      for (let scan = 0; scan < 2; scan++) {
+        const found = await cancelPass();
+        if (found === 0) break;
       }
       await fetch(supabaseBase() + "/rest/v1/events?id=eq." + encodeURIComponent(singleId), {
         method: "DELETE", headers: supabaseHeaders(),

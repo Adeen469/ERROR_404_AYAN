@@ -147,11 +147,25 @@ export function applyPendingToPage(
   pageNum: number,
   filters: EventFilterOptions,
   ops: PendingOp[],
+  currentEmail?: string,
 ): PaginatedResponse<EventItem> {
   if (pageNum !== 1 || ops.length === 0 || !isDefaultView(filters)) return page;
+  // Same creator rule as flushPendingOps: one user's offline drafts
+  // must never appear in another user's view on a shared browser.
+  // Untagged ops (queued before creator tagging existed) are visible
+  // only to guests: a signed-in viewer must not see another user's
+  // pre-tagging draft overlaid on their page. Tagged ops show only to
+  // their creator. (Flush still accepts untagged ops — see
+  // flushPendingOps — so nothing is stranded by this.)
+  const mine = ops.filter(
+    (op) =>
+      (!op.creatorEmail && !currentEmail) ||
+      (!!op.creatorEmail && !!currentEmail && op.creatorEmail.toLowerCase() === currentEmail.toLowerCase()),
+  );
+  if (mine.length === 0) return page;
   let data = page.data.slice();
   let created = 0;
-  for (const op of ops) {
+  for (const op of mine) {
     if (op.op === 'delete') {
       data = data.filter((e) => e.id !== op.id);
     } else if (op.op === 'update') {
@@ -213,7 +227,10 @@ export async function flushPendingOps(
     // browser would have made B the owner of A's event. Mismatched ops
     // stay pending for their creator's next sign-in. Ops queued before
     // creator tagging existed carry no creator and still flush.
-    if (op.creatorEmail && currentEmail && op.creatorEmail !== currentEmail.toLowerCase()) {
+    // Lowercase BOTH sides: the old comparison lowercased only the
+    // session email, so an op tagged with a mixed-case creator email
+    // never matched and stayed pending forever.
+    if (op.creatorEmail && currentEmail && op.creatorEmail.toLowerCase() !== currentEmail.toLowerCase()) {
       continue;
     }
     try {

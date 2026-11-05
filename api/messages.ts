@@ -129,7 +129,7 @@ export async function signSession(email: string, role: string, authProvider: str
 export async function verifySession(req: any): Promise<SessionUser | null> {
   try {
     const secret = getEnv("SESSION_SECRET");
-    if (!secret) return null;
+    if (!secret || secret.length < 32) return null;
     const token = parseCookies(req).locora_session;
     if (!token) return null;
     const parts = token.split(".");
@@ -254,7 +254,35 @@ export function randomTokenHex(bytes = 32): string {
 // ---- Rate limiting (Supabase-backed counter, table rate_limits) ----
 export async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
   try {
+    // Bound the key: it embeds unauthenticated emails/IPs, so an
+    // unbounded key is unbounded row size (distinct keys are still
+    // pruned by the retention SQL in supabase-setup.sql §6).
+    key = String(key || "").slice(0, 512);
     if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
+    // Atomic path first: the rate_limit_hit RPC (see
+    // SUPABASE_RPC_SETUP.md) increments and checks in one Postgres
+    // call, so parallel bursts cannot all read the same count and
+    // slip under the limit. Falls back to the read-modify-write path
+    // below when the RPC has not been created yet.
+    try {
+      const rpc = await fetchJson(`${supabaseBase()}/rest/v1/rpc/rate_limit_hit`, {
+        method: "POST",
+        headers: supabaseHeaders(),
+        body: JSON.stringify({ p_key: key, p_limit: limit, p_window_ms: windowMs }),
+      });
+      if (rpc.ok) {
+        const r = rpc.body;
+        if (typeof r === "boolean") return { allowed: r, retryAfter: 0, tableMissing: false };
+        if (r && typeof r === "object") return { allowed: r.allowed !== false, retryAfter: Number(r.retry_after || 0), tableMissing: false };
+      }
+      if (rpc.status === 404 || rpc.status === 400) {
+        // RPC (or the rate_limits table) does not exist yet: the
+        // legacy path below reports tableMissing properly.
+      } else if (!rpc.ok) {
+        // Transient RPC error: fall through to the legacy path rather
+        // than guessing.
+      }
+    } catch { /* fall through to the legacy path */ }
     const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
     const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
     if (!ok) {
@@ -280,6 +308,21 @@ export async function checkRateLimit(key: string, limit: number, windowMs: numbe
   } catch {
     return { allowed: true, retryAfter: 0, tableMissing: false };
   }
+}
+
+// Fail closed on mutations when the limiter is unavailable: a missing
+// rate_limits table must never silently disable abuse protection on
+// writes (login spam, message spam, order spam). Reads keep the old
+// fail-open behaviour — a missing table must not take the inbox offline.
+// Returns true when a response was already sent.
+function limited(res: any, rl: { allowed: boolean; retryAfter: number; tableMissing: boolean }, message: string): boolean {
+  if (rl.allowed) return false;
+  if (rl.tableMissing) {
+    sendJson(res, 503, { message: "Rate limiting is not configured. Please ask the admin to run the rate_limits setup SQL." });
+  } else {
+    sendJson(res, 429, { message }, { "Retry-After": String(rl.retryAfter) });
+  }
+  return true;
 }
 
 // ---- Events / organiser helpers ----
@@ -426,6 +469,19 @@ const BUCKET = "message-attachments";
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_TEXT_CHARS = 2000;
 
+// One shared scrub for every message row returned to a viewer: the GET
+// list deliberately strips these, but hide / mark-read / send / edit
+// used to return the raw row — so a recipient could recover text the
+// sender edited away (editHistory), learn the other side hid the
+// message (hiddenFor), or reuse the sender's idempotency key.
+function stripMessageForViewer(m: any, viewerEmail: string): any {
+  const out: any = { ...m };
+  delete out.hiddenFor;
+  delete out.idempotencyKey;
+  if (m.senderEmail !== viewerEmail) delete out.editHistory;
+  return out;
+}
+
 // Extension -> expected MIME family. The server checks the extension
 // (the client also checks File.type); a mismatch is rejected.
 const ALLOWED_EXTENSIONS: Record<string, string[]> = {
@@ -483,6 +539,67 @@ async function loadMessagesFor(email: string): Promise<any[]> {
   }
 }
 
+// Block rows are stored as { type: "block", blockerEmail, blockedEmail }
+// — they carry neither senderEmail nor recipientEmail, so the per-user
+// filtered read in loadMessagesFor() can never return them. Every block
+// check must use this loader instead (previously findBlock() always saw
+// an empty set, so blocks were silently non-functional).
+async function loadBlocksFor(email: string): Promise<any[]> {
+  const out = new Map<string, any>();
+  try {
+    for (const field of ["blockerEmail", "blockedEmail"]) {
+      const { ok, body } = await fetchJson(
+        `${supabaseBase()}/rest/v1/messages?select=id,data&data->>${field}=eq.${encodeURIComponent(norm(email))}&limit=1000`,
+        { headers: supabaseHeaders() },
+      );
+      if (!ok) throw new Error("filtered blocks read failed");
+      if (Array.isArray(body)) for (const row of body) if (row.data?.id) out.set(row.data.id, row.data);
+    }
+    return [...out.values()].filter((m: any) => m.type === "block");
+  } catch {
+    // Same fallback as loadMessagesFor: a rejected jsonb filter must not
+    // silently drop blocks (fail closed at the call site on throw).
+    const all = await loadAllMessages();
+    return all.filter((m: any) => m.type === "block" && (norm(m.blockerEmail) === norm(email) || norm(m.blockedEmail) === norm(email)));
+  }
+}
+
+// Targeted idempotency lookup: the old in-memory scan over the
+// 1,000-row-capped loadMessagesFor() set was racy and window-limited —
+// two concurrent retries with the same key could both pass it.
+async function loadMessageByIdempotencyKey(key: string, sender: string): Promise<any | null> {
+  const { ok, body } = await fetchJson(
+    `${supabaseBase()}/rest/v1/messages?select=id,data&data->>idempotencyKey=eq.${encodeURIComponent(key)}&data->>senderEmail=eq.${encodeURIComponent(norm(sender))}&limit=1`,
+    { headers: supabaseHeaders() },
+  );
+  if (!ok || !Array.isArray(body) || body.length === 0) return null;
+  return body[0].data;
+}
+
+// Per-recipient throttle for new-message email alerts (email_log,
+// kind "message"): without it one sender can fire 60 alert emails/hour
+// at any organizer. The message itself is always stored; only the mail
+// is skipped when the cap is hit.
+async function countRecentMessageMails(email: string): Promise<number | null> {
+  const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const url =
+    `${supabaseBase()}/rest/v1/email_log?select=created_at` +
+    `&email=eq.${encodeURIComponent(norm(email))}&kind=eq.message&created_at=gte.${encodeURIComponent(since)}`;
+  const { ok, body } = await fetchJson(url, { headers: supabaseHeaders() });
+  if (!ok || !Array.isArray(body)) return null;
+  return body.length;
+}
+
+async function logMessageMail(email: string): Promise<void> {
+  try {
+    await fetchJson(`${supabaseBase()}/rest/v1/email_log`, {
+      method: "POST",
+      headers: supabaseHeaders(),
+      body: JSON.stringify({ email: norm(email), kind: "message" }),
+    });
+  } catch { /* a missed log row only risks a duplicate mail later */ }
+}
+
 async function deleteAttachmentObject(path: string): Promise<void> {
   try {
     await fetchJson(
@@ -511,9 +628,24 @@ async function verifyAttachment(path: string, ext: string): Promise<string | nul
   }
   if (res.status === 404) return "Attachment was not uploaded — please upload it again";
   if (!res.ok && res.status !== 206) return "Could not verify the attachment — please try again";
+  // Total size: prefer the Content-Range total; a 200 (non-range)
+  // response carries it in Content-Length instead. If neither is
+  // present, HEAD the object — an unverifiable size fails closed.
+  let total = NaN;
   const range = res.headers.get("content-range") || "";
   const totalMatch = range.match(/\/(\d+)\s*$/);
-  if (totalMatch && Number(totalMatch[1]) > MAX_ATTACHMENT_BYTES) {
+  if (totalMatch) total = Number(totalMatch[1]);
+  if (!Number.isFinite(total) && res.status === 200) total = Number(res.headers.get("content-length") || "");
+  if (!Number.isFinite(total)) {
+    try {
+      const headRes = await fetch(url, { method: "HEAD" });
+      if (headRes.ok) total = Number(headRes.headers.get("content-length") || "");
+    } catch { /* fall through to the fail-closed check below */ }
+  }
+  if (!Number.isFinite(total) || total <= 0) {
+    return "Could not verify the attachment — please try again";
+  }
+  if (total > MAX_ATTACHMENT_BYTES) {
     await deleteAttachmentObject(path);
     return "Attachment exceeds the 20MB limit";
   }
@@ -533,6 +665,12 @@ async function verifyAttachment(path: string, ext: string): Promise<string | nul
   }
   const starts = (...bytes: number[]) => bytes.every((b, i) => head[i] === b);
   const at = (off: number, ...bytes: number[]) => bytes.every((b, i) => head[off + i] === b);
+  // Magic bytes first (as before), then the STORED Content-Type for
+  // every extension: the upload PUT's Content-Type is caller-controlled
+  // and Supabase serves it verbatim, so a PNG-magic file stored as
+  // text/html used to pass the sniff and render as a page from the
+  // public bucket. An absent/generic type is tolerated (some browsers
+  // PUT without one); any other mismatch is rejected and deleted.
   let ok = true;
   if (ext === "png") ok = starts(0x89, 0x50, 0x4e, 0x47);
   else if (ext === "jpg" || ext === "jpeg") ok = starts(0xff, 0xd8, 0xff);
@@ -543,9 +681,11 @@ async function verifyAttachment(path: string, ext: string): Promise<string | nul
   else if (ext === "doc" || ext === "xls") ok = starts(0xd0, 0xcf, 0x11, 0xe0);
   else if (ext === "mp4" || ext === "mov") ok = at(4, 0x66, 0x74, 0x79, 0x70);
   else if (ext === "webm") ok = starts(0x1a, 0x45, 0xdf, 0xa3);
-  else {
+  else ok = false;
+  if (ok) {
     const ct = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
-    ok = (ALLOWED_EXTENSIONS[ext] || []).includes(ct);
+    const allowedCts = ALLOWED_EXTENSIONS[ext] || [];
+    if (ct && ct !== "application/octet-stream" && !allowedCts.includes(ct)) ok = false;
   }
   if (!ok) {
     await deleteAttachmentObject(path);
@@ -632,11 +772,12 @@ function authorizeContact(
   sender: string,
   recipient: string,
   existing: any[],
+  blocks: any[] = [],
 ): string | null {
   const organizerEmail = organizerEmailOf(event);
   if (!organizerEmail) return "This event has no organizer contact";
   if (sender === recipient) return "You cannot message yourself";
-  if (findBlock(existing, event.id, sender, recipient)) return "This conversation is blocked";
+  if (findBlock(blocks, event.id, sender, recipient)) return "This conversation is blocked";
   if (recipient === organizerEmail) return null;
   if (!isOrganizerOrAdmin(sender, organizerEmail)) {
     return "You can only message this event's organizer";
@@ -760,12 +901,18 @@ export default async function handler(req: any, res: any): Promise<void> {
       // "Delete for me" hides via hiddenFor; old rows predate the field
       // and are treated as hidden for nobody. Block rows are internal
       // state and never listed as messages.
-      const mine = all.filter(
-        (m: any) =>
-          m.type !== "block" &&
-          (m.senderEmail === userEmail || m.recipientEmail === userEmail) &&
-          !((m.hiddenFor || []) as string[]).includes(userEmail),
-      );
+      const mine = all
+        .filter(
+          (m: any) =>
+            m.type !== "block" &&
+            (m.senderEmail === userEmail || m.recipientEmail === userEmail) &&
+            !((m.hiddenFor || []) as string[]).includes(userEmail),
+        )
+        // Server-internal fields must not leak to the counterparty:
+        // hiddenFor would tell B that A deleted the message for
+        // themselves, idempotencyKey is a bearer-ish token, and
+        // editHistory keeps edited-away text readable after an edit.
+        .map((m: any) => stripMessageForViewer(m, userEmail));
       if (req.query?.unreadCount === "1") {
         sendJson(res, 200, {
           count: mine.filter((m: any) => m.recipientEmail === userEmail && !m.read)
@@ -788,10 +935,7 @@ export default async function handler(req: any, res: any): Promise<void> {
     // ---- DELETE: delete for everyone (sender only) ----
     if (req.method === "DELETE") {
       const rlDel = await checkRateLimit(`msg:delete:${me}`, 60, 10 * 60 * 1000);
-      if (!rlDel.allowed && !rlDel.tableMissing) {
-        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlDel.retryAfter) });
-        return;
-      }
+      if (limited(res, rlDel, "Too many requests. Try again shortly.")) return;
       const id = String(req.query?.id || "");
       const userEmail = me;
       if (!id) {
@@ -813,7 +957,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       // tombstone — the other side's conversation just lost messages
       // without explanation.)
       const ageMs = Date.now() - Date.parse(msg.createdAt || "");
-      if (Number.isFinite(ageMs) && ageMs > 24 * 60 * 60 * 1000) {
+      if (!Number.isFinite(ageMs) || ageMs > 24 * 60 * 60 * 1000) {
         sendJson(res, 403, { message: "Messages can only be deleted for everyone within 24 hours of sending" });
         return;
       }
@@ -843,6 +987,9 @@ export default async function handler(req: any, res: any): Promise<void> {
         ...msg,
         text: "",
         attachment: null,
+        // editHistory kept up to 5 prior versions: deleting for everyone
+        // must not leave edited-away text readable via the API.
+        editHistory: [],
         deletedForEveryone: true,
         deletedAt: new Date().toISOString(),
       };
@@ -871,10 +1018,7 @@ export default async function handler(req: any, res: any): Promise<void> {
     // ---- POST: "Delete for me" (hide for one user) ----
     if (req.method === "POST" && body.action === "hide") {
       const rlHide = await checkRateLimit(`msg:hide:${me}`, 60, 10 * 60 * 1000);
-      if (!rlHide.allowed && !rlHide.tableMissing) {
-        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlHide.retryAfter) });
-        return;
-      }
+      if (limited(res, rlHide, "Too many requests. Try again shortly.")) return;
       const id = String(body.id || "");
       const userEmail = me;
       if (!id) {
@@ -899,7 +1043,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
       }
-      sendJson(res, 200, { message: msg });
+      sendJson(res, 200, { message: stripMessageForViewer(msg, userEmail) });
       return;
     }
 
@@ -911,10 +1055,7 @@ export default async function handler(req: any, res: any): Promise<void> {
     // may block them; only the blocker may lift their own block.
     if (req.method === "POST" && (body.action === "block" || body.action === "unblock")) {
       const rlBlock = await checkRateLimit(`msg:block:${me}`, 20, 10 * 60 * 1000);
-      if (!rlBlock.allowed && !rlBlock.tableMissing) {
-        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlBlock.retryAfter) });
-        return;
-      }
+      if (limited(res, rlBlock, "Too many requests. Try again shortly.")) return;
       const eventId = String(body.eventId || "");
       const target = norm(body.blockedEmail || body.recipientEmail || "");
       if (!eventId || !isEmail(target)) {
@@ -931,8 +1072,10 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       let existing: any[] = [];
+      let blocks: any[] = [];
       try {
         existing = await loadMessagesFor(me);
+        blocks = await loadBlocksFor(me);
       } catch {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
@@ -942,10 +1085,10 @@ export default async function handler(req: any, res: any): Promise<void> {
           sendJson(res, 403, { message: "You can only block someone you have a conversation with" });
           return;
         }
-        if (!findBlock(existing, eventId, me, target)) {
+        if (!findBlock(blocks, eventId, me, target)) {
           try {
             await storeMessage({
-              id: `block-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              id: `block-${Date.now()}-${randomTokenHex(4)}`,
               type: "block",
               eventId,
               blockerEmail: me,
@@ -960,7 +1103,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 200, { blocked: true });
         return;
       }
-      const mine = existing.filter((m: any) => m.type === "block" && m.eventId === eventId && m.blockerEmail === me && m.blockedEmail === target);
+      const mine = blocks.filter((m: any) => m.eventId === eventId && m.blockerEmail === me && m.blockedEmail === target);
       for (const row of mine) {
         try {
           await fetchJson(
@@ -980,10 +1123,67 @@ export default async function handler(req: any, res: any): Promise<void> {
     // The path pattern is the same one send() enforces, and the random
     // suffix makes other users' paths unguessable.
     if (req.method === "POST" && body.action === "delete-upload") {
+      const rlDelUp = await checkRateLimit(`msg:delete-upload:${me}`, 20, 10 * 60 * 1000);
+      if (limited(res, rlDelUp, "Too many requests. Try again shortly.")) return;
       const path = String(body.path || "");
       const pathOk = /^[A-Za-z0-9_-]+\/[0-9]+-[a-z0-9]+\.[A-Za-z0-9]+$/.test(path);
       if (!pathOk) {
         sendJson(res, 400, { message: "Invalid attachment path" });
+        return;
+      }
+      // Authorization: the path's first segment is the event folder.
+      // The caller must be a participant in a thread for that event,
+      // and the path must not be referenced by any stored message for
+      // the event — referenced attachments go through the message
+      // DELETE flow (which verifies Storage deletion before tombstoning).
+      // This endpoint exists only to clean up orphaned uploads from
+      // failed sends.
+      const eventId = path.split("/")[0];
+      const event = await loadEvent(eventId);
+      if (!event) {
+        sendJson(res, 404, { message: "Event not found" });
+        return;
+      }
+      let existing: any[] = [];
+      try {
+        existing = await loadMessagesFor(me);
+      } catch {
+        sendJson(res, 503, { message: "Messages are not set up yet" });
+        return;
+      }
+      const organizerEmail = organizerEmailOf(event);
+      const isParticipant =
+        me === organizerEmail ||
+        threadPairExists(existing, eventId, me, organizerEmail) ||
+        existing.some((m: any) => m.eventId === eventId && (m.senderEmail === me || m.recipientEmail === me));
+      if (!isParticipant) {
+        sendJson(res, 403, { message: "You are not part of this conversation" });
+        return;
+      }
+      // Referenced anywhere for this event? Refuse — delete the message.
+      let referenced = false;
+      // Page the whole event thread: a 1,000-row cap could miss a
+      // referenced attachment past page 1. On read failure FAIL CLOSED
+      // (503) — a Supabase blip must not turn the safety check into a
+      // deletion of a live message's attachment.
+      try {
+        let offset = 0;
+        for (;;) {
+          const { ok, body: rows } = await fetchJson(
+            `${supabaseBase()}/rest/v1/messages?select=data&data->>eventId=eq.${encodeURIComponent(eventId)}&limit=1000&offset=${offset}`,
+            { headers: supabaseHeaders() },
+          );
+          if (!ok || !Array.isArray(rows)) throw new Error("messages read failed");
+          if (rows.some((row: any) => row.data?.attachment?.path === path)) { referenced = true; break; }
+          if (rows.length < 1000) break;
+          offset += 1000;
+        }
+      } catch {
+        sendJson(res, 503, { message: "Could not verify the attachment is unreferenced. Try again shortly." });
+        return;
+      }
+      if (referenced) {
+        sendJson(res, 409, { message: "This attachment belongs to a sent message — delete the message instead" });
         return;
       }
       await deleteAttachmentObject(path);
@@ -994,10 +1194,7 @@ export default async function handler(req: any, res: any): Promise<void> {
     // ---- POST: signed upload URL ----
     if (req.method === "POST" && body.action === "upload-url") {
       const rlUpload = await checkRateLimit(`msg:upload:${me}`, 20, 10 * 60 * 1000);
-      if (!rlUpload.allowed && !rlUpload.tableMissing) {
-        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlUpload.retryAfter) });
-        return;
-      }
+      if (limited(res, rlUpload, "Too many requests. Try again shortly.")) return;
       const eventId = String(body.eventId || "");
       const sender = me;
       const fileName = String(body.fileName || "");
@@ -1038,13 +1235,15 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       let existing: any[] = [];
+      let blocks: any[] = [];
       try {
         existing = await loadMessagesFor(sender);
+        blocks = await loadBlocksFor(sender);
       } catch {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
       }
-      const denied = authorizeContact(event, sender, recipient, existing);
+      const denied = authorizeContact(event, sender, recipient, existing, blocks);
       if (denied) {
         sendJson(res, 403, { message: denied });
         return;
@@ -1056,7 +1255,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 409, { message: "This event is not open for new messages" });
         return;
       }
-      const path = `${sanitizePathSegment(eventId)}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
+      const path = `${sanitizePathSegment(eventId)}/${Date.now()}-${randomTokenHex(16)}.${ext}`;
       // Upload signed URLs are a DIFFERENT endpoint from download
       // signed URLs, and mixing them up fails in confusing ways:
       //   - POST /object/sign/... signs a DOWNLOAD link, so it 404s
@@ -1105,10 +1304,7 @@ export default async function handler(req: any, res: any): Promise<void> {
     // ---- POST: send a message ----
     if (req.method === "POST") {
       const rlSend = await checkRateLimit(`msg:send:${me}`, 60, 60 * 60 * 1000);
-      if (!rlSend.allowed && !rlSend.tableMissing) {
-        sendJson(res, 429, { message: "Too many messages. Try again shortly." }, { "Retry-After": String(rlSend.retryAfter) });
-        return;
-      }
+      if (limited(res, rlSend, "Too many messages. Try again shortly.")) return;
       const eventId = String(body.eventId || "");
       const sender = me;
       // Display names are server-derived, never caller-supplied: the
@@ -1187,13 +1383,15 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       let existing: any[] = [];
+      let blocks: any[] = [];
       try {
         existing = await loadMessagesFor(sender);
+        blocks = await loadBlocksFor(sender);
       } catch {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
       }
-      const denied = authorizeContact(event, sender, recipient, existing);
+      const denied = authorizeContact(event, sender, recipient, existing, blocks);
       if (denied) {
         sendJson(res, 403, { message: denied });
         return;
@@ -1210,9 +1408,9 @@ export default async function handler(req: any, res: any): Promise<void> {
       // row instead of storing a second one.
       const idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.slice(0, 100) : "";
       if (idempotencyKey) {
-        const prior = existing.find((m: any) => m.idempotencyKey === idempotencyKey && m.senderEmail === sender);
+        const prior = await loadMessageByIdempotencyKey(idempotencyKey, sender).catch(() => null);
         if (prior) {
-          sendJson(res, 200, { message: prior, mailed: false, idempotent: true });
+          sendJson(res, 200, { message: stripMessageForViewer(prior, sender), mailed: false, idempotent: true });
           return;
         }
       }
@@ -1244,7 +1442,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         }
       } catch { /* fall back to the email address */ }
       const msg: any = {
-        id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        id: `msg-${Date.now()}-${randomTokenHex(4)}`,
         eventId,
         eventTitle: event.title || "",
         senderEmail: sender,
@@ -1265,18 +1463,22 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       // Best-effort alert; a mail failure must never unsend the message.
-      const mailed = await sendMail(buildMessageEmail(msg, event));
-      sendJson(res, 200, { message: msg, mailed });
+      // Per-recipient throttle (10/hour): without it one sender can fire
+      // 60 alert emails/hour at any organizer.
+      let mailed = false;
+      const recentMails = await countRecentMessageMails(recipient).catch(() => null);
+      if (recentMails === null || recentMails < 10) {
+        mailed = await sendMail(buildMessageEmail(msg, event));
+        if (mailed) await logMessageMail(recipient);
+      }
+      sendJson(res, 200, { message: stripMessageForViewer(msg, sender), mailed });
       return;
     }
 
     // ---- PATCH: edit text (own message, within 1 hour) / mark read ----
     if (req.method === "PATCH") {
       const rlPatch = await checkRateLimit(`msg:patch:${me}`, 60, 10 * 60 * 1000);
-      if (!rlPatch.allowed && !rlPatch.tableMissing) {
-        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlPatch.retryAfter) });
-        return;
-      }
+      if (limited(res, rlPatch, "Too many requests. Try again shortly.")) return;
       const id = String(req.query?.id || "");
       if (body.text !== undefined) {
         const editor = me;
@@ -1317,7 +1519,7 @@ export default async function handler(req: any, res: any): Promise<void> {
           sendJson(res, 503, { message: "Messages are not set up yet" });
           return;
         }
-        sendJson(res, 200, { message: msg });
+        sendJson(res, 200, { message: stripMessageForViewer(msg, me) });
         return;
       }
       const recipient = me;
@@ -1341,7 +1543,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
       }
-      sendJson(res, 200, { message: msg });
+      sendJson(res, 200, { message: stripMessageForViewer(msg, recipient) });
       return;
     }
 

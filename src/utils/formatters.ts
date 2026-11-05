@@ -68,6 +68,19 @@ export function formatEventLocation(event: { state?: string; city?: string }): s
   return [event.state, event.city].filter(Boolean).join(', ');
 }
 
+// A stored map link is rendered as an <a href>. The server validates
+// it on save, but defence in depth: never trust a stored URL at render
+// time (a legacy or directly-written row could carry javascript:).
+export function isSafeHttpUrl(value: string): boolean {
+  if (!value) return false;
+  try {
+    const u = new URL(value);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 export function getMapsSearchUrl(address: string, city: string = 'Metro City'): string {
   const query = encodeURIComponent(`${address}, ${city}`);
   return `https://www.google.com/maps/search/?api=1&query=${query}`;

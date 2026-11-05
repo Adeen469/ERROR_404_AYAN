@@ -36,6 +36,21 @@ function notify(user: UserProfile | null) {
   listeners.forEach((cb) => cb(user));
 }
 
+// Clear the viewer-scoped events cache (sessionStorage) so owner-viewer
+// payloads (incl. organizer email) don't linger in a shared tab after
+// logout — the cache TTL is 60s, but logout should not leave another
+// minute of the previous user's data behind. Done inline (not via
+// events-service.clearEventsCache) to avoid an import cycle:
+// events-service already imports auth-service.
+function clearEventsSessionCache(): void {
+  try {
+    for (let i = sessionStorage.length - 1; i >= 0; i--) {
+      const k = sessionStorage.key(i);
+      if (k && k.startsWith("locora-events-cache:")) sessionStorage.removeItem(k);
+    }
+  } catch { /* storage unavailable: nothing to clear */ }
+}
+
 // Account emails for local sign-in / sign-up (Google sign-ins are
 // covered by the callback page instead, so this never runs for them).
 // Fire-and-forget with keepalive: the /api/notify endpoint caps sends
@@ -109,7 +124,7 @@ export const authService = {
   async signup(name: string, email: string, password?: string): Promise<UserProfile> {
     // Every new account starts as an attendee. Organizer status is granted
     // later by an admin approval, never chosen at sign-up.
-    if (!password || password.length < 6) throw new Error('Password must be at least 6 characters');
+    if (!password || password.length < 8) throw new Error('Password must be at least 8 characters');
     if (ADMIN_EMAILS.includes(email.trim().toLowerCase())) {
       throw new Error('Admin accounts must sign in with Google.');
     }
@@ -125,6 +140,7 @@ export const authService = {
     try { await apiClient.post('/auth/logout', {}); } catch { /* cookie clear is best-effort; local state still clears */ }
     localStorage.removeItem(USER_STORAGE_KEY);
     localStorage.removeItem(TOKEN_STORAGE_KEY);
+    clearEventsSessionCache();
     // The per-email backup (utils/saved-profile.ts) intentionally stays:
     // it is what the next login restores the saved number from.
     // The server token is revoked server-side (revoked_tokens table),
@@ -142,6 +158,7 @@ export const authService = {
     } catch { /* local state still clears below */ }
     localStorage.removeItem(USER_STORAGE_KEY);
     localStorage.removeItem(TOKEN_STORAGE_KEY);
+    clearEventsSessionCache();
     notify(null);
     return result;
   },

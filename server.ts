@@ -723,8 +723,21 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Locora Full-Stack Server listening at http://0.0.0.0:${PORT}`);
+  // SECURITY: this Express server is a LOCAL-DEV backend only — it has
+  // no authentication on any route (anyone can POST /api/auth/google
+  // with a self-chosen role, overwrite users, or mass-assign events).
+  // Refuse to start in production, and bind to localhost only, so
+  // deploying the repo elsewhere never exposes an open backend.
+  // (Vercel does not run this file at all; production uses api/.)
+  if (IS_PROD) {
+    console.error(
+      "server.ts is local-dev only and refuses to start with NODE_ENV=production. " +
+      "Use the Vercel serverless functions in api/ instead.",
+    );
+    process.exit(1);
+  }
+  app.listen(PORT, '127.0.0.1', () => {
+    console.log(`Locora Full-Stack Server listening at http://127.0.0.1:${PORT}`);
   });
 }
 

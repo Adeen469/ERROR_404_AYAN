@@ -129,7 +129,7 @@ export async function signSession(email: string, role: string, authProvider: str
 export async function verifySession(req: any): Promise<SessionUser | null> {
   try {
     const secret = getEnv("SESSION_SECRET");
-    if (!secret) return null;
+    if (!secret || secret.length < 32) return null;
     const token = parseCookies(req).locora_session;
     if (!token) return null;
     const parts = token.split(".");
@@ -146,7 +146,12 @@ export async function verifySession(req: any): Promise<SessionUser | null> {
         const exp = rev.body[0].data?.expiresAt;
         if (!exp || new Date(exp).getTime() > Date.now()) return null;
       }
-    } catch {}
+    } catch {
+      // Fail closed: a Supabase error must not revive a revoked token.
+      // (A missing revoked_tokens table returns ok:false, not a throw,
+      // so the table-missing path still behaves as before.)
+      return null;
+    }
     try {
       const userRow = await loadUserByEmail(email);
       if (userRow && userRow.data && typeof userRow.data.sessionVersion === "number") {
@@ -157,7 +162,12 @@ export async function verifySession(req: any): Promise<SessionUser | null> {
           return null;
         }
       }
-    } catch {}
+    } catch {
+      // Fail closed: without the version check, a token invalidated by
+      // "sign out everywhere" or a password reset would be accepted
+      // again during a Supabase outage.
+      return null;
+    }
     return { email, role: payload.role || "attendee", authProvider: payload.authProvider || "local", sessionVersion: typeof payload.v === "number" ? payload.v : undefined };
   } catch {
     return null;
@@ -254,7 +264,35 @@ export function randomTokenHex(bytes = 32): string {
 // ---- Rate limiting (Supabase-backed counter, table rate_limits) ----
 export async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
   try {
+    // Bound the key: it embeds unauthenticated emails/IPs, so an
+    // unbounded key is unbounded row size (distinct keys are still
+    // pruned by the retention SQL in supabase-setup.sql §6).
+    key = String(key || "").slice(0, 512);
     if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
+    // Atomic path first: the rate_limit_hit RPC (see
+    // SUPABASE_RPC_SETUP.md) increments and checks in one Postgres
+    // call, so parallel bursts cannot all read the same count and
+    // slip under the limit. Falls back to the read-modify-write path
+    // below when the RPC has not been created yet.
+    try {
+      const rpc = await fetchJson(`${supabaseBase()}/rest/v1/rpc/rate_limit_hit`, {
+        method: "POST",
+        headers: supabaseHeaders(),
+        body: JSON.stringify({ p_key: key, p_limit: limit, p_window_ms: windowMs }),
+      });
+      if (rpc.ok) {
+        const r = rpc.body;
+        if (typeof r === "boolean") return { allowed: r, retryAfter: 0, tableMissing: false };
+        if (r && typeof r === "object") return { allowed: r.allowed !== false, retryAfter: Number(r.retry_after || 0), tableMissing: false };
+      }
+      if (rpc.status === 404 || rpc.status === 400) {
+        // RPC (or the rate_limits table) does not exist yet: the
+        // legacy path below reports tableMissing properly.
+      } else if (!rpc.ok) {
+        // Transient RPC error: fall through to the legacy path rather
+        // than guessing.
+      }
+    } catch { /* fall through to the legacy path */ }
     const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
     const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
     if (!ok) {
@@ -407,6 +445,31 @@ export function esc(s: string): string {
 // never fail a registration.
 
 
+// Targeted reads (PostgREST jsonb filters, same pattern as messages):
+// every hot path used to load the whole table and filter in memory.
+// The filter is built HERE from field/value pairs: values are always
+// encodeURIComponent'd and the operator is always `eq.`, so no caller
+// can smuggle a raw filter string (and a future operator) past the
+// service-role key.
+async function loadRegistrationsWhere(pairs: [string, string][]): Promise<any[]> {
+  const filter = pairs.map(([field, value]) => `${field}=eq.${encodeURIComponent(value)}`).join("&");
+  const { ok, body } = await fetchJson(
+    `${supabaseBase()}/rest/v1/registrations?select=id,data&${filter}&limit=1000`,
+    { headers: supabaseHeaders() },
+  );
+  if (!ok) throw new Error("registrations table read failed");
+  return Array.isArray(body) ? body.map((row: any) => row.data) : [];
+}
+
+async function loadRegistrationById(id: string): Promise<any | null> {
+  const { ok, body } = await fetchJson(
+    `${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(id)}&select=data`,
+    { headers: supabaseHeaders() },
+  );
+  if (!ok || !Array.isArray(body) || body.length === 0) return null;
+  return body[0].data;
+}
+
 async function loadAllRegistrations(): Promise<any[]> {
   // Paginated: PostgREST's default cap is 1,000 rows, so an unpaged
   // read silently dropped older registrations as the table grew.
@@ -432,8 +495,11 @@ async function hasVerifiedPhone(email: string, phone: string): Promise<boolean> 
   const digits = (s: string) => (s || "").replace(/\D/g, "");
   const dp = digits(phone || "");
   if (!email || !dp) return false;
+  // Targeted read by email: the old version loaded the whole table.
+  // (Exact match, same semantics as the in-memory `d.email !== email`
+  // check below.)
   const { ok, body } = await fetchJson(
-    `${supabaseBase()}/rest/v1/phone_verifications?select=data`,
+    `${supabaseBase()}/rest/v1/phone_verifications?select=data&data->>email=eq.${encodeURIComponent(email)}`,
     { headers: supabaseHeaders() },
   );
   if (!ok || !Array.isArray(body)) return false;
@@ -441,13 +507,26 @@ async function hasVerifiedPhone(email: string, phone: string): Promise<boolean> 
     const d = row.data || {};
     if (d.status !== "verified" || d.email !== email) return false;
     const rdp = digits(d.phone || "");
-    if (!rdp) return false;
-    if (rdp === dp) return true;
-    if (rdp.length >= 10 && dp.length >= 10) return rdp.slice(-10) === dp.slice(-10);
-    return false;
+    // Full digit equality only: matching on the last 10 digits let a
+    // number in another country code verify someone else's number.
+    return Boolean(rdp) && rdp === dp;
   });
 }
 
+
+// Fail closed on mutations when the limiter is unavailable: a missing
+// rate_limits table must never silently disable abuse protection on
+// writes. Reads keep the old fail-open behaviour. Returns true when a
+// response was already sent.
+function limited(res: any, rl: { allowed: boolean; retryAfter: number; tableMissing: boolean }, message: string): boolean {
+  if (rl.allowed) return false;
+  if (rl.tableMissing) {
+    sendJson(res, 503, { message: "Rate limiting is not configured. Please ask the admin to run the rate_limits setup SQL." });
+  } else {
+    sendJson(res, 429, { message }, { "Retry-After": String(rl.retryAfter) });
+  }
+  return true;
+}
 
 // Email content for a pending payment. Exported so it can be unit-tested
 // without sending. The recipient is the STORED event's organizer email
@@ -517,8 +596,8 @@ export function buildAttendeeConfirmationEmail(reg: any, event: any): { to: stri
   } catch {
     when = '';
   }
-  const link = `https://locora-hyperlocal.vercel.app/events/${reg.eventId}`;
-  const subject = `You're registered: ${title}`;
+  const link = `https://locora-hyperlocal.vercel.app/events/${encodeURIComponent(String(reg.eventId || ""))}`;
+  const subject = `You're registered: ${String(title).replace(/[\r\n]+/g, " ")}`;
   const lines = [
     `You're registered for "${title}".`,
     `Your ticket code: ${reg.ticketCode}`,
@@ -598,19 +677,27 @@ function newTicketCode(): string {
   return `LOC-${out}-TK`;
 }
 
+// Razorpay Basic auth (shared by the refund + re-check calls below).
+function razorpayAuth(): string {
+  const keyId = getEnv("RAZORPAY_KEY_ID");
+  const secret = getEnv("RAZORPAY_KEY_SECRET");
+  if (!keyId || !secret) return "";
+  const raw = `${keyId}:${secret}`;
+  try { return `Basic ${(globalThis as any).btoa(raw)}`; } catch {
+    const Buf = (globalThis as any).Buffer;
+    if (Buf) return `Basic ${Buf.from(raw, "utf-8").toString("base64")}`;
+  }
+  return "";
+}
+
 // Full refund of a captured Razorpay payment (attendee-cancelled paid
 // passes). The organizer's dashboard is the fallback when this fails.
+// If the refund call itself fails, the payment is re-checked first:
+// a parallel refund (or a response lost to a timeout) may already have
+// moved the money, and recording "failed" then would be wrong.
 async function refundRazorpayPayment(paymentId: string): Promise<{ ok: boolean; refundId?: string }> {
   try {
-    const keyId = getEnv("RAZORPAY_KEY_ID");
-    const secret = getEnv("RAZORPAY_KEY_SECRET");
-    if (!keyId || !secret) return { ok: false };
-    const raw = `${keyId}:${secret}`;
-    let auth = "";
-    try { auth = `Basic ${(globalThis as any).btoa(raw)}`; } catch {
-      const Buf = (globalThis as any).Buffer;
-      if (Buf) auth = `Basic ${Buf.from(raw, "utf-8").toString("base64")}`;
-    }
+    const auth = razorpayAuth();
     if (!auth) return { ok: false };
     const res = await fetchJson(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}/refund`, {
       method: "POST",
@@ -618,6 +705,20 @@ async function refundRazorpayPayment(paymentId: string): Promise<{ ok: boolean; 
       body: JSON.stringify({}),
     });
     if (res.ok && res.body?.id) return { ok: true, refundId: res.body.id };
+    // Re-check before reporting failure: was the payment already
+    // refunded (parallel cancel / lost response)?
+    try {
+      const pay = await fetchJson(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, {
+        headers: { Authorization: auth },
+      });
+      if (pay.ok && Number(pay.body?.amount_refunded || 0) > 0) {
+        const list = await fetchJson(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}/refunds`, {
+          headers: { Authorization: auth },
+        });
+        const first = Array.isArray(list.body?.items) ? list.body.items[0] : null;
+        return { ok: true, refundId: first?.id };
+      }
+    } catch { /* fall through to failure */ }
     return { ok: false };
   } catch {
     return { ok: false };
@@ -661,7 +762,24 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rl.retryAfter) });
         return;
       }
-      const all = await loadAllRegistrations();
+      // Targeted reads: pending rows only for counts, one row for ?id=,
+      // the event's rows for ?eventId=, the caller's own rows otherwise.
+      // (Previously every GET pulled the whole table, up to 10 pages.)
+      let all: any[];
+      try {
+        if (q.get("pendingCounts") === "1") {
+          all = await loadRegistrationsWhere([["data->>status", "pending"]]);
+        } else if (q.get("id")) {
+          const one = await loadRegistrationById(q.get("id") || "");
+          all = one ? [one] : [];
+        } else if (q.get("eventId")) {
+          all = await loadRegistrationsWhere([["data->>eventId", q.get("eventId") || ""]]);
+        } else {
+          all = await loadRegistrationsWhere([["data->>userEmail", me]]);
+        }
+      } catch {
+        all = await loadAllRegistrations();
+      }
       if (q.get("pendingCounts") === "1") {
         // Only counts for events this caller organises (or admins).
         const events = await loadAllEventsForCounts();
@@ -704,13 +822,20 @@ export default async function handler(req: any, res: any): Promise<void> {
       // Rate limit: every pending row emails the organizer, so an
       // unlimited POST was an organizer-inbox spam vector.
       const rlPost = await checkRateLimit(`reg:post:${me}`, 30, 60 * 60 * 1000);
-      if (!rlPost.allowed && !rlPost.tableMissing) {
-        sendJson(res, 429, { message: "Too many registrations. Try again shortly." }, { "Retry-After": String(rlPost.retryAfter) });
-        return;
-      }
+      if (limited(res, rlPost, "Too many registrations. Try again shortly.")) return;
       const reg = await readBody(req);
       if (!reg || !reg.id || !reg.eventId || !reg.userId) {
         sendJson(res, 400, { message: "Registration needs id, eventId and userId" });
+        return;
+      }
+      // Registration ids are client-supplied correlation ids: bound the
+      // format and length (create-order stores receipt =
+      // registrationId.slice(0, 40), so an id longer than 40 chars
+      // could never complete its own paid flow). Runs before the
+      // reactivation merge below, so a stored legacy id is never
+      // rejected here.
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(String(reg.id))) {
+        sendJson(res, 400, { message: "Invalid registration id" });
         return;
       }
       // Identity is the JWT email, never the body email.
@@ -739,10 +864,16 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 403, { message: "Organizers cannot register for their own event" });
         return;
       }
-      const allRegs = await loadAllRegistrations();
       // Server-side dedupe (the client check was local-storage only, so
       // a second device or tab created a second pass and a second
       // count bump). An active row is returned as-is, never duplicated.
+      // Targeted read: only this event + this user's rows.
+      let allRegs: any[];
+      try {
+        allRegs = await loadRegistrationsWhere([["data->>eventId", reg.eventId], ["data->>userEmail", me]]);
+      } catch {
+        allRegs = await loadAllRegistrations();
+      }
       const existingActive = allRegs.find((r: any) => r.eventId === reg.eventId && norm(r.userEmail) === me && (r.status === "pending" || r.status === "confirmed"));
       if (existingActive) {
         sendJson(res, 200, stripReg(existingActive, me, false));
@@ -768,23 +899,56 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 400, { message: "Paid events use Razorpay checkout — manual payments are no longer accepted" });
         return;
       }
+      // Status is an allowlist: a fresh POST creates a pending or
+      // confirmed row only. Any other status ("rejected", "weird", …)
+      // used to be stored verbatim — and on those paths the
+      // client-supplied ticketCode survived too.
+      if (reg.status !== "pending" && reg.status !== "confirmed") {
+        sendJson(res, 400, { message: "Invalid registration status" });
+        return;
+      }
       // Server-owned fields are never caller-writable: a crafted row
       // must not smuggle holdsSpot=true (a free seat on approval), a
       // chosen ticket code, or payment markers past the guards. Ticket
       // codes are always generated here, never kept from the client.
+      // paymentMethod stays as a flow marker only ('razorpay' routes the
+      // row to the Razorpay flow); the ORDER/PAYMENT ids, refund markers
+      // and paidAt are never trusted from the body — verify sets them
+      // only after a captured payment is fetched from Razorpay. Without
+      // this, one captured payment could confirm passes on every
+      // same-priced event (order id planted on a fresh pending row), and
+      // a planted razorpayPaymentId let anyone refund someone else's
+      // payment by cancelling their own row.
       reg.holdsSpot = false;
       reg.userEmail = me;
-      if (reg.status === "confirmed") reg.ticketCode = newTicketCode();
-      if (reg.status === "pending") reg.ticketCode = "";
+      reg.checkedIn = false;
+      delete reg.razorpayOrderId;
+      delete reg.razorpayPaymentId;
+      delete reg.refundId;
+      delete reg.refundStatus;
+      delete reg.paidAt;
+      delete reg.currency;
+      try {
+        const profile = await loadUserByEmail(me);
+        if (profile?.id) reg.userId = profile.id;
+      } catch { /* keep the client-supplied userId */ }
+      // Ticket codes are always generated here, never kept from the
+      // client — on every path, including statuses the allowlist above
+      // already rejected (defence in depth if the allowlist moves).
+      reg.ticketCode = reg.status === "confirmed" ? newTicketCode() : "";
       // Capacity is enforced here, not just in the UI: a confirmed row
       // past capacity is refused instead of overbooking the event.
+      // The read below is only a fast path — the authoritative gate is
+      // the seat reservation (bumpEventCount) before the insert.
       if (reg.status === "confirmed" && event.capacity && Number(event.registeredCount || 0) >= Number(event.capacity)) {
         sendJson(res, 409, { message: "This event is at full capacity" });
         return;
       }
       // Expected-amount snapshot for the Razorpay order (the amount
-      // create-order charges and verify checks against).
+      // create-order charges and verify checks against). A free event
+      // never carries an amount.
       if (Number(event.price) > 0) reg.amountPaise = Math.round(Number(event.price) * 100);
+      else delete reg.amountPaise;
       reg.registeredAt = reg.registeredAt || new Date().toISOString();
       // Do not store a full nested event with organiser email/UPI.
       // Store only the public snapshot the UI needs.
@@ -792,23 +956,51 @@ export default async function handler(req: any, res: any): Promise<void> {
       try {
         reg.phoneVerified = (await hasVerifiedPhone(reg.userEmail, reg.userPhone)) ? true : undefined;
       } catch { reg.phoneVerified = undefined; }
+      // Seat reservation is the authoritative capacity gate: reserve
+      // BEFORE storing, so two concurrent last-seat requests cannot both
+      // confirm (the old check-then-insert + fire-and-forget bump
+      // overbooked). On a store failure the reservation is released.
+      let reserved = false;
+      if (reg.status === "confirmed") {
+        reserved = await bumpEventCount(reg.eventId, 1).catch(() => false);
+        if (!reserved) {
+          sendJson(res, 409, { message: "This event is at full capacity" });
+          return;
+        }
+      }
       let stored: any = null;
       if (reactivating) {
         const merged = { ...existingCancelled, ...reg, id: existingCancelled.id };
+        // The cancelled row's payment lifecycle is over: its order id,
+        // payment id, refund markers and paidAt must not survive into
+        // the new row (a stale refundId used to suppress the next
+        // refund, and a stale order id bricked re-payment entirely).
+        delete merged.razorpayOrderId;
+        delete merged.razorpayPaymentId;
+        delete merged.refundId;
+        delete merged.refundStatus;
+        delete merged.paidAt;
+        delete merged.currency;
+        merged.checkedIn = false;
+        merged.holdsSpot = false;
         const { ok: patchOk, body: patchBody } = await fetchJson(`${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(reg.id)}`, {
           method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: merged }),
         });
-        if (!patchOk) { sendJson(res, 500, { message: "Failed to store registration" }); return; }
+        if (!patchOk) {
+          if (reserved) { try { await bumpEventCount(reg.eventId, -1); } catch {} }
+          sendJson(res, 500, { message: "Failed to store registration" }); return;
+        }
         stored = Array.isArray(patchBody) && patchBody.length > 0 ? patchBody[0].data : merged;
       } else {
         const { ok, body } = await fetchJson(`${supabaseBase()}/rest/v1/registrations`, {
           method: "POST", headers: supabaseHeaders(), body: JSON.stringify({ id: reg.id, data: reg }),
         });
-        if (!ok) { sendJson(res, 500, { message: "Failed to store registration" }); return; }
+        if (!ok) {
+          if (reserved) { try { await bumpEventCount(reg.eventId, -1); } catch {} }
+          sendJson(res, 500, { message: "Failed to store registration" }); return;
+        }
         stored = Array.isArray(body) && body.length > 0 ? body[0].data : reg;
       }
-      // Server-side count: a confirmed registration takes a slot now.
-      if (stored && stored.status === "confirmed") { try { await bumpEventCount(stored.eventId, 1); } catch {} }
       if (stored) {
         try {
           // Only confirmed rows mail here (free instant passes). A
@@ -823,11 +1015,18 @@ export default async function handler(req: any, res: any): Promise<void> {
     }
 
     if (req.method === "PATCH") {
+      const rlPatch = await checkRateLimit(`reg:patch:${me}`, 60, 10 * 60 * 1000);
+      if (limited(res, rlPatch, "Too many requests. Try again shortly.")) return;
       const id = q.get("id");
       if (!id) { sendJson(res, 400, { message: "Pass id" }); return; }
       const updates = await readBody(req);
-      const all = await loadAllRegistrations();
-      const existing = all.find((r: any) => r.id === id);
+      let existing: any = null;
+      try {
+        existing = await loadRegistrationById(id);
+      } catch {
+        const all = await loadAllRegistrations();
+        existing = all.find((r: any) => r.id === id);
+      }
       if (!existing) { sendJson(res, 404, { message: "Registration not found" }); return; }
       const nextStatus = updates.status;
       const event = await loadEvent(existing.eventId);
@@ -919,24 +1118,28 @@ async function loadAllEventsForCounts(): Promise<Record<string, any>> {
   return out;
 }
 
-async function bumpEventCount(eventId: string, delta: number): Promise<void> {
+async function bumpEventCount(eventId: string, delta: number): Promise<boolean> {
   // Atomic RPC first (see SUPABASE_RPC_SETUP.md): increments only when
-  // a seat is free, never past capacity, in one statement. Until that
-  // function exists in Supabase, fall back to a capped read-modify-write.
+  // a seat is free, never past capacity, in one statement. Returns
+  // whether the count actually moved — callers gate confirmations on
+  // it, so a full event refuses the pass instead of confirming first
+  // and bumping (fire-and-forget) afterwards. Until the RPC exists in
+  // Supabase, fall back to a capped read-modify-write.
   try {
     const rpc = await fetchJson(`${supabaseBase()}/rest/v1/rpc/adjust_event_count`, {
       method: "POST", headers: supabaseHeaders(),
       body: JSON.stringify({ p_event_id: eventId, p_delta: delta }),
     });
-    if (rpc.ok) return;
+    if (rpc.ok) return rpc.body === true;
   } catch { /* fall through to capped bump */ }
   const event = await loadEvent(eventId);
-  if (!event) return;
+  if (!event) return false;
   const capacity = Number(event.capacity || 0);
   const cap = capacity > 0 ? capacity : Number.MAX_SAFE_INTEGER;
   const next = Math.min(cap, Math.max(0, Number(event.registeredCount || 0) + delta));
-  if (next === Number(event.registeredCount || 0)) return;
-  await fetchJson(`${supabaseBase()}/rest/v1/events?id=eq.${encodeURIComponent(eventId)}`, {
+  if (next === Number(event.registeredCount || 0)) return false;
+  const patched = await fetchJson(`${supabaseBase()}/rest/v1/events?id=eq.${encodeURIComponent(eventId)}`, {
     method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: { ...event, registeredCount: next } }),
   });
+  return patched.ok;
 }

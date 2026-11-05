@@ -45,8 +45,20 @@ function saveStoredRegistrations(list: AttendeeRegistration[]): void {
   }
 }
 
+// Client fallback only (the server issues the real code): 6
+// crypto-random characters, same alphabet as the server. The old
+// LOC-<1000..9999>-TK via Math.random had only 9,000 values.
 function newTicketCode(): string {
-  return `LOC-${Math.floor(1000 + Math.random() * 9000)}-TK`;
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  try {
+    const bytes = new Uint8Array(6);
+    crypto.getRandomValues(bytes);
+    let out = '';
+    for (const b of bytes) out += chars[b % chars.length];
+    return `LOC-${out}-TK`;
+  } catch {
+    return `LOC-${Date.now().toString(36).toUpperCase()}-TK`;
+  }
 }
 
 // Shared rows win over local rows with the same id. Every registration
@@ -395,6 +407,12 @@ export const registrationsService = {
         }
         return updated;
       } catch (err) {
+        // Only a 503 (server unavailable) or a network failure (no
+        // status) falls back to a local flip. A 401/403/404/400 means
+        // the server refused the change — flipping locally would show
+        // a check-in the server never recorded. Re-throw those.
+        const status = (err as { status?: unknown } | null)?.status;
+        if (typeof status === 'number' && status !== 503) throw err;
         console.warn('Shared check-in unavailable, toggling locally:', err);
       }
     }

@@ -54,7 +54,13 @@ export function parseCookies(req: any): Record<string, string> {
 
 export function getClientIp(req: any): string {
   const fwd = req.headers?.["x-forwarded-for"] || "";
-  if (typeof fwd === "string" && fwd.trim()) return fwd.split(",")[0].trim();
+  // Last entry, not first: the first x-forwarded-for entry is
+  // client-controlled and trivially spoofed to dodge per-IP limits;
+  // Vercel appends the real connecting IP last.
+  if (typeof fwd === "string" && fwd.trim()) {
+    const parts = fwd.split(",").map((s: string) => s.trim()).filter(Boolean);
+    if (parts.length > 0) return parts[parts.length - 1];
+  }
   return req.headers?.["x-real-ip"] || "unknown";
 }
 
@@ -110,6 +116,7 @@ export interface SessionUser { email: string; role: string; authProvider: string
 export async function signSession(email: string, role: string, authProvider: string, sessionVersion = 0): Promise<string> {
   const secret = getEnv("SESSION_SECRET");
   if (!secret) throw new Error("SESSION_SECRET is not configured");
+  if (secret.length < 32) throw new Error("SESSION_SECRET must be at least 32 characters");
   const header = b64urlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
   const now = Math.floor(Date.now() / 1000);
   const payload = b64urlEncode(JSON.stringify({
@@ -123,7 +130,7 @@ export async function signSession(email: string, role: string, authProvider: str
 export async function verifySession(req: any): Promise<SessionUser | null> {
   try {
     const secret = getEnv("SESSION_SECRET");
-    if (!secret) return null;
+    if (!secret || secret.length < 32) return null;
     const token = parseCookies(req).locora_session;
     if (!token) return null;
     const parts = token.split(".");
@@ -140,7 +147,11 @@ export async function verifySession(req: any): Promise<SessionUser | null> {
         const exp = rev.body[0].data?.expiresAt;
         if (!exp || new Date(exp).getTime() > Date.now()) return null;
       }
-    } catch {}
+    } catch {
+      // Fail CLOSED: a Supabase error must not silently skip the
+      // revocation check (sign-out-everywhere would stop working).
+      return null;
+    }
     try {
       const userRow = await loadUserByEmail(email);
       if (userRow && userRow.data && typeof userRow.data.sessionVersion === "number") {
@@ -151,7 +162,11 @@ export async function verifySession(req: any): Promise<SessionUser | null> {
           return null;
         }
       }
-    } catch {}
+    } catch {
+      // Fail CLOSED: a Supabase error must not silently skip the
+      // session-version check (sign-out-everywhere would stop working).
+      return null;
+    }
     return { email, role: payload.role || "attendee", authProvider: payload.authProvider || "local", sessionVersion: typeof payload.v === "number" ? payload.v : undefined };
   } catch {
     return null;
@@ -248,7 +263,28 @@ export function randomTokenHex(bytes = 32): string {
 // ---- Rate limiting (Supabase-backed counter, table rate_limits) ----
 export async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
   try {
+    // Bound the key: it embeds unauthenticated emails/IPs, so an
+    // unbounded key is unbounded row size (distinct keys are still
+    // pruned by the retention SQL in supabase-setup.sql §6).
+    key = String(key || "").slice(0, 512);
     if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
+    // Atomic path first: the rate_limit_hit RPC (see
+    // SUPABASE_RPC_SETUP.md) increments and checks in one Postgres
+    // call, so parallel bursts cannot all read the same count.
+    // Falls back to the read-modify-write path below when the RPC has
+    // not been created yet.
+    try {
+      const rpc = await fetchJson(`${supabaseBase()}/rest/v1/rpc/rate_limit_hit`, {
+        method: "POST",
+        headers: supabaseHeaders(),
+        body: JSON.stringify({ p_key: key, p_limit: limit, p_window_ms: windowMs }),
+      });
+      if (rpc.ok) {
+        const r = rpc.body;
+        if (typeof r === "boolean") return { allowed: r, retryAfter: 0, tableMissing: false };
+        if (r && typeof r === "object") return { allowed: r.allowed !== false, retryAfter: Number(r.retry_after || 0), tableMissing: false };
+      }
+    } catch { /* fall through to the legacy path */ }
     const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
     const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
     if (!ok) {
@@ -363,12 +399,6 @@ export function esc(s: string): string {
 // If anything fails, this returns a plain HTML page explaining the most
 // likely cause instead of a blank screen or a raw JSON error.
 //
-// Calendar connect branch: /api/auth/google-calendar starts a flow with
-// the same redirect URI but state.purpose === "calendar". After the same
-// code exchange and ID-token verification as sign-in, this callback does
-// NOT sign anyone in: it stores the (encrypted) refresh token in Supabase
-// under the Locora user id from state, then sends the user back to
-// state.returnTo. See CALENDAR_SETUP.md for the table + console steps.
 
 // Self-contained: no imports from api/_lib, no Node-only modules.
 // The callback path must match an Authorized redirect URI registered in
@@ -394,55 +424,10 @@ function decodeState(value: string): Record<string, string> | null {
   }
 }
 
-// --- Google Calendar storage helpers (used only by the calendar branch) ---
-// The refresh token is encrypted with AES-GCM before it is stored. The
-// key is derived from GOOGLE_CLIENT_SECRET, which never leaves the
-// server, so a database read alone never yields a usable token. Only the
-// refresh token is stored long-term; access tokens are minted on demand
-// from it and never persisted.
-function base64EncodeBytes(bytes: Uint8Array): string {
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
-async function encryptRefreshToken(refreshToken: string): Promise<string> {
-  const subtle = (globalThis as any).crypto?.subtle;
-  if (!subtle) throw new Error("Web Crypto is unavailable in this runtime");
-  const secret = getEnv("GOOGLE_CLIENT_SECRET");
-  const keyMaterial = await subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode("locora-calendar-v1:" + secret),
-  );
-  const key = await subtle.importKey("raw", keyMaterial, "AES-GCM", false, ["encrypt"]);
-  const iv = new Uint8Array(12);
-  (globalThis as any).crypto.getRandomValues(iv);
-  const ciphertext = await subtle.encrypt(
-    { name: "AES-GCM", iv },
-    key,
-    new TextEncoder().encode(refreshToken),
-  );
-  const combined = new Uint8Array(iv.length + ciphertext.byteLength);
-  combined.set(iv, 0);
-  combined.set(new Uint8Array(ciphertext), iv.length);
-  return base64EncodeBytes(combined);
-}
-
-function calendarSupabaseHeaders(): Record<string, string> {
-  const key = getEnv("SUPABASE_SERVICE_ROLE_KEY");
-  return {
-    apikey: key,
-    Authorization: "Bearer " + key,
-    "Content-Type": "application/json",
-    Prefer: "return=representation,resolution=merge-duplicates",
-  };
-}
-
-
 function htmlPage(title: string, bodyHtml: string): string {
   return `<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>${title}</title></head>
+<head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>${esc(title)}</title></head>
 <body style="font-family: system-ui, sans-serif; max-width: 640px; margin: 48px auto; padding: 0 16px; color: #1E2320;">
 ${bodyHtml}
 </body>
@@ -454,7 +439,13 @@ function escapeForScript(json: string): string {
 }
 
 function sendText(res: any, status: number, body: string, contentType = "text/plain; charset=utf-8"): void {
-  res.writeHead(status, { "Content-Type": contentType });
+  // These pages carry no scripts, so they get a strict CSP of their
+  // own (the vercel.json CSP does not cover /api/* responses — see
+  // the success page below, which sets a nonce CSP).
+  res.writeHead(status, {
+    "Content-Type": contentType,
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  });
   res.end(body);
 }
 
@@ -475,7 +466,7 @@ function errorPage(res: any, status: number, heading: string, detail: string) {
     status,
     htmlPage(
       heading,
-      `<h1>${heading}</h1><p>${detail}</p><p><a href="/login">Back to sign in</a></p>`,
+      `<h1>${esc(heading)}</h1><p>${esc(detail)}</p><p><a href="/login">Back to sign in</a></p>`,
     ),
     "text/html; charset=utf-8",
   );
@@ -523,7 +514,13 @@ export default async function handler(req: any, res: any) {
 
   const state = decodeState(stateRaw);
   const cookies = parseCookies(req);
-  if (!state || !state.csrf || cookies.locora_oauth_state !== state.csrf) {
+  // The state cookie holds "csrf" (flows started before PKCE) or
+  // "csrf.codeVerifier" (new flows). Compare the csrf in constant
+  // time; the verifier is used in the token exchange below.
+  const cookieParts = String(cookies.locora_oauth_state || "").split(".");
+  const cookieCsrf = cookieParts[0] || "";
+  const codeVerifier = cookieParts[1] || "";
+  if (!state || !state.csrf || !ctEqual(cookieCsrf, state.csrf)) {
     return errorPage(
       res,
       400,
@@ -546,6 +543,17 @@ export default async function handler(req: any, res: any) {
       : "/dashboard";
   const redirectUri = getRedirectUri(req);
 
+  // The callback was rate-limit-free: an attacker could burn Google
+  // token exchanges and Supabase reads at will. Fail CLOSED when the
+  // rate_limits table is missing (see the setup SQL in the PR).
+  const rlCb = await checkRateLimit(`oauth:callback:${getClientIp(req)}`, 20, 60 * 60 * 1000);
+  if (rlCb.tableMissing) {
+    return errorPage(res, 503, "Sign-in is not available", "Rate limiting is not configured. Please ask the admin to run the rate_limits setup SQL.");
+  }
+  if (!rlCb.allowed) {
+    return errorPage(res, 429, "Too many sign-in attempts", "Too many sign-in attempts. Try again later.");
+  }
+
   // 1. Exchange the authorisation code for tokens.
   let tokenData: any;
   try {
@@ -558,6 +566,7 @@ export default async function handler(req: any, res: any) {
         client_secret: clientSecret,
         redirect_uri: redirectUri,
         grant_type: "authorization_code",
+        ...(codeVerifier ? { code_verifier: codeVerifier } : {}),
       }),
     });
     tokenData = await tokenRes.json();
@@ -583,12 +592,16 @@ export default async function handler(req: any, res: any) {
     );
   }
 
+  // The tokeninfo email, hoisted for the cross-check against the
+  // profile email after userinfo loads (section 3).
+  let tokenInfoEmail = "";
   // 2. Verify the ID token belongs to this OAuth client.
   try {
     const infoRes = await fetch(
       `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(tokenData.id_token)}`,
     );
     const info = await infoRes.json();
+    if (typeof info.email === "string") tokenInfoEmail = info.email;
     if (!infoRes.ok || info.aud !== clientId) {
       return errorPage(
         res,
@@ -598,138 +611,27 @@ export default async function handler(req: any, res: any) {
           "Check that GOOGLE_CLIENT_ID in Vercel matches the client used to start the sign-in.",
       );
     }
+    // The aud check alone is not enough: require the token to come
+    // from Google (iss), to be unexpired (exp), and to belong to a
+    // Google-verified email (email_verified) — the admin role is
+    // assigned from this email below.
+    const issOk = info.iss === "https://accounts.google.com" || info.iss === "accounts.google.com";
+    const expOk = (typeof info.exp === "string" || typeof info.exp === "number") && Number(info.exp) * 1000 > Date.now();
+    const verifiedOk = info.email_verified === "true" || info.email_verified === true;
+    if (!issOk || !expOk || !verifiedOk) {
+      return errorPage(
+        res,
+        400,
+        "Google sign-in could not be verified",
+        "The ID token returned by Google did not pass verification (issuer, expiry, or verified email). Please try again from the sign-in page.",
+      );
+    }
   } catch {
     return errorPage(
       res,
       502,
       "Could not verify the Google sign-in",
       "Token verification failed due to a network error. Please try again.",
-    );
-  }
-
-  // Calendar connect branch: same exchange + ID-token verification as
-  // sign-in above, but no sign-in happens here. Store the refresh token
-  // and send the user back to where they started.
-  if (state.purpose === "calendar") {
-    const calendarUserId =
-      typeof state.userId === "string" ? state.userId : "";
-    if (!calendarUserId || calendarUserId.length > 128) {
-      return errorPage(
-        res,
-        400,
-        "Google Calendar connection failed",
-        "The connection request did not carry a valid user. Please connect again from your profile page while signed in.",
-      );
-    }
-    if (!tokenData.refresh_token) {
-      return errorPage(
-        res,
-        400,
-        "Google Calendar connection incomplete",
-        "Google did not return a long-term connection token. This can happen " +
-          "if access was already granted without offline access. Remove Locora " +
-          "from your Google Account permissions (myaccount.google.com/permissions) " +
-          "and connect again from your profile page.",
-      );
-    }
-    // The Google account that consented — shown back in the profile page.
-    let calendarEmail = "";
-    try {
-      const userRes = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
-        headers: { Authorization: `Bearer ${tokenData.access_token}` },
-      });
-      if (userRes.ok) {
-        const info = await userRes.json();
-        calendarEmail = typeof info.email === "string" ? info.email : "";
-      }
-    } catch {
-      calendarEmail = "";
-    }
-    if (!calendarEmail) {
-      try {
-        calendarEmail = JSON.parse(base64urlDecode(tokenData.id_token.split(".")[1])).email || "";
-      } catch {
-        calendarEmail = "";
-      }
-    }
-    const supabaseUrl = getEnv("SUPABASE_URL");
-    const serviceKey = getEnv("SUPABASE_SERVICE_ROLE_KEY");
-    if (!supabaseUrl || !serviceKey) {
-      return errorPage(
-        res,
-        500,
-        "Google Calendar storage is not configured",
-        "SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing on the server, " +
-          "or the calendar_connections table has not been created yet. " +
-          "See CALENDAR_SETUP.md, then try connecting again.",
-      );
-    }
-    let encrypted: string;
-    try {
-      encrypted = await encryptRefreshToken(tokenData.refresh_token);
-    } catch {
-      return errorPage(
-        res,
-        502,
-        "Google Calendar connection failed",
-        "The connection token could not be secured for storage. Please try again.",
-      );
-    }
-    try {
-      const upsertRes = await fetch(
-        supabaseUrl.replace(/\/$/, "") + "/rest/v1/calendar_connections",
-        {
-          method: "POST",
-          headers: calendarSupabaseHeaders(),
-          body: JSON.stringify([
-            {
-              user_id: calendarUserId,
-              data: {
-                refresh_token_enc: encrypted,
-                google_email: calendarEmail,
-                scope: "calendar.events",
-                connected_at: new Date().toISOString(),
-              },
-            },
-          ]),
-        },
-      );
-      if (!upsertRes.ok) {
-        const detail = await upsertRes.text().catch(() => "");
-        return errorPage(
-          res,
-          502,
-          "Google Calendar connection could not be saved",
-          "The connection token could not be stored. " +
-            "Make sure the calendar_connections table exists in Supabase (see CALENDAR_SETUP.md). " +
-            (detail ? `Server said: ${detail.slice(0, 200)}` : ""),
-        );
-      }
-    } catch {
-      return errorPage(
-        res,
-        502,
-        "Google Calendar connection could not be saved",
-        "The connection token could not be stored due to a network error. Please try again.",
-      );
-    }
-    const secureCal = redirectUri.startsWith("https://") ? "; Secure" : "";
-    res.writeHead(200, {
-      "Content-Type": "text/html; charset=utf-8",
-      "Set-Cookie": `locora_oauth_state=; Path=/api/auth; HttpOnly; SameSite=Lax; Max-Age=0${secureCal}`,
-    });
-    return res.end(
-      htmlPage(
-        "Google Calendar connected",
-        `<p id="status">Google Calendar connected${calendarEmail ? ` as ${calendarEmail}` : ""} — taking you back…</p>
-        <p>Events you register for will now be added to your Google Calendar automatically.</p>
-        <script>
-          setTimeout(function () {
-            window.location.replace(${escapeForScript(JSON.stringify(returnTo))});
-          }, 900);
-        </script>
-        <noscript><p><a href="${returnTo}">Continue</a></p></noscript>`,
-      ),
     );
   }
 
@@ -767,11 +669,34 @@ export default async function handler(req: any, res: any) {
       "This Google account did not provide an email address, so an account cannot be created. Please try a different Google account.",
     );
   }
+  // The admin role is assigned from this email below, so it must be a
+  // Google-verified email — checked here on the profile payload too
+  // (the tokeninfo check above covers the ID token; this covers the
+  // userinfo response and the ID-token fallback the same way).
+  if (googleUser.email_verified !== true && googleUser.email_verified !== "true") {
+    return errorPage(
+      res,
+      400,
+      "Google account email is not verified",
+      "This Google account's email address is not verified by Google, so an account cannot be created. Please verify the email in your Google account and try again.",
+    );
+  }
 
-  // Admin emails are identifiers, not secrets. This email comes from
-  // Google's own userinfo response for the just-exchanged token, so it is
-  // verified by Google, not self-asserted by the visitor.
-  const ADMIN_EMAILS = ["mr.adeen946@gmail.com", "ayan.work937@gmail.com"];
+  // Cross-check: the tokeninfo email must match the profile email.
+  // Both come from the same Google token exchange, so a mismatch is
+  // not realistically attacker-controlled — but role assignment below
+  // uses the profile email, so the seam costs one line to close.
+  // (ADMIN_EMAILS is the module-level list at the top of this file;
+  // admin emails are identifiers, not secrets, and this email comes
+  // from Google's own userinfo response, not self-asserted.)
+  if (tokenInfoEmail && googleUser.email && tokenInfoEmail.toLowerCase() !== String(googleUser.email).toLowerCase()) {
+    return errorPage(
+      res,
+      400,
+      "Google sign-in could not be verified",
+      "The Google account email did not match between the token check and the profile response. Please try again.",
+    );
+  }
   const profile = {
     id: googleUser.sub,
     name: googleUser.name || "Community Member",
@@ -826,8 +751,16 @@ export default async function handler(req: any, res: any) {
   // credential), and persisting it in localStorage only widened the
   // blast radius of an XSS or a shared-device leak.
   const secure = redirectUri.startsWith("https://") ? "; Secure" : "";
+  // Per-response CSP nonce for this page's one inline script. The
+  // vercel.json CSP no longer allows 'unsafe-inline' in script-src,
+  // and it does not apply to /api/* responses at all — so this page
+  // sets its own policy with a fresh nonce per sign-in. (Verify with
+  // a live Google sign-in after deploy: the "Signing you in…" page
+  // must still redirect to the dashboard.)
+  const cspNonce = randomTokenHex(16);
   res.writeHead(200, {
     "Content-Type": "text/html; charset=utf-8",
+    "Content-Security-Policy": `default-src 'none'; script-src 'nonce-${cspNonce}'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
     "Set-Cookie": [
       `locora_oauth_state=; Path=/api/auth; HttpOnly; SameSite=Lax; Max-Age=0${secure}`,
       sessionCookie(jwt, req),
@@ -837,7 +770,7 @@ export default async function handler(req: any, res: any) {
     htmlPage(
       "Signing you in…",
       `<p id="status">Signing you in…</p>
-      <script>
+      <script nonce="${cspNonce}">
         var profile = ${profileJson};
         try {
           var prev = null;
