@@ -137,6 +137,7 @@ export interface SessionUser { email: string; role: string; authProvider: string
 export async function signSession(email: string, role: string, authProvider: string, sessionVersion = 0): Promise<string> {
   const secret = getEnv("SESSION_SECRET");
   if (!secret) throw new Error("SESSION_SECRET is not configured");
+  if (secret.length < 32) throw new Error("SESSION_SECRET must be at least 32 characters");
   const header = b64urlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
   const now = Math.floor(Date.now() / 1000);
   const payload = b64urlEncode(JSON.stringify({
@@ -150,7 +151,7 @@ export async function signSession(email: string, role: string, authProvider: str
 export async function verifySession(req: any): Promise<SessionUser | null> {
   try {
     const secret = getEnv("SESSION_SECRET");
-    if (!secret) return null;
+    if (!secret || secret.length < 32) return null;
     const token = parseCookies(req).locora_session;
     if (!token) return null;
     const parts = token.split(".");
@@ -167,7 +168,11 @@ export async function verifySession(req: any): Promise<SessionUser | null> {
         const exp = rev.body[0].data?.expiresAt;
         if (!exp || new Date(exp).getTime() > Date.now()) return null;
       }
-    } catch {}
+    } catch {
+      // Fail CLOSED: a Supabase error must not silently skip the
+      // revocation check (sign-out-everywhere would stop working).
+      return null;
+    }
     try {
       const userRow = await loadUserByEmail(email);
       if (userRow && userRow.data && typeof userRow.data.sessionVersion === "number") {
@@ -178,7 +183,11 @@ export async function verifySession(req: any): Promise<SessionUser | null> {
           return null;
         }
       }
-    } catch {}
+    } catch {
+      // Fail CLOSED: a Supabase error must not silently skip the
+      // session-version check (sign-out-everywhere would stop working).
+      return null;
+    }
     return { email, role: payload.role || "attendee", authProvider: payload.authProvider || "local", sessionVersion: typeof payload.v === "number" ? payload.v : undefined };
   } catch {
     return null;
@@ -230,31 +239,61 @@ export async function fetchJson(url: string, init?: any): Promise<{ ok: boolean;
   try { body = await res.json(); } catch { body = null; }
   return { ok: res.ok, status: res.status, body };
 }
+export const MAX_BODY_BYTES = 1024 * 1024;
 export function readBody(req: any): Promise<any> {
   return new Promise((resolve) => {
     try {
       const b = (req as any).body;
       if (b && typeof b === "object") return resolve(b);
       if (typeof b === "string" && b.length > 0) {
+        if (b.length > MAX_BODY_BYTES) { (req as any).__bodyTooLarge = true; return resolve({}); }
         try { return resolve(JSON.parse(b)); } catch { return resolve({}); }
       }
       let data = "";
+      let tooLarge = false;
       const timer = setTimeout(() => resolve({}), 3000);
-      req.on("data", (chunk: any) => { data += chunk; });
+      req.on("data", (chunk: any) => {
+        if (tooLarge) return;
+        data += chunk;
+        if (data.length > MAX_BODY_BYTES) {
+          tooLarge = true;
+          (req as any).__bodyTooLarge = true;
+          try { req.destroy?.(); } catch {}
+          clearTimeout(timer);
+          resolve({});
+        }
+      });
       req.on("end", () => { clearTimeout(timer); try { resolve(data ? JSON.parse(data) : {}); } catch { resolve({}); } });
       req.on("error", () => { clearTimeout(timer); resolve({}); });
     } catch { resolve({}); }
   });
 }
 
+// Fail-CLOSED rate-limit helper for mutations: a missing rate_limits
+// table returns 503 (not 429) so the admin knows to run the setup SQL
+// instead of silently running unprotected. Logout is exempt — a user
+// must always be able to sign out.
+function limited(res: any, rl: { allowed: boolean; retryAfter: number; tableMissing: boolean }, message: string): boolean {
+  if (rl.tableMissing) {
+    sendJson(res, 503, { message: "Rate limiting is not configured. Please ask the admin to run the rate_limits setup SQL." });
+    return true;
+  }
+  if (!rl.allowed) {
+    sendJson(res, 429, { message }, { "Retry-After": String(rl.retryAfter) });
+    return true;
+  }
+  return false;
+}
+
 // ---- Passwords (PBKDF2-SHA256 via WebCrypto, per-user salt, constant-time compare) ----
-// Format: pbkdf2$<saltHex>$<hashHex>$100000. No live passwords exist yet
-// (locora_users table is new in this fix), so no scrypt migration is needed.
+// Format: pbkdf2$<saltHex>$<hashHex>$<iterations>. New hashes use 600,000
+// iterations (OWASP); verifyPassword reads the count from the stored
+// row, so existing 100,000-iteration hashes keep working.
 export async function hashPassword(password: string): Promise<string> {
   const salt = bytesToHex(randomBytes(16));
   const key = await (globalThis as any).crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await (globalThis as any).crypto.subtle.deriveBits({ name: "PBKDF2", salt: hexToBytes(salt), iterations: 100000, hash: "SHA-256" }, key, 256);
-  return `pbkdf2$${salt}$${bytesToHex(new Uint8Array(bits))}$100000`;
+  const bits = await (globalThis as any).crypto.subtle.deriveBits({ name: "PBKDF2", salt: hexToBytes(salt), iterations: 600000, hash: "SHA-256" }, key, 256);
+  return `pbkdf2$${salt}$${bytesToHex(new Uint8Array(bits))}$600000`;
 }
 export async function verifyPassword(password: string, stored: string): Promise<boolean> {
   try {
@@ -275,7 +314,35 @@ export function randomTokenHex(bytes = 32): string {
 // ---- Rate limiting (Supabase-backed counter, table rate_limits) ----
 export async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
   try {
+    // Bound the key: it embeds unauthenticated emails/IPs, so an
+    // unbounded key is unbounded row size (distinct keys are still
+    // pruned by the retention SQL in supabase-setup.sql §6).
+    key = String(key || "").slice(0, 512);
     if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
+    // Atomic path first: the rate_limit_hit RPC (see
+    // SUPABASE_RPC_SETUP.md) increments and checks in one Postgres
+    // call, so parallel bursts cannot all read the same count and
+    // slip under the limit. Falls back to the read-modify-write path
+    // below when the RPC has not been created yet.
+    try {
+      const rpc = await fetchJson(`${supabaseBase()}/rest/v1/rpc/rate_limit_hit`, {
+        method: "POST",
+        headers: supabaseHeaders(),
+        body: JSON.stringify({ p_key: key, p_limit: limit, p_window_ms: windowMs }),
+      });
+      if (rpc.ok) {
+        const r = rpc.body;
+        if (typeof r === "boolean") return { allowed: r, retryAfter: 0, tableMissing: false };
+        if (r && typeof r === "object") return { allowed: r.allowed !== false, retryAfter: Number(r.retry_after || 0), tableMissing: false };
+      }
+      if (rpc.status === 404 || rpc.status === 400) {
+        // RPC (or the rate_limits table) does not exist yet: the
+        // legacy path below reports tableMissing properly.
+      } else if (!rpc.ok) {
+        // Transient RPC error: fall through to the legacy path rather
+        // than guessing.
+      }
+    } catch { /* fall through to the legacy path */ }
     const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
     const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
     if (!ok) {
@@ -414,19 +481,21 @@ async function handleLogin(req: any, res: any): Promise<void> {
   try {
     if (req.method !== "POST") { sendJson(res, 405, { message: "Method not allowed" }); return; }
     if (!getEnv("SUPABASE_URL") || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) { sendJson(res, 503, { message: "Sign-in is not configured yet" }); return; }
-    if (!getEnv("SESSION_SECRET")) { sendJson(res, 500, { message: "Sign-in is not configured yet" }); return; }
+    if (!getEnv("SESSION_SECRET") || getEnv("SESSION_SECRET").length < 32) { sendJson(res, 500, { message: "Sign-in is not configured yet" }); return; }
     const body = await readBody(req);
     const email = norm(body.email || "");
     const password = String(body.password || "");
     if (!isEmail(email) || !password) { sendJson(res, 401, { message: "Invalid credentials" }); return; }
     const rlIp = await checkRateLimit(`login:ip:${getClientIp(req)}`, 30, 60 * 60 * 1000);
     const rlEmail = await checkRateLimit(`login:email:${email}`, 10, 60 * 60 * 1000);
-    // A missing rate_limits table used to brick ALL sign-ins (503
-    // before the credential check). Now it only logs loudly and the
-    // sign-in proceeds — the limit takes effect once the table exists.
+    // Fail CLOSED: a missing rate_limits table used to let sign-ins
+    // proceed with no brute-force limit at all. Now it 503s with the
+    // setup pointer instead of running unprotected.
     if (rlIp.tableMissing || rlEmail.tableMissing) {
-      try { console.warn("Rate limits unavailable during login — proceeding without limits; create the rate_limits table (see SECURITY_FIX_SETUP.md)"); } catch {}
-    } else if (!rlIp.allowed || !rlEmail.allowed) {
+      sendJson(res, 503, { message: "Rate limiting is not configured. Please ask the admin to run the rate_limits setup SQL." });
+      return;
+    }
+    if (!rlIp.allowed || !rlEmail.allowed) {
       sendJson(res, 429, { message: "Too many sign-in attempts. Try again later." }, { "Retry-After": String(Math.max(rlIp.retryAfter, rlEmail.retryAfter)) });
       return;
     }
@@ -454,22 +523,25 @@ async function handleSignup(req: any, res: any): Promise<void> {
   try {
     if (req.method !== "POST") { sendJson(res, 405, { message: "Method not allowed" }); return; }
     if (!getEnv("SUPABASE_URL") || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) { sendJson(res, 503, { message: "Sign-up is not configured yet" }); return; }
-    if (!getEnv("SESSION_SECRET")) { sendJson(res, 500, { message: "Sign-up is not configured yet" }); return; }
+    if (!getEnv("SESSION_SECRET") || getEnv("SESSION_SECRET").length < 32) { sendJson(res, 500, { message: "Sign-up is not configured yet" }); return; }
     const body = await readBody(req);
     const email = norm(body.email || "");
     const name = String(body.name || "").trim().slice(0, 100) || "Community Member";
     const password = String(body.password || "");
     if (!isEmail(email)) { sendJson(res, 400, { message: "A valid email is required" }); return; }
-    if (password.length < 6 || password.length > 128) { sendJson(res, 400, { message: "Password must be at least 6 characters" }); return; }
+    if (password.length < 8 || password.length > 128) { sendJson(res, 400, { message: "Password must be at least 8 characters" }); return; }
     if (isAdmin(email)) { sendJson(res, 403, { message: "Admin accounts sign in with Google, not with a local password." }); return; }
     const rl = await checkRateLimit(`signup:ip:${getClientIp(req)}`, 20, 60 * 60 * 1000);
     // Per-email limit too: the old per-IP-only limit was bypassable by
     // rotating a spoofed X-Forwarded-For header, leaving mass account
     // creation effectively unthrottled.
     const rlEmail = await checkRateLimit(`signup:email:${email}`, 5, 60 * 60 * 1000);
+    // Fail CLOSED (see login): no table, no sign-ups.
     if (rl.tableMissing || rlEmail.tableMissing) {
-      try { console.warn("Rate limits unavailable during sign-up — proceeding without limits; create the rate_limits table (see SECURITY_FIX_SETUP.md)"); } catch {}
-    } else if (!rl.allowed || !rlEmail.allowed) {
+      sendJson(res, 503, { message: "Rate limiting is not configured. Please ask the admin to run the rate_limits setup SQL." });
+      return;
+    }
+    if (!rl.allowed || !rlEmail.allowed) {
       sendJson(res, 429, { message: "Too many sign-ups. Try again later." }, { "Retry-After": String(Math.max(rl.retryAfter, rlEmail.retryAfter)) });
       return;
     }
@@ -550,8 +622,10 @@ async function handleReset(req: any, res: any): Promise<void> {
       const rlIp = await checkRateLimit(`reset:req:ip:${getClientIp(req)}`, 20, 60 * 60 * 1000);
       const rlEmail = await checkRateLimit(`reset:req:email:${email}`, 5, 60 * 60 * 1000);
       if (rlIp.tableMissing || rlEmail.tableMissing) {
-        try { console.warn("Rate limits unavailable during password-reset request — proceeding without limits"); } catch {}
-      } else if (!rlIp.allowed || !rlEmail.allowed) {
+        sendJson(res, 503, { message: "Rate limiting is not configured. Please ask the admin to run the rate_limits setup SQL." });
+        return;
+      }
+      if (!rlIp.allowed || !rlEmail.allowed) {
         sendJson(res, 429, { message: "Too many reset requests. Try again later." }, { "Retry-After": String(Math.max(rlIp.retryAfter, rlEmail.retryAfter)) });
         return;
       }
@@ -560,6 +634,17 @@ async function handleReset(req: any, res: any): Promise<void> {
       const generic = { ok: true, message: "If an account exists for that email, a reset link has been sent. It expires in 1 hour." };
       const userRow = await loadUserByEmail(email);
       if (!userRow || userRow.data?.authProvider !== "local" || !userRow.data?.passwordHash) { sendJson(res, 200, generic); return; }
+      // Invalidate any older live reset tokens for this email first,
+      // so only the newest link works (best-effort; the new token is
+      // created regardless).
+      try {
+        const prev = await fetchJson(`${supabaseBase()}/rest/v1/password_resets?select=id,data&data->>email=eq.${encodeURIComponent(email)}&data->>used=eq.false`, { headers: supabaseHeaders() });
+        if (prev.ok && Array.isArray(prev.body)) {
+          for (const r of prev.body) {
+            await fetchJson(`${supabaseBase()}/rest/v1/password_resets?id=eq.${encodeURIComponent(r.id)}`, { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: { ...(r.data || {}), used: true } }) });
+          }
+        }
+      } catch { /* best-effort */ }
       const raw = randomTokenHex(32);
       const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
       await fetchJson(`${supabaseBase()}/rest/v1/password_resets`, {
@@ -574,11 +659,9 @@ async function handleReset(req: any, res: any): Promise<void> {
     if (action === "confirm") {
       const token = String(body.token || "");
       const newPassword = String(body.newPassword || "");
-      if (!token || newPassword.length < 6 || newPassword.length > 128) { sendJson(res, 400, { message: "A valid reset token and a password of at least 6 characters are required" }); return; }
+      if (!token || newPassword.length < 8 || newPassword.length > 128) { sendJson(res, 400, { message: "A valid reset token and a password of at least 8 characters are required" }); return; }
       const rl = await checkRateLimit(`reset:confirm:ip:${getClientIp(req)}`, 20, 60 * 60 * 1000);
-      if (rl.tableMissing) {
-        try { console.warn("Rate limits unavailable during password-reset confirm — proceeding without limits"); } catch {}
-      } else if (!rl.allowed) { sendJson(res, 429, { message: "Too many attempts. Try again later." }, { "Retry-After": String(rl.retryAfter) }); return; }
+      if (limited(res, rl, "Too many attempts. Try again later.")) return;
       const tokenHash = await hashToken(token);
       const { ok, body: rows } = await fetchJson(
         `${supabaseBase()}/rest/v1/password_resets?select=id,data&data->>tokenHash=eq.${encodeURIComponent(tokenHash)}`,
@@ -590,14 +673,33 @@ async function handleReset(req: any, res: any): Promise<void> {
       if (d.used || !d.expiresAt || Date.parse(d.expiresAt) < Date.now()) { sendJson(res, 400, { message: "This reset link is invalid or has expired" }); return; }
       const userRow = await loadUserByEmail(d.email);
       if (!userRow || userRow.data?.authProvider !== "local") { sendJson(res, 400, { message: "This reset link is invalid or has expired" }); return; }
+      // Mark the token used FIRST, atomically: the conditional update
+      // only touches rows still marked unused, and returns the updated
+      // rows. A parallel confirm racing this one gets zero rows back
+      // and is rejected — the token can never be used twice. (The old
+      // code changed the password first and marked the token used
+      // afterwards, so two parallel confirms could both succeed.)
+      const mark = await fetchJson(
+        `${supabaseBase()}/rest/v1/password_resets?id=eq.${encodeURIComponent(resetRow.id)}&data->>used=eq.false`,
+        { method: "PATCH", headers: { ...supabaseHeaders(), Prefer: "return=representation" }, body: JSON.stringify({ data: { ...d, used: true } }) },
+      );
+      if (!mark.ok || !Array.isArray(mark.body) || mark.body.length === 0) { sendJson(res, 400, { message: "This reset link is invalid or has expired" }); return; }
       const updated = { ...userRow.data, passwordHash: await hashPassword(newPassword), sessionVersion: typeof userRow.data.sessionVersion === "number" ? userRow.data.sessionVersion + 1 : 1 };
       const up = await fetchJson(`${supabaseBase()}/rest/v1/locora_users?id=eq.${encodeURIComponent(userRow.id)}`, {
         method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: updated }),
       });
       if (!up.ok) { sendJson(res, 500, { message: "Could not reset the password" }); return; }
-      await fetchJson(`${supabaseBase()}/rest/v1/password_resets?id=eq.${encodeURIComponent(resetRow.id)}`, {
-        method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: { ...d, used: true } }),
-      });
+      // Invalidate every other live reset token for this account, so
+      // an older link cannot be used after this reset (best-effort).
+      try {
+        const others = await fetchJson(`${supabaseBase()}/rest/v1/password_resets?select=id,data&data->>email=eq.${encodeURIComponent(d.email)}&data->>used=eq.false`, { headers: supabaseHeaders() });
+        if (others.ok && Array.isArray(others.body)) {
+          for (const r of others.body) {
+            if (r.id === resetRow.id) continue;
+            await fetchJson(`${supabaseBase()}/rest/v1/password_resets?id=eq.${encodeURIComponent(r.id)}`, { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: { ...(r.data || {}), used: true } }) });
+          }
+        }
+      } catch { /* best-effort */ }
       sendJson(res, 200, { ok: true, message: "Your password has been reset. You can now sign in." });
       return;
     }
@@ -623,14 +725,28 @@ async function handleMe(req: any, res: any): Promise<void> {
     }
 
     // PATCH
+    const rlMe = await checkRateLimit(`me:patch:${me}`, 60, 60 * 60 * 1000);
+    if (limited(res, rlMe, "Too many profile updates. Try again shortly.")) return;
     const body = await readBody(req);
+    if ((req as any).__bodyTooLarge) { sendJson(res, 413, { message: "Request body is too large" }); return; }
     const updates: Record<string, any> = {};
     for (const key of PROFILE_FIELDS) if (body[key] !== undefined) updates[key] = body[key];
     if (typeof updates.bio === "string") updates.bio = updates.bio.slice(0, 1000);
     if (typeof updates.name === "string") updates.name = updates.name.trim().slice(0, 100) || undefined;
+    // A non-string phone used to pass validation entirely (only the
+    // string branch checked digits) and was then stored as-is.
+    if (updates.phone !== undefined && typeof updates.phone !== "string") { sendJson(res, 400, { message: "Mobile number must be a string of 7-15 digits" }); return; }
     if (typeof updates.phone === "string") {
       const digits = updates.phone.replace(/\D/g, "");
       if (updates.phone && (digits.length < 7 || digits.length > 15)) { sendJson(res, 400, { message: "Mobile number must be 7-15 digits" }); return; }
+    }
+    // Uncapped location/avatar strings were stored verbatim.
+    if (typeof updates.avatar === "string") {
+      updates.avatar = updates.avatar.trim();
+      if (updates.avatar && (!/^https?:\/\//.test(updates.avatar) || updates.avatar.length > 2048)) { sendJson(res, 400, { message: "Avatar must be an http(s) URL of at most 2048 characters" }); return; }
+    }
+    for (const f of ["country", "state", "city"] as const) {
+      if (typeof updates[f] === "string" && updates[f].length > 100) { sendJson(res, 400, { message: `${f} must be 100 characters or fewer` }); return; }
     }
     // Interests may include custom ones typed by the user on Profile:
     // keep only real strings, trimmed, at most 40 chars each, at most

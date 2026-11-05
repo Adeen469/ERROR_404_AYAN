@@ -2,7 +2,31 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "headers": [
     {
-      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "strict-origin-when-cross-origin"
+        },
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        },
+        {
+          "key": "Strict-Transport-Security",
+          "value": "max-age=31536000; includeSubDomains"
+        },
+        {
+          "key": "Permissions-Policy",
+          "value": "camera=(), microphone=(), geolocation=(self)"
+        }
+      ],
+      "source": "/api/(.*)"
+    },
+    {
       "headers": [
         {
           "key": "X-Content-Type-Options",
@@ -26,39 +50,44 @@
         },
         {
           "key": "Content-Security-Policy",
-          "value": "default-src 'self'; script-src 'self' 'unsafe-inline' https://accounts.google.com https://checkout.razorpay.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self' https://api.razorpay.com https://checkout.razorpay.com https://countriesnow.space https://ipwho.is https://ipapi.co https://nominatim.openstreetmap.org wss:; frame-src 'self' https://checkout.razorpay.com https://api.razorpay.com; object-src 'none'; base-uri 'self'; form-action 'self' https://accounts.google.com; frame-ancestors 'none'"
+          "value": "default-src 'self'; script-src 'self' https://checkout.razorpay.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.razorpay.com https://checkout.razorpay.com https://countriesnow.space https://ipwho.is https://ipapi.co https://nominatim.openstreetmap.org; frame-src 'self' https://checkout.razorpay.com https://api.razorpay.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
         }
-      ]
+      ],
+      "source": "/((?!api/).*)"
     }
   ],
   "rewrites": [
     {
-      "source": "/api/auth/login",
-      "destination": "/api/auth?endpoint=login"
+      "destination": "/api/auth?endpoint=login",
+      "source": "/api/auth/login"
     },
     {
-      "source": "/api/auth/signup",
-      "destination": "/api/auth?endpoint=signup"
+      "destination": "/api/auth?endpoint=signup",
+      "source": "/api/auth/signup"
     },
     {
-      "source": "/api/auth/logout",
-      "destination": "/api/auth?endpoint=logout"
+      "destination": "/api/auth?endpoint=logout",
+      "source": "/api/auth/logout"
     },
     {
-      "source": "/api/auth/reset",
-      "destination": "/api/auth?endpoint=reset"
+      "destination": "/api/auth?endpoint=reset",
+      "source": "/api/auth/reset"
     },
     {
-      "source": "/api/me",
-      "destination": "/api/auth?endpoint=me"
+      "destination": "/api/auth?endpoint=me",
+      "source": "/api/me"
     },
     {
-      "source": "/api/create-order",
-      "destination": "/api/payments?action=create-order"
+      "destination": "/api/payments?action=create-order",
+      "source": "/api/create-order"
     },
     {
-      "source": "/api/verify-payment",
-      "destination": "/api/payments?action=verify-payment"
+      "destination": "/api/payments?action=verify-payment",
+      "source": "/api/verify-payment"
+    },
+    {
+      "destination": "/api/payments?action=webhook",
+      "source": "/api/razorpay-webhook"
     },
     {
       "destination": "/index.html",

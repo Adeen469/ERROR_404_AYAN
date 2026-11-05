@@ -76,8 +76,19 @@ export function OrganizerEventsPage() {
     setDeleting(true);
     try {
       const result = await eventsService.deleteEvent(deleteTarget.id, ownershipOpts);
-      setEvents((prev) => prev.filter((e) => e.id !== deleteTarget.id));
       setDeleteTarget(null);
+      // A queued delete is not a deleted event: the server was
+      // unreachable, so the event still exists — keep it listed and
+      // say so, instead of claiming it was removed.
+      if (!result.deleted && result.pending) {
+        toast({
+          type: 'info',
+          title: 'Delete queued',
+          description: `"${deleteTarget.title}" will be removed once the server is reachable. It is still listed for now.`,
+        });
+        return;
+      }
+      setEvents((prev) => prev.filter((e) => e.id !== deleteTarget.id));
       // Deleting no longer orphans registrations: the server cancels
       // them, refunds paid rows, and emails attendees — say what
       // happened, including refunds that still need manual action.

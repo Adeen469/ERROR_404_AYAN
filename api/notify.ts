@@ -53,8 +53,16 @@ export function parseCookies(req: any): Record<string, string> {
 }
 
 export function getClientIp(req: any): string {
+  // LAST entry, like every other api file: the first entry is
+  // client-controlled (spoofable), the last is appended by the
+  // platform's own proxy. The sign-in alert IP/location below used
+  // the first entry, so a forged header could plant a false location
+  // in the alert email.
   const fwd = req.headers?.["x-forwarded-for"] || "";
-  if (typeof fwd === "string" && fwd.trim()) return fwd.split(",")[0].trim();
+  if (typeof fwd === "string" && fwd.trim()) {
+    const parts = fwd.split(",").map((x: string) => x.trim()).filter(Boolean);
+    if (parts.length > 0) return parts[parts.length - 1];
+  }
   return req.headers?.["x-real-ip"] || "unknown";
 }
 
@@ -123,7 +131,7 @@ export async function signSession(email: string, role: string, authProvider: str
 export async function verifySession(req: any): Promise<SessionUser | null> {
   try {
     const secret = getEnv("SESSION_SECRET");
-    if (!secret) return null;
+    if (!secret || secret.length < 32) return null;
     const token = parseCookies(req).locora_session;
     if (!token) return null;
     const parts = token.split(".");
@@ -248,7 +256,35 @@ export function randomTokenHex(bytes = 32): string {
 // ---- Rate limiting (Supabase-backed counter, table rate_limits) ----
 export async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
   try {
+    // Bound the key: it embeds unauthenticated emails/IPs, so an
+    // unbounded key is unbounded row size (distinct keys are still
+    // pruned by the retention SQL in supabase-setup.sql §6).
+    key = String(key || "").slice(0, 512);
     if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
+    // Atomic path first: the rate_limit_hit RPC (see
+    // SUPABASE_RPC_SETUP.md) increments and checks in one Postgres
+    // call, so parallel bursts cannot all read the same count and
+    // slip under the limit. Falls back to the read-modify-write path
+    // below when the RPC has not been created yet.
+    try {
+      const rpc = await fetchJson(`${supabaseBase()}/rest/v1/rpc/rate_limit_hit`, {
+        method: "POST",
+        headers: supabaseHeaders(),
+        body: JSON.stringify({ p_key: key, p_limit: limit, p_window_ms: windowMs }),
+      });
+      if (rpc.ok) {
+        const r = rpc.body;
+        if (typeof r === "boolean") return { allowed: r, retryAfter: 0, tableMissing: false };
+        if (r && typeof r === "object") return { allowed: r.allowed !== false, retryAfter: Number(r.retry_after || 0), tableMissing: false };
+      }
+      if (rpc.status === 404 || rpc.status === 400) {
+        // RPC (or the rate_limits table) does not exist yet: the
+        // legacy path below reports tableMissing properly.
+      } else if (!rpc.ok) {
+        // Transient RPC error: fall through to the legacy path rather
+        // than guessing.
+      }
+    } catch { /* fall through to the legacy path */ }
     const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
     const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
     if (!ok) {
@@ -464,15 +500,18 @@ async function getLocation(ip: string): Promise<string> {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 3000);
+    // ip-api.com over plain HTTP leaked the user's IP to the network
+    // in cleartext. ipwho.is over HTTPS is already used by the
+    // client's location service, and returns { city, region, country }.
     const res = await fetch(
-      `http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,city,regionName,country`,
+      `https://ipwho.is/${encodeURIComponent(ip)}`,
       { signal: ctrl.signal },
     );
     clearTimeout(t);
     if (!res.ok) return "";
     const body: any = await res.json();
-    if (body?.status !== "success") return "";
-    return [body.city, body.regionName, body.country].filter(Boolean).join(", ");
+    if (body?.success === false) return "";
+    return [body.city, body.region, body.country].filter(Boolean).join(", ");
   } catch {
     return "";
   }
@@ -640,8 +679,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       sendJson(res, 200, { mailed: false, reason: "rate-limited" });
       return;
     }
-    const forwarded = req.headers?.["x-forwarded-for"] || req.headers?.["X-Forwarded-For"] || "";
-    const ip = String(forwarded).split(",")[0].trim();
+    const ip = getClientIp(req);
     const ua = req.headers?.["user-agent"] || req.headers?.["User-Agent"] || "";
     const device = parseDevice(String(ua));
     const location = await getLocation(ip);

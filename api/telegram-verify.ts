@@ -39,8 +39,8 @@ function getEnv(name: string): string {
   }
 }
 
-function sendJson(res: any, status: number, obj: any): void {
-  res.writeHead(status, { "Content-Type": "application/json" });
+function sendJson(res: any, status: number, obj: any, extraHeaders?: Record<string, string>): void {
+  res.writeHead(status, { "Content-Type": "application/json", ...(extraHeaders || {}) });
   res.end(JSON.stringify(obj));
 }
 
@@ -197,7 +197,7 @@ async function loadUserByEmail(email: string): Promise<{ id: string; data: any }
 async function verifySession(req: any): Promise<{ email: string } | null> {
   try {
     const secret = getEnv("SESSION_SECRET");
-    if (!secret) return null;
+    if (!secret || secret.length < 32) return null;
     const token = parseCookies(req).locora_session;
     if (!token) return null;
     const parts = token.split(".");
@@ -214,7 +214,11 @@ async function verifySession(req: any): Promise<{ email: string } | null> {
         const exp = rev.body[0].data?.expiresAt;
         if (!exp || new Date(exp).getTime() > Date.now()) return null;
       }
-    } catch {}
+    } catch {
+      // Fail CLOSED: a Supabase error must not silently skip the
+      // revocation check (sign-out-everywhere would stop working).
+      return null;
+    }
     try {
       const userRow = await loadUserByEmail(email);
       if (userRow && userRow.data && typeof userRow.data.sessionVersion === "number") {
@@ -225,16 +229,53 @@ async function verifySession(req: any): Promise<{ email: string } | null> {
           return null;
         }
       }
-    } catch {}
+    } catch {
+      // Fail CLOSED: a Supabase error must not silently skip the
+      // session-version check (sign-out-everywhere would stop working).
+      return null;
+    }
     return { email };
   } catch {
     return null;
   }
 }
 
+// Fail-CLOSED rate-limit helper for mutations (see api/auth.ts).
+function limited(res: any, rl: { allowed: boolean; retryAfter: number; tableMissing: boolean }, message: string): boolean {
+  if (rl.tableMissing) {
+    sendJson(res, 503, { message: "Rate limiting is not configured. Please ask the admin to run the rate_limits setup SQL." });
+    return true;
+  }
+  if (!rl.allowed) {
+    sendJson(res, 429, { message }, { "Retry-After": String(rl.retryAfter) });
+    return true;
+  }
+  return false;
+}
+
 async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
   try {
+    // Bound the key: it embeds unauthenticated emails/IPs, so an
+    // unbounded key is unbounded row size (distinct keys are still
+    // pruned by the retention SQL in supabase-setup.sql §6).
+    key = String(key || "").slice(0, 512);
     if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
+    // Atomic path first: the rate_limit_hit RPC (see
+    // SUPABASE_RPC_SETUP.md) increments and checks in one Postgres
+    // call. Falls back to the read-modify-write path below when the
+    // RPC has not been created yet.
+    try {
+      const rpc = await fetchJson(`${supabaseBase()}/rest/v1/rpc/rate_limit_hit`, {
+        method: "POST",
+        headers: supabaseHeaders(),
+        body: JSON.stringify({ p_key: key, p_limit: limit, p_window_ms: windowMs }),
+      });
+      if (rpc.ok) {
+        const r = rpc.body;
+        if (typeof r === "boolean") return { allowed: r, retryAfter: 0, tableMissing: false };
+        if (r && typeof r === "object") return { allowed: r.allowed !== false, retryAfter: Number(r.retry_after || 0), tableMissing: false };
+      }
+    } catch { /* fall through to the legacy path */ }
     const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
     const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
     if (!ok) {
@@ -264,6 +305,32 @@ async function checkRateLimit(key: string, limit: number, windowMs: number): Pro
 async function loadRows(): Promise<any[]> {
   const { ok, body } = await fetchJson(
     `${supabaseBase()}/rest/v1/${TABLE}?select=token,data`,
+    { headers: supabaseHeaders() },
+  );
+  if (!ok) throw new Error("phone_verifications table read failed");
+  if (!Array.isArray(body)) return [];
+  return body.map((row: any) => ({ token: row.token, ...(row.data || {}) }));
+}
+
+// Targeted single-row fetch by the token column: the status poll and
+// the /start handler used to load the WHOLE phone_verifications table
+// on every call. Throws when the table cannot be read, so callers can
+// tell "table missing" apart from "no such token".
+async function loadRowByToken(token: string): Promise<any | null> {
+  const { ok, body } = await fetchJson(
+    `${supabaseBase()}/rest/v1/${TABLE}?select=token,data&token=eq.${encodeURIComponent(token)}`,
+    { headers: supabaseHeaders() },
+  );
+  if (!ok) throw new Error("phone_verifications table read failed");
+  if (!Array.isArray(body) || body.length === 0) return null;
+  return { token: body[0].token, ...(body[0].data || {}) };
+}
+
+// Targeted fetch of one email's rows (the start action used to load
+// the whole table just to drop that email's stale pending tokens).
+async function loadRowsByEmail(email: string): Promise<any[]> {
+  const { ok, body } = await fetchJson(
+    `${supabaseBase()}/rest/v1/${TABLE}?select=token,data&data->>email=eq.${encodeURIComponent(email)}&limit=100`,
     { headers: supabaseHeaders() },
   );
   if (!ok) throw new Error("phone_verifications table read failed");
@@ -307,10 +374,24 @@ function numbersMatch(a: string, b: string): boolean {
   const db = digits(b);
   if (!da || !db) return false;
   if (da === db) return true;
-  // Telegram numbers carry the country code (+91…) while a profile
-  // number may not. Matching the last 10 digits covers that gap.
-  if (da.length >= 10 && db.length >= 10) return da.slice(-10) === db.slice(-10);
-  return false;
+  // Split each number into a country code (the digits before the last
+  // 10, when there are any) and the 10-digit national part. The old
+  // rule matched on the last 10 digits alone, so a foreign virtual
+  // number sharing the same 10 digits verified someone else's number.
+  // Now the national parts must match AND the country codes must
+  // agree whenever both sides carry one. A bare 10-digit profile
+  // number (no code stored) still matches a coded Telegram number —
+  // that is the existing legit flow, since profiles store the number
+  // as typed; the residual (same 10 digits, different country, no
+  // code on file) is documented in the audit report, and the verified
+  // flag gates nothing by itself.
+  const split = (d: string) =>
+    d.length > 10 ? { code: d.slice(0, d.length - 10), national: d.slice(-10) } : { code: "", national: d };
+  const sa = split(da);
+  const sb = split(db);
+  if (sa.national !== sb.national) return false;
+  if (sa.code && sb.code && sa.code !== sb.code) return false;
+  return true;
 }
 
 function isExpired(row: any): boolean {
@@ -352,7 +433,7 @@ async function handleTelegramUpdate(
   secretHeader: string,
 ): Promise<{ ok: boolean; reason?: string }> {
   const secret = getEnv("TELEGRAM_WEBHOOK_SECRET");
-  if (!secret || secretHeader !== secret) {
+  if (!secret || !ctEqual(secretHeader, secret)) {
     return { ok: false, reason: "webhook secret missing or mismatch" };
   }
   const msg = body.message;
@@ -361,18 +442,37 @@ async function handleTelegramUpdate(
 
   // Contact shared: the verification moment.
   if (msg.contact && msg.contact.phone_number) {
-    let rows: any[] = [];
+    let row: any = null;
     try {
-      rows = await loadRows();
+      const { ok, body } = await fetchJson(
+        `${supabaseBase()}/rest/v1/${TABLE}?select=token,data&data->>chatId=eq.${encodeURIComponent(String(chatId))}&limit=10`,
+        { headers: supabaseHeaders() },
+      );
+      if (ok && Array.isArray(body)) {
+        row = body.map((r: any) => ({ token: r.token, ...(r.data || {}) })).find(
+          (r: any) =>
+            (r.status === "pending" || r.status === "awaiting_contact") &&
+            String(r.chatId) === String(chatId) &&
+            !isExpired(r),
+        ) || null;
+      } else {
+        throw new Error("targeted chat lookup failed");
+      }
     } catch {
-      return { ok: true };
+      // Fall back to the full scan rather than dropping a real
+      // verification when the targeted query fails.
+      try {
+        const rows = await loadRows();
+        row = rows.find(
+          (r: any) =>
+            (r.status === "pending" || r.status === "awaiting_contact") &&
+            String(r.chatId) === String(chatId) &&
+            !isExpired(r),
+        ) || null;
+      } catch {
+        return { ok: true };
+      }
     }
-    const row = rows.find(
-      (r) =>
-        (r.status === "pending" || r.status === "awaiting_contact") &&
-        String(r.chatId) === String(chatId) &&
-        !isExpired(r),
-    );
     if (!row) {
       await telegramSend(
         chatId,
@@ -411,8 +511,7 @@ async function handleTelegramUpdate(
     }
     let row: any = null;
     try {
-      const rows = await loadRows();
-      row = rows.find((r) => r.token === token) || null;
+      row = await loadRowByToken(token);
     } catch {
       return { ok: true };
     }
@@ -497,10 +596,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       const rl = await checkRateLimit(`telegram:start:${session.email}`, 5, 60 * 60 * 1000);
-      if (!rl.allowed && !rl.tableMissing) {
-        sendJson(res, 429, { message: "Too many verification attempts. Try again later." });
-        return;
-      }
+      if (limited(res, rl, "Too many verification attempts. Try again later.")) return;
       const d = digits(phone);
       if (d.length < 7 || d.length > 15) {
         sendJson(res, 400, { message: "A valid mobile number is required" });
@@ -513,7 +609,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       }
       let rows: any[];
       try {
-        rows = await loadRows();
+        rows = await loadRowsByEmail(email);
       } catch {
         sendJson(res, 503, {
           message: "Verification table is not set up yet (see TELEGRAM_VERIFICATION_SETUP.md)",
@@ -522,7 +618,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       }
       // One pending token per email: drop stale ones first.
       for (const r of rows) {
-        if (r.email === email && (r.status === "pending" || r.status === "awaiting_contact")) {
+        if (r.status === "pending" || r.status === "awaiting_contact") {
           try {
             await deleteRow(r.token);
           } catch {
@@ -530,9 +626,15 @@ export default async function handler(req: any, res: any): Promise<void> {
           }
         }
       }
-      const token = (globalThis as any).crypto
-        ? (globalThis as any).crypto.randomUUID().replace(/-/g, "")
-        : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 14)}`;
+      // Fail CLOSED when Web Crypto is unavailable: the old fallback
+      // (Date.now + Math.random) produced guessable verification
+      // tokens.
+      const cryptoObj = (globalThis as any).crypto;
+      if (!cryptoObj || typeof cryptoObj.randomUUID !== "function") {
+        sendJson(res, 503, { message: "Verification is not available in this runtime" });
+        return;
+      }
+      const token = cryptoObj.randomUUID().replace(/-/g, "");
       try {
         await insertRow(token, {
           email,
@@ -560,21 +662,34 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 400, { message: "Token required" });
         return;
       }
-      let rows: any[];
+      // The client polls this every 3s while waiting, so the limit is
+      // generous (3000/hr per IP covers several concurrent pollers);
+      // it still stops a flood, and the token itself is unguessable.
+      const rlStatus = await checkRateLimit(`telegram:status:${getClientIp(req)}`, 3000, 60 * 60 * 1000);
+      if (limited(res, rlStatus, "Too many status checks. Try again shortly.")) return;
+      let row: any = null;
       try {
-        rows = await loadRows();
+        row = await loadRowByToken(token);
       } catch {
         sendJson(res, 503, {
           message: "Verification table is not set up yet (see TELEGRAM_VERIFICATION_SETUP.md)",
         });
         return;
       }
-      const row = rows.find((r) => r.token === token) || null;
       if (!row) {
         sendJson(res, 200, { status: "not_found" });
         return;
       }
       if (row.status === "verified") {
+        // Verified rows were kept forever. A row verified more than
+        // 24h ago is deleted on read (the client stops polling the
+        // moment it sees "verified", so nothing still needs it).
+        const doneAt = Date.parse(row.verifiedAt || row.createdAt || "");
+        if (!Number.isNaN(doneAt) && Date.now() - doneAt > 24 * 60 * 60 * 1000) {
+          try { await deleteRow(row.token); } catch { /* best-effort */ }
+          sendJson(res, 200, { status: "not_found" });
+          return;
+        }
         sendJson(res, 200, { status: "verified" });
         return;
       }
