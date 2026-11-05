@@ -97,6 +97,7 @@ flows.)
 
 | Symptom | Likely cause |
 | --- | --- |
+| "Could not send the SMS: Before using OTP Message API, complete website verification…" | Fast2SMS account gate, not a code problem: in the Fast2SMS panel open the **OTP Message** menu and complete website verification for your site (locora-hyperlocal.vercel.app). Until then the OTP route refuses every send. No code change needed once verified. |
 | "SMS verification is not set up yet (Fast2SMS key missing)" | `FAST2SMS_API_KEY` not set, or no redeploy after setting it |
 | "Verification table is not set up yet" | `phone_verifications` table missing in Supabase (step 3) |
 | "Could not send the SMS: …" | Fast2SMS rejected the request — the gateway's message follows the colon (common: wallet balance exhausted, invalid key) |
