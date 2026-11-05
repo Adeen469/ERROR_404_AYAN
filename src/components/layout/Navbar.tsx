@@ -6,6 +6,7 @@ import { messagesService } from '../../services/messages-service';
 import { UserProfile } from '../../types';
 import { isDemoMode } from '../../services/api-client';
 import {
+import Avatar from '../ui/Avatar';
   fetchAccess,
   isAdminEmail,
   AccessRole,
@@ -289,11 +290,11 @@ export function Navbar() {
                 className="flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-full border border-slate-200 bg-white hover:bg-slate-50 transition-colors shadow-2xs text-xs font-medium text-slate-700"
                 aria-expanded={profileDropdownOpen}
               >
-                <img
+                <Avatar
                   src={currentUser.avatar}
-                  alt={currentUser.name}
-                  referrerPolicy="no-referrer"
+                  name={currentUser.name}
                   className="w-6 h-6 rounded-full object-cover shrink-0"
+                  initialClassName="text-[10px]"
                 />
                 <span className="max-w-[120px] truncate">{currentUser.name}</span>
                 <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
@@ -577,11 +578,11 @@ export function Navbar() {
             {currentUser ? (
               <div className="flex items-center justify-between py-2">
                 <div className="flex items-center gap-2">
-                  <img
+                  <Avatar
                     src={currentUser.avatar}
-                    alt={currentUser.name}
-                    referrerPolicy="no-referrer"
+                    name={currentUser.name}
                     className="w-8 h-8 rounded-full object-cover"
+                    initialClassName="text-xs"
                   />
                   <div>
                     <p className="text-xs font-semibold text-slate-900">{currentUser.name}</p>

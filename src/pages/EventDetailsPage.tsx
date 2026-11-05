@@ -29,6 +29,7 @@ import { useToast } from '../components/ui/Toast';
 import { ConfirmDialog, Modal } from '../components/ui/Modal';
 import { EventDetailsSkeleton } from '../components/ui/LoadingSkeleton';
 import { EventCard } from '../components/events/EventCard';
+import Avatar from '../components/ui/Avatar';
 
 // "Add to Google Calendar" link. This uses Google Calendar's public template
 // URL, which prefills an event in the visitor's own Google Calendar — no
@@ -529,21 +530,12 @@ export function EventDetailsPage() {
             </div>
 
             <div className="flex items-center gap-4">
-              {event.organizer.avatar ? (
-                <img
-                  src={event.organizer.avatar}
-                  alt={event.organizer.name}
-                  referrerPolicy="no-referrer"
-                  className="w-12 h-12 rounded-full object-cover shrink-0 border border-[#E5E1D8]"
-                />
-              ) : (
-                <div
-                  aria-hidden="true"
-                  className="w-12 h-12 rounded-full shrink-0 border border-[#E5E1D8] bg-[#1E3F35] text-white flex items-center justify-center font-editorial text-lg font-bold"
-                >
-                  {(event.organizer.name || '?').charAt(0).toUpperCase()}
-                </div>
-              )}
+              <Avatar
+                src={event.organizer.avatar}
+                name={event.organizer.name}
+                className="w-12 h-12 rounded-full object-cover shrink-0 border border-[#E5E1D8]"
+                initialClassName="text-lg"
+              />
               <div className="flex-1 min-w-0">
                 <h3 className="font-editorial text-base font-bold text-[#1E2320] truncate">
                   {event.organizer.name}

@@ -6,6 +6,7 @@ import { organizersService } from '../services/organizers-service';
 import { EventCard } from '../components/events/EventCard';
 import { formatEventLocation } from '../utils/formatters';
 import { ProfileSkeleton } from '../components/ui/LoadingSkeleton';
+import Avatar from '../components/ui/Avatar';
 
 export function OrganizerProfilePage() {
   const { organizerId } = useParams<{ organizerId: string }>();
@@ -63,21 +64,12 @@ export function OrganizerProfilePage() {
       {/* Organizer Header Card */}
       <div className="bg-white rounded-2xl border border-[#E5E1D8] p-6 sm:p-8 space-y-6 shadow-xs">
         <div className="flex flex-col sm:flex-row items-start sm:items-center gap-6">
-          {organizer.avatar ? (
-            <img
-              src={organizer.avatar}
-              alt={organizer.name}
-              referrerPolicy="no-referrer"
-              className="w-20 h-20 rounded-2xl object-cover border border-[#E2DFD8] shrink-0 shadow-xs"
-            />
-          ) : (
-            <div
-              aria-hidden="true"
-              className="w-20 h-20 rounded-2xl shrink-0 border border-[#E2DFD8] shadow-xs bg-[#1E3F35] text-white flex items-center justify-center font-editorial text-3xl font-bold"
-            >
-              {(organizer.name || '?').charAt(0).toUpperCase()}
-            </div>
-          )}
+          <Avatar
+            src={organizer.avatar}
+            name={organizer.name}
+            className="w-20 h-20 rounded-2xl object-cover border border-[#E2DFD8] shrink-0 shadow-xs"
+            initialClassName="text-3xl"
+          />
 
           <div className="flex-1 space-y-2">
             <div className="flex items-center gap-2">

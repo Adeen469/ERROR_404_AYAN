@@ -8,6 +8,7 @@ import { savedEventsService } from '../services/saved-events-service';
 import { formatEventDate, formatEventTimeRange, formatEventLocation } from '../utils/formatters';
 import { EventCard } from '../components/events/EventCard';
 import { EventListSkeleton } from '../components/ui/LoadingSkeleton';
+import Avatar from '../components/ui/Avatar';
 
 export function DashboardPage() {
   const [user, setUser] = useState<UserProfile | null>(() => authService.getCurrentUser());
@@ -72,11 +73,11 @@ export function DashboardPage() {
       {/* Welcome Header */}
       <div className="bg-white rounded-2xl border border-[#E5E1D8] p-6 sm:p-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-6 shadow-xs">
         <div className="flex items-center gap-4">
-          <img
+          <Avatar
             src={user.avatar}
-            alt={user.name}
-            referrerPolicy="no-referrer"
+            name={user.name}
             className="w-16 h-16 rounded-full object-cover border-2 border-[#E5E1D8] shrink-0"
+            initialClassName="text-xl"
           />
           <div>
             <h1 className="font-editorial text-2xl sm:text-3xl font-bold text-[#1E2320]">
