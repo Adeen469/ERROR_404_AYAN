@@ -119,7 +119,7 @@ export function ProfilePage() {
           setVerifyWaiting(false);
           setVerifyLink('');
           verifyTokenRef.current = null;
-          localStorage.removeItem('locora-telegram-verify-token');
+          sessionStorage.removeItem('locora-telegram-verify-token');
           setPhoneVerified(true);
           try {
             await authService.updateProfile({ phoneVerified: true });
@@ -136,7 +136,7 @@ export function ProfilePage() {
           setVerifyWaiting(false);
           setVerifyLink('');
           verifyTokenRef.current = null;
-          localStorage.removeItem('locora-telegram-verify-token');
+          sessionStorage.removeItem('locora-telegram-verify-token');
           setVerifyError(
             data.status === 'expired'
               ? 'This verification link expired (links last 15 minutes). Get a fresh one below.'
@@ -152,7 +152,7 @@ export function ProfilePage() {
   // Resume a verification started earlier (e.g. the page reloaded
   // while the user was in Telegram).
   useEffect(() => {
-    const token = localStorage.getItem('locora-telegram-verify-token');
+    const token = sessionStorage.getItem('locora-telegram-verify-token');
     if (token && !currentUser?.phoneVerified) {
       verifyTokenRef.current = token;
       setVerifyWaiting(true);
@@ -175,7 +175,7 @@ export function ProfilePage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || 'Could not start verification.');
       verifyTokenRef.current = data.token;
-      localStorage.setItem('locora-telegram-verify-token', data.token);
+      sessionStorage.setItem('locora-telegram-verify-token', data.token);
       setVerifyLink(data.link);
       setVerifyWaiting(true);
       pollVerifyStatus(data.token);
@@ -191,7 +191,7 @@ export function ProfilePage() {
     setVerifyWaiting(false);
     setVerifyLink('');
     verifyTokenRef.current = null;
-    localStorage.removeItem('locora-telegram-verify-token');
+    sessionStorage.removeItem('locora-telegram-verify-token');
   };
 
   const handleRequestAccess = async () => {

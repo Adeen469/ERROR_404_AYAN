@@ -27,9 +27,14 @@ create table events (
 );
 ```
 
-   Leave Row Level Security as it is. The site uses the service-role key
-   from the server only, which bypasses RLS; the browser never gets the
-   key, so nobody can read or write the table directly from the web.
+   Enable Row Level Security on the table — do NOT leave it off. Run
+   the canonical setup in `supabase-setup.sql` (RLS ON + zero policies
+   on every table; the service-role key bypasses RLS and is the only
+   accessor). Leaving RLS off is unsafe the moment the anon key ships
+   to the browser (message-replies + Realtime push): with RLS off, the
+   public anon key can dump and rewrite the whole table via PostgREST,
+   bypassing every API-layer strip. See `supabase-setup.sql` §5 for the
+   verification queries.
 
 3. In Supabase, go to **Project Settings > API** and copy:
    - Project URL (looks like `https://xyzcompany.supabase.co`)

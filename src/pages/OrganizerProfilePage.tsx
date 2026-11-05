@@ -4,7 +4,7 @@ import { MapPin, Globe, Mail, Calendar, Users, ArrowLeft, ShieldCheck } from 'lu
 import { Organizer, EventItem } from '../types';
 import { organizersService } from '../services/organizers-service';
 import { EventCard } from '../components/events/EventCard';
-import { formatEventLocation } from '../utils/formatters';
+import { formatEventLocation, isSafeHttpUrl } from '../utils/formatters';
 import { ProfileSkeleton } from '../components/ui/LoadingSkeleton';
 import Avatar from '../components/ui/Avatar';
 
@@ -94,7 +94,7 @@ export function OrganizerProfilePage() {
                 </span>
               )}
 
-              {organizer.website && (
+              {organizer.website && isSafeHttpUrl(organizer.website) && (
                 <a
                   href={organizer.website}
                   target="_blank"
