@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { EventItem, AttendeeRegistration } from '../types';
 import { eventsService, isEventOwner } from '../services/events-service';
-import { registrationsService, getRefundQuote } from '../services/registrations-service';
+import { registrationsService, getRefundQuote, TeamRegistrationOptions } from '../services/registrations-service';
 import { paymentsService } from '../services/payments-service';
 import { savedEventsService } from '../services/saved-events-service';
 import { authService } from '../services/auth-service';
@@ -108,6 +108,20 @@ export function EventDetailsPage() {
   // manual payment path anymore: no UPI ID, no QR, no UTR.
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [razorpayError, setRazorpayError] = useState('');
+  // Team participation (hackathons, f-1 + f-2): the attendee's picks
+  // in the team modal, shown after the details gate (if any) and
+  // before the payment / confirm step. teamOpts carries the leader's
+  // create choices into the payment dialog, whose Pay button fires
+  // later; the free path passes them straight to the confirm handler.
+  const [teamModalOpen, setTeamModalOpen] = useState(false);
+  const [teamModalTarget, setTeamModalTarget] = useState<'free' | 'paid'>('free');
+  const [teamParticipationType, setTeamParticipationType] = useState<'individual' | 'team'>('individual');
+  const [teamAction, setTeamAction] = useState<'create' | 'join'>('create');
+  const [teamSize, setTeamSize] = useState(2);
+  const [teamCodeInput, setTeamCodeInput] = useState('');
+  const [teamError, setTeamError] = useState('');
+  const [teamOpts, setTeamOpts] = useState<TeamRegistrationOptions | undefined>(undefined);
+  const [copiedTeamCode, setCopiedTeamCode] = useState(false);
 
   useEffect(() => {
     async function loadEventData() {
@@ -177,6 +191,23 @@ export function EventDetailsPage() {
       : `Are you sure you want to cancel your RSVP? You will get ${formatPaise(cancelRefundQuote.refundAmountPaise)} back (90%). A 10% cancellation fee of ${formatPaise(cancelRefundQuote.refundFeePaise)} applies because it has been more than 24 hours since you bought the ticket. Your ticket will be cancelled immediately.`;
   const isPaymentRejected = Boolean(registration && registration.status === 'rejected');
   const isPaidEvent = event.price > 0;
+  // Team participation config (hackathons only, f-1 + f-2): mode
+  // 'team' or 'both' opens the team modal before registration;
+  // 'individual' (or no config) keeps the plain flow. The price is
+  // per team for team registrations — the leader pays it once — and
+  // per person for individual ones.
+  const participation = event?.participation;
+  const teamEnabled = Boolean(participation && (participation.mode === 'team' || participation.mode === 'both'));
+  const minTeamSize = participation?.minTeamSize ?? 2;
+  const maxTeamSize = participation?.maxTeamSize ?? 4;
+  const priceSuffix =
+    event.price === 0
+      ? '/ attendee'
+      : participation?.mode === 'team'
+        ? '/ team'
+        : participation?.mode === 'both'
+          ? '/ person · / team'
+          : undefined;
   const spotsLeft = Math.max(0, event.capacity - event.registeredCount);
   // Owner state: since the server GET is now session-aware, an owner
   // viewing their own event receives createdByEmail/organizer.email and
@@ -217,27 +248,53 @@ export function EventDetailsPage() {
   // Guests skip the gate — registration itself requires sign-in, and
   // the existing service error covers that path unchanged.
   const detailsRequired = event ? event.requireAttendeeDetails !== false : false;
+  // After the details gate (or straight away when the gate does not
+  // apply): team events pause at the team modal so the attendee picks
+  // Individual / Team and Create / Join first; the modal's own
+  // buttons then open the payment or confirm step.
+  const continueAfterGate = (target: 'free' | 'paid') => {
+    if (teamEnabled) {
+      setTeamParticipationType(participation?.mode === 'team' ? 'team' : 'individual');
+      setTeamAction('create');
+      setTeamSize(minTeamSize);
+      setTeamCodeInput('');
+      setTeamError('');
+      setTeamOpts(undefined);
+      setTeamModalTarget(target);
+      setTeamModalOpen(true);
+      return;
+    }
+    if (target === 'paid') setPaymentOpen(true);
+    else setConfirmRegisterOpen(true);
+  };
   const openRegistration = (target: 'free' | 'paid') => {
     if (!detailsRequired || !authService.getCurrentUser()) {
-      if (target === 'paid') setPaymentOpen(true);
-      else setConfirmRegisterOpen(true);
+      continueAfterGate(target);
       return;
     }
     setDetailsGateTarget(target);
     setDetailsGateOpen(true);
   };
 
-  const handleRegisterConfirm = async () => {
+  // Leader's team code, appended to the success toast so they can
+  // share it right away (it also stays visible in the "You're
+  // registered!" area afterwards).
+  const leaderTeamCodeLine = (reg: AttendeeRegistration | null | undefined) =>
+    reg?.participationType === 'team' && reg.isTeamLeader && reg.teamCode
+      ? ` Share your team code ${reg.teamCode} with your team so they can join.`
+      : '';
+
+  const handleRegisterConfirm = async (team?: TeamRegistrationOptions) => {
     setActionLoading(true);
     try {
-      const reg = await registrationsService.register(event);
+      const reg = await registrationsService.register(event, team);
       setRegistration(reg);
       setEvent((prev) => (prev ? { ...prev, registeredCount: prev.registeredCount + 1 } : null));
       setConfirmRegisterOpen(false);
       toast({
         type: 'success',
-        title: 'Registration Confirmed!',
-        description: `Your ticket code is ${reg.ticketCode}. View it anytime in My Registrations.`,
+        title: team?.participationType === 'team' ? 'Team Created!' : 'Registration Confirmed!',
+        description: `Your ticket code is ${reg.ticketCode}. View it anytime in My Registrations.${leaderTeamCodeLine(reg)}`,
       });
     } catch (err: unknown) {
       toast({
@@ -250,6 +307,61 @@ export function EventDetailsPage() {
     }
   };
 
+  // Team modal's Continue button. Individual: straight to the
+  // payment / confirm step. Team create: the leader registers (and
+  // pays, for paid events) — the server generates the team code.
+  // Team join is a separate button (handleTeamJoin): no payment.
+  const handleTeamContinue = () => {
+    if (!event) return;
+    if (teamParticipationType === 'individual') {
+      setTeamModalOpen(false);
+      if (teamModalTarget === 'paid') setPaymentOpen(true);
+      else setConfirmRegisterOpen(true);
+      return;
+    }
+    const size = Math.min(maxTeamSize, Math.max(minTeamSize, teamSize));
+    const opts: TeamRegistrationOptions = { participationType: 'team', teamAction: 'create', teamSize: size };
+    setTeamModalOpen(false);
+    if (teamModalTarget === 'paid') {
+      setTeamOpts(opts);
+      setPaymentOpen(true);
+      return;
+    }
+    void handleRegisterConfirm(opts);
+  };
+
+  // Team modal's Join button: the member joins with the leader's
+  // code and is confirmed immediately — no payment step, the leader
+  // already paid. Server errors (bad code, leader not paid yet, team
+  // full) show inside the modal so the code can be corrected.
+  const handleTeamJoin = async () => {
+    if (!event) return;
+    setTeamError('');
+    setActionLoading(true);
+    try {
+      const reg = await registrationsService.joinTeam(event, teamCodeInput);
+      setRegistration(reg);
+      setEvent((prev) => (prev ? { ...prev, registeredCount: prev.registeredCount + 1 } : null));
+      setTeamModalOpen(false);
+      toast({
+        type: 'success',
+        title: 'You joined the team!',
+        description: `Your ticket code is ${reg.ticketCode}. View it anytime in My Registrations.`,
+      });
+    } catch (err: unknown) {
+      setTeamError(err instanceof Error ? err.message : 'Could not join the team. Please try again.');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleCopyTeamCode = () => {
+    if (!registration?.teamCode) return;
+    navigator.clipboard.writeText(registration.teamCode);
+    setCopiedTeamCode(true);
+    setTimeout(() => setCopiedTeamCode(false), 2000);
+  };
+
 
 
   // Razorpay Standard Checkout: the pass is issued automatically, but
@@ -258,7 +370,7 @@ export function EventDetailsPage() {
   // never issues a pass — handleRazorpayPay always calls verify first.
   // Dismissing the modal or a failed payment leaves the registration
   // pending, so the attendee can retry or fall back to manual UPI.
-  const handleRazorpayPay = async () => {
+  const handleRazorpayPay = async (team?: TeamRegistrationOptions) => {
     if (!event) return;
     setRazorpayError('');
     setActionLoading(true);
@@ -268,7 +380,7 @@ export function EventDetailsPage() {
       // pending row. Never create a second pending row for this user.
       let reg = registration && registration.status === 'pending' ? registration : null;
       if (!reg) {
-        reg = await registrationsService.registerWithRazorpay(event);
+        reg = await registrationsService.registerWithRazorpay(event, team);
         setRegistration(reg);
       }
       const order = await paymentsService.createOrder(reg.id);
@@ -287,7 +399,7 @@ export function EventDetailsPage() {
           toast({
             type: 'success',
             title: 'Payment confirmed!',
-            description: `Your ticket code is ${result.ticketCode}. View it anytime in My Registrations.`,
+            description: `Your ticket code is ${result.ticketCode}. View it anytime in My Registrations.${leaderTeamCodeLine(updated)}`,
           });
         } else {
           // Previously the Pay button stayed stuck loading here with no
@@ -321,7 +433,7 @@ export function EventDetailsPage() {
               toast({
                 type: 'success',
                 title: 'Payment confirmed!',
-                description: `Your ticket code is ${result.ticketCode}. View it anytime in My Registrations.`,
+                description: `Your ticket code is ${result.ticketCode}. View it anytime in My Registrations.${leaderTeamCodeLine(updated)}`,
               });
             }
           } catch (err: unknown) {
@@ -611,8 +723,8 @@ export function EventDetailsPage() {
                 <span className="font-editorial text-2xl font-bold text-[#1E2320] tabular-nums">
                   {formatPrice(event.price)}
                 </span>
-                {event.price === 0 && (
-                  <span className="text-xs text-[#5F635D] ml-1.5">/ attendee</span>
+                {priceSuffix && (
+                  <span className="text-xs text-[#5F635D] ml-1.5">{priceSuffix}</span>
                 )}
               </div>
               <span className="text-xs text-[#5F635D]">
@@ -688,6 +800,23 @@ export function EventDetailsPage() {
                     <p className="text-[11px] text-[#1E3F35]/80 mt-0.5">
                       Pass code: <span className="font-mono font-bold">{registration?.ticketCode}</span>
                     </p>
+                    {/* Team leader's code, shown again after leaving
+                        the page so it can be shared with the team.
+                        Only the leader sees it: members joined with
+                        it and never need it again. */}
+                    {registration?.participationType === 'team' && registration.isTeamLeader && registration.teamCode && (
+                      <p className="text-[11px] text-[#1E3F35]/80 mt-1 flex items-center gap-1.5 flex-wrap">
+                        Your team code: <span className="font-mono font-bold">{registration.teamCode}</span>
+                        <button
+                          type="button"
+                          onClick={handleCopyTeamCode}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 bg-white border border-[#D0E2D9] rounded-md text-[11px] font-semibold text-[#1E3F35] hover:bg-[#FAF8F5]"
+                        >
+                          {copiedTeamCode ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                          <span>{copiedTeamCode ? 'Copied' : 'Copy'}</span>
+                        </button>
+                      </p>
+                    )}
                   </div>
                 </div>
 
@@ -867,8 +996,7 @@ export function EventDetailsPage() {
             const target = detailsGateTarget;
             setDetailsGateOpen(false);
             setDetailsGateTarget(null);
-            if (target === 'paid') setPaymentOpen(true);
-            else if (target === 'free') setConfirmRegisterOpen(true);
+            if (target) continueAfterGate(target);
           }}
         />
       )}
@@ -914,7 +1042,7 @@ export function EventDetailsPage() {
             <button
               type="button"
               disabled={actionLoading}
-              onClick={handleRazorpayPay}
+              onClick={() => handleRazorpayPay(teamOpts)}
               className="w-full py-3 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors disabled:opacity-60"
             >
               {actionLoading ? 'Starting payment…' : `Pay ${formatPrice(event.price)} with Razorpay`}
@@ -926,6 +1054,172 @@ export function EventDetailsPage() {
             succeeds but no pass appears, use Pay Now again — it recovers
             the payment instead of charging you twice.
           </p>
+        </div>
+      </Modal>
+
+      {/* Team participation modal (hackathons, f-1 + f-2): shown
+          after the details gate, before payment / confirm. The
+          leader pays once for the whole team; members join free
+          with the leader's code and never see a payment step. */}
+      <Modal
+        isOpen={teamModalOpen}
+        onClose={() => {
+          setTeamModalOpen(false);
+          setTeamError('');
+        }}
+        title="How are you registering?"
+        description={
+          participation?.mode === 'team'
+            ? 'This hackathon is for teams only. Create a team and pay once for the whole team, or join your leader’s team with their code.'
+            : 'You can register on your own or as part of a team. Team leaders pay once for the whole team; members join free with the team code.'
+        }
+      >
+        <div className="space-y-4">
+          {participation?.mode === 'both' && (
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setTeamParticipationType('individual')}
+                className={`text-left p-3 rounded-xl border text-xs transition-colors ${
+                  teamParticipationType === 'individual'
+                    ? 'border-[#1E3F35] bg-[#EAF1ED]'
+                    : 'border-[#E2DFD8] bg-white hover:border-[#1E3F35]'
+                }`}
+              >
+                <span className="block font-semibold text-[#1E2320]">Individual</span>
+                <span className="block text-[11px] text-[#5F635D] mt-0.5">
+                  {event.price === 0 ? 'Free' : `${formatPrice(event.price)} per person`}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setTeamParticipationType('team')}
+                className={`text-left p-3 rounded-xl border text-xs transition-colors ${
+                  teamParticipationType === 'team'
+                    ? 'border-[#1E3F35] bg-[#EAF1ED]'
+                    : 'border-[#E2DFD8] bg-white hover:border-[#1E3F35]'
+                }`}
+              >
+                <span className="block font-semibold text-[#1E2320]">Team</span>
+                <span className="block text-[11px] text-[#5F635D] mt-0.5">
+                  {event.price === 0 ? 'Free' : `${formatPrice(event.price)} per team`}
+                </span>
+              </button>
+            </div>
+          )}
+          {teamParticipationType === 'team' ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setTeamAction('create')}
+                  className={`text-left p-3 rounded-xl border text-xs transition-colors ${
+                    teamAction === 'create'
+                      ? 'border-[#1E3F35] bg-[#EAF1ED]'
+                      : 'border-[#E2DFD8] bg-white hover:border-[#1E3F35]'
+                  }`}
+                >
+                  <span className="block font-semibold text-[#1E2320]">Create a team</span>
+                  <span className="block text-[11px] text-[#5F635D] mt-0.5">You’re the leader — you pay</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTeamAction('join')}
+                  className={`text-left p-3 rounded-xl border text-xs transition-colors ${
+                    teamAction === 'join'
+                      ? 'border-[#1E3F35] bg-[#EAF1ED]'
+                      : 'border-[#E2DFD8] bg-white hover:border-[#1E3F35]'
+                  }`}
+                >
+                  <span className="block font-semibold text-[#1E2320]">Join a team</span>
+                  <span className="block text-[11px] text-[#5F635D] mt-0.5">Free — your leader paid</span>
+                </button>
+              </div>
+              {teamAction === 'create' ? (
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+                      Team size
+                    </label>
+                    <select
+                      value={teamSize}
+                      onChange={(e) => setTeamSize(Number(e.target.value))}
+                      className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
+                    >
+                      {Array.from({ length: maxTeamSize - minTeamSize + 1 }, (_, i) => minTeamSize + i).map((n) => (
+                        <option key={n} value={n}>
+                          {n} {n === 1 ? 'person' : 'people'}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] text-[#5F635D] mt-1 leading-relaxed">
+                      {event.price === 0
+                        ? 'Free for the whole team. Your team code is shown after registration — share it so your team can join.'
+                        : `You’ll pay ${formatPrice(event.price)} once for the whole team — members join free. Your team code is shown after registration, so share it with your team.`}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={actionLoading}
+                    onClick={handleTeamContinue}
+                    className="w-full py-3 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors disabled:opacity-60"
+                  >
+                    {actionLoading
+                      ? 'Please wait…'
+                      : teamModalTarget === 'paid'
+                        ? `Continue to payment · ${formatPrice(event.price)}`
+                        : 'Create team & Register'}
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+                      Team code
+                    </label>
+                    <input
+                      type="text"
+                      value={teamCodeInput}
+                      onChange={(e) => setTeamCodeInput(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6))}
+                      placeholder="e.g. K7M2QX"
+                      maxLength={6}
+                      autoCapitalize="characters"
+                      autoComplete="off"
+                      className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 font-mono tracking-[0.2em] uppercase text-[#1E2320] focus:border-[#1E3F35]"
+                    />
+                    <p className="text-[11px] text-[#5F635D] mt-1 leading-relaxed">
+                      Ask your team leader for the 6-character code. No payment — your leader has
+                      already paid for the team, and they must have finished paying before you can join.
+                    </p>
+                  </div>
+                  {teamError && <p className="text-[11px] text-rose-600">{teamError}</p>}
+                  <button
+                    type="button"
+                    disabled={actionLoading || teamCodeInput.trim().length !== 6}
+                    onClick={handleTeamJoin}
+                    className="w-full py-3 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors disabled:opacity-60"
+                  >
+                    {actionLoading ? 'Joining…' : 'Join team'}
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-[11px] text-[#5F635D] leading-relaxed">
+                You’ll register as an individual
+                {event.price === 0 ? ' — free.' : ` — ${formatPrice(event.price)} per person.`}
+              </p>
+              <button
+                type="button"
+                disabled={actionLoading}
+                onClick={handleTeamContinue}
+                className="w-full py-3 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors disabled:opacity-60"
+              >
+                {teamModalTarget === 'paid' ? `Continue to payment · ${formatPrice(event.price)}` : 'Continue'}
+              </button>
+            </div>
+          )}
         </div>
       </Modal>
 

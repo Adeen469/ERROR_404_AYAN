@@ -218,6 +218,14 @@ export function CreateEventPage() {
   // the attendee's name, mobile number and email, plus a confirmation
   // that those details are shared with the organizer only.
   const [requireAttendeeDetails, setRequireAttendeeDetails] = useState(true);
+  // Team participation (Technology & Hackathons only, f-1 + f-2):
+  // Individual only / Team only / Individual or Team, plus the
+  // min/max team size the attendee picks (2..10). The ticket price
+  // is per team for team registrations — the leader pays once and
+  // members join free with the leader's team code.
+  const [participationMode, setParticipationMode] = useState<'individual' | 'team' | 'both'>('individual');
+  const [minTeamSize, setMinTeamSize] = useState('2');
+  const [maxTeamSize, setMaxTeamSize] = useState('4');
   const [capacity, setCapacity] = useState('50');
   const [tagsInput, setTagsInput] = useState('Community, Gathering');
 
@@ -262,6 +270,17 @@ export function CreateEventPage() {
 
     const priceNum = Number(price);
     if (isNaN(priceNum) || priceNum < 0) errs.price = 'Price cannot be negative.';
+
+    // Team participation only applies to hackathons (the section is
+    // hidden for every other category, custom categories included).
+    const isHackathon = (customCategory.trim() ? customCategory.trim() : category) === 'Technology & Hackathons';
+    if (isHackathon && participationMode !== 'individual') {
+      const min = Number(minTeamSize);
+      const max = Number(maxTeamSize);
+      if (!Number.isInteger(min) || min < 2 || min > 10) errs.minTeamSize = 'Minimum team size must be between 2 and 10.';
+      if (!Number.isInteger(max) || max < 2 || max > 10) errs.maxTeamSize = 'Maximum team size must be between 2 and 10.';
+      if (Number.isInteger(min) && Number.isInteger(max) && min > max) errs.maxTeamSize = 'Maximum team size cannot be below the minimum.';
+    }
 
     setErrors(errs);
     return Object.keys(errs).length === 0;
@@ -327,6 +346,13 @@ export function CreateEventPage() {
         country: location.country.trim() || undefined,
         price: Number(price),
         requireAttendeeDetails,
+        // Team participation (hackathons only): the server validates
+        // the mode and size bounds, and strips this for any other
+        // category. The price above is per team for team registrations.
+        participation:
+          effectiveCategory === 'Technology & Hackathons'
+            ? { mode: participationMode, minTeamSize: Number(minTeamSize), maxTeamSize: Number(maxTeamSize) }
+            : undefined,
         capacity: Number(capacity),
         tags,
         organizer: {
@@ -760,6 +786,78 @@ export function CreateEventPage() {
             </div>
           </div>
         </div>
+
+        {/* Section: Participation — hackathons only (f-1 + f-2). Hidden
+            for every other category, custom categories included. */}
+        {(customCategory.trim() ? customCategory.trim() : category) === 'Technology & Hackathons' && (
+          <div className="space-y-4">
+            <h2 className="font-editorial text-base font-bold text-[#1E2320] pb-2 border-b border-[#EBE7DF]">
+              5. Participation
+            </h2>
+            <p className="text-[11px] text-[#5F635D] leading-relaxed">
+              Choose how attendees register. The ticket price above is per person for individual
+              registrations and per team for team registrations: the team leader pays once, and
+              members join free with the leader&apos;s team code.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              {([
+                { value: 'individual', label: 'Individual only', hint: 'Everyone registers alone' },
+                { value: 'team', label: 'Team only', hint: 'Everyone registers in a team' },
+                { value: 'both', label: 'Individual or Team', hint: 'Each attendee chooses' },
+              ] as const).map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setParticipationMode(opt.value)}
+                  className={`text-left p-3 rounded-xl border text-xs transition-colors ${
+                    participationMode === opt.value
+                      ? 'border-[#1E3F35] bg-[#EAF1ED]'
+                      : 'border-[#E2DFD8] bg-white hover:border-[#1E3F35]'
+                  }`}
+                >
+                  <span className="block font-semibold text-[#1E2320]">{opt.label}</span>
+                  <span className="block text-[11px] text-[#5F635D] mt-0.5">{opt.hint}</span>
+                </button>
+              ))}
+            </div>
+            {participationMode !== 'individual' && (
+              <div className="grid grid-cols-2 gap-4 max-w-sm">
+                <div>
+                  <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+                    Minimum team size
+                  </label>
+                  <input
+                    type="number"
+                    min="2"
+                    max="10"
+                    value={minTeamSize}
+                    onChange={(e) => setMinTeamSize(e.target.value)}
+                    className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] ${
+                      errors.minTeamSize ? 'border-rose-500' : 'border-[#E2DFD8]'
+                    }`}
+                  />
+                  {errors.minTeamSize && <p className="text-[11px] text-rose-600 mt-1">{errors.minTeamSize}</p>}
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+                    Maximum team size
+                  </label>
+                  <input
+                    type="number"
+                    min="2"
+                    max="10"
+                    value={maxTeamSize}
+                    onChange={(e) => setMaxTeamSize(e.target.value)}
+                    className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] ${
+                      errors.maxTeamSize ? 'border-rose-500' : 'border-[#E2DFD8]'
+                    }`}
+                  />
+                  {errors.maxTeamSize && <p className="text-[11px] text-rose-600 mt-1">{errors.maxTeamSize}</p>}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Submit Bar */}
         <div className="pt-6 border-t border-[#EBE7DF] flex items-center justify-end gap-3">

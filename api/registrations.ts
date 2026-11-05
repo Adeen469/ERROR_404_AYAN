@@ -598,6 +598,29 @@ function newTicketCode(): string {
   return `LOC-${out}-TK`;
 }
 
+// Team code for hackathon teams (f-1 + f-2): 6 crypto-random
+// characters from the same no-lookalike alphabet, unique among the
+// event's non-cancelled leader rows. The leader shares it with their
+// team; members join with it. Retried on collision (32^6 codes, so
+// a clash is near-impossible); the time-based fallback only exists
+// so a code is always produced.
+function newTeamCode(allRegs: any[], eventId: string): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  for (let attempt = 0; attempt < 8; attempt++) {
+    let out = "";
+    try {
+      const bytes = new Uint8Array(6);
+      (globalThis as any).crypto.getRandomValues(bytes);
+      for (const b of bytes) out += chars[b % chars.length];
+    } catch {
+      for (let i = 0; i < 6; i++) out += chars[Math.floor(Math.random() * chars.length)];
+    }
+    const clash = allRegs.some((r: any) => r.eventId === eventId && r.teamCode === out && r.isTeamLeader === true && r.status !== "cancelled");
+    if (!clash) return out;
+  }
+  return `T${Date.now().toString(36).toUpperCase().slice(-5)}`;
+}
+
 // Refund rule (2026-11-05, user-confirmed): a paid Razorpay ticket
 // cancelled within 24 hours of PURCHASE gets a full refund; after
 // 24 hours the user gets 90% back (a 10% cancellation fee is kept).
@@ -785,6 +808,86 @@ export default async function handler(req: any, res: any): Promise<void> {
       const existingCancelled = allRegs.find((r: any) => r.eventId === reg.eventId && norm(r.userEmail) === me && r.status === "cancelled");
       const reactivating = Boolean(existingCancelled);
       if (reactivating) reg.id = existingCancelled.id;
+      // Team participation (Technology & Hackathons only, f-1 + f-2).
+      // Each member registers individually; only the leader pays.
+      // The leader's row is a normal Razorpay/free row carrying the
+      // team fields (the code is generated here, never from the
+      // client). A member's row is confirmed immediately with
+      // paymentMethod 'team' and amountPaise 0 — it never goes
+      // through the paid rule below, and create-order refuses it
+      // (api/payments.ts 409s every already-confirmed row).
+      const part = event.participation && typeof event.participation === "object" ? event.participation : null;
+      const partMode = part && (part.mode === "individual" || part.mode === "team" || part.mode === "both") ? part.mode : null;
+      const minTeamSize = part && Number.isInteger(Number(part.minTeamSize)) ? Math.max(2, Math.min(10, Number(part.minTeamSize))) : 2;
+      const maxTeamSize = part && Number.isInteger(Number(part.maxTeamSize)) ? Math.max(2, Math.min(10, Number(part.maxTeamSize))) : 4;
+      const pType = reg.participationType === "team" ? "team" : "individual";
+      let isTeamJoin = false;
+      if (pType === "team") {
+        if (!part || (partMode !== "team" && partMode !== "both")) {
+          sendJson(res, 400, { message: "This event does not allow team registrations" });
+          return;
+        }
+        const teamAction = reg.teamAction === "join" ? "join" : reg.teamAction === "create" ? "create" : "";
+        if (!teamAction) {
+          sendJson(res, 400, { message: "Choose whether to create or join a team" });
+          return;
+        }
+        if (teamAction === "create") {
+          const size = Number(reg.teamSize);
+          if (!Number.isInteger(size) || size < minTeamSize || size > maxTeamSize) {
+            sendJson(res, 400, { message: `Team size must be between ${minTeamSize} and ${maxTeamSize}` });
+            return;
+          }
+          reg.participationType = "team";
+          reg.teamSize = size;
+          reg.isTeamLeader = true;
+          // Server-generated: a client-sent code is never trusted.
+          reg.teamCode = newTeamCode(allRegs, reg.eventId);
+        } else {
+          const code = typeof reg.teamCode === "string" ? reg.teamCode.trim().toUpperCase() : "";
+          if (!/^[A-Z0-9]{6}$/.test(code)) {
+            sendJson(res, 400, { message: "Enter the 6-character team code" });
+            return;
+          }
+          // The leader must already be confirmed: a still-pending
+          // leader has not completed payment yet, so nobody may join
+          // on their code. A cancelled leader's code is dead the
+          // same way — their row is no longer 'confirmed'.
+          const leader = allRegs.find((r: any) => r.eventId === reg.eventId && r.teamCode === code && r.isTeamLeader === true && r.status === "confirmed");
+          if (!leader) {
+            const leaderPending = allRegs.some((r: any) => r.eventId === reg.eventId && r.teamCode === code && r.isTeamLeader === true && r.status === "pending");
+            sendJson(res, 400, { message: leaderPending ? "Your team leader hasn't completed payment yet — ask them to finish paying first." : "That team code doesn't match any team for this event." });
+            return;
+          }
+          // The leader counts as 1: a team of size N holds N seats.
+          const members = allRegs.filter((r: any) => r.eventId === reg.eventId && r.teamCode === code && r.status !== "cancelled");
+          if (members.length >= Number(leader.teamSize || 0)) {
+            sendJson(res, 409, { message: "This team is full" });
+            return;
+          }
+          isTeamJoin = true;
+          reg.participationType = "team";
+          reg.teamCode = code;
+          reg.teamSize = Number(leader.teamSize) || members.length + 1;
+          reg.isTeamLeader = false;
+          reg.status = "confirmed";
+          reg.paymentMethod = "team";
+          reg.amountPaise = 0;
+        }
+      } else {
+        // Individual registration: refused only when the event is
+        // team-only. Team fields are always server-owned: a crafted
+        // body must not smuggle a code, a size, or leader status
+        // onto an individual row.
+        if (part && partMode === "team") {
+          sendJson(res, 400, { message: "This event is for teams only — create or join a team to register." });
+          return;
+        }
+        reg.participationType = "individual";
+        reg.teamCode = undefined;
+        reg.teamSize = undefined;
+        reg.isTeamLeader = false;
+      }
       // Server-side paid rule: a paid event never gets an instant pass,
       // and never gets a manual pending row either. Paid rows exist
       // only as Razorpay rows (paymentMethod 'razorpay', created by
@@ -793,10 +896,15 @@ export default async function handler(req: any, res: any): Promise<void> {
       // Legacy manual pending rows are NOT rejected here — the dedupe
       // above already returned them as-is, so their owners can still
       // convert them via Pay Now (Razorpay create-order).
-      if (Number(event.price) > 0 && reg.status === "confirmed") reg.status = "pending";
-      if (Number(event.price) > 0 && reg.paymentMethod !== "razorpay" && reg.status === "pending") {
-        sendJson(res, 400, { message: "Paid events use Razorpay checkout — manual payments are no longer accepted" });
-        return;
+      // A team-join member skips this rule entirely: their row is
+      // confirmed above with paymentMethod 'team' (the leader already
+      // paid), so it must never be flipped to pending or refused here.
+      if (!isTeamJoin) {
+        if (Number(event.price) > 0 && reg.status === "confirmed") reg.status = "pending";
+        if (Number(event.price) > 0 && reg.paymentMethod !== "razorpay" && reg.status === "pending") {
+          sendJson(res, 400, { message: "Paid events use Razorpay checkout — manual payments are no longer accepted" });
+          return;
+        }
       }
       // Server-owned fields are never caller-writable: a crafted row
       // must not smuggle holdsSpot=true (a free seat on approval), a
@@ -819,8 +927,9 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       // Expected-amount snapshot for the Razorpay order (the amount
-      // create-order charges and verify checks against).
-      if (Number(event.price) > 0) reg.amountPaise = Math.round(Number(event.price) * 100);
+      // create-order charges and verify checks against). A team-join
+      // member pays nothing, so their snapshot stays 0 (set above).
+      if (!isTeamJoin && Number(event.price) > 0) reg.amountPaise = Math.round(Number(event.price) * 100);
       reg.registeredAt = reg.registeredAt || new Date().toISOString();
       // Do not store a full nested event with organiser email/UPI.
       // Store only the public snapshot the UI needs.

@@ -84,13 +84,26 @@ export function AttendeesPage() {
   // here is the true confirmed count from the roster, not the stored
   // event count (legacy pending rows were counted in that number).
   const approvedCount = attendees.filter((a) => a.status === 'confirmed').length;
+  // Team rollup (hackathons): per team code, the non-cancelled member
+  // count and the size the leader picked, so the roster can show
+  // "Team ABC123 · Member · 2/4". Cancelled rows don't count.
+  const teamCounts = new Map<string, { count: number; size: number }>();
+  for (const a of attendees) {
+    if (a.participationType !== 'team' || !a.teamCode) continue;
+    if (a.status === 'cancelled') continue;
+    const prev = teamCounts.get(a.teamCode) || { count: 0, size: 0 };
+    teamCounts.set(a.teamCode, {
+      count: prev.count + 1,
+      size: prev.size || Number(a.teamSize) || 0,
+    });
+  }
 
   const handleExportCSV = () => {
     if (tableAttendees.length === 0) {
       toast({ type: 'info', title: 'No attendees to export' });
       return;
     }
-    const headers = ['Registration ID', 'Name', 'Email', 'Phone', 'Ticket Code', 'Status', 'Checked In'];
+    const headers = ['Registration ID', 'Name', 'Email', 'Phone', 'Ticket Code', 'Status', 'Checked In', 'Participation', 'Team Code', 'Team Leader', 'Team Size'];
     const rows = tableAttendees.map((a) => [
       a.id,
       `"${a.userName}"`,
@@ -99,6 +112,10 @@ export function AttendeesPage() {
       a.ticketCode,
       a.status,
       a.checkedIn ? 'Yes' : 'No',
+      a.participationType || 'individual',
+      `"${a.teamCode || ''}"`,
+      a.participationType === 'team' ? (a.isTeamLeader ? 'Yes' : 'No') : '',
+      a.teamSize ? String(a.teamSize) : '',
     ]);
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
     const encodedUri = encodeURI(csvContent);
@@ -123,6 +140,7 @@ export function AttendeesPage() {
       a.userName.toLowerCase().includes(q) ||
       a.userEmail.toLowerCase().includes(q) ||
       (a.userPhone || '').toLowerCase().includes(q) ||
+      (a.teamCode || '').toLowerCase().includes(q) ||
       a.ticketCode.toLowerCase().includes(q);
 
     if (!matchesSearch) return false;
@@ -272,6 +290,11 @@ export function AttendeesPage() {
                     ) : null}
                     {formatEventDate(reg.registeredAt)}
                   </p>
+                  {reg.participationType === 'team' && reg.teamCode && (
+                    <p className="text-[#1E3F35] font-semibold">
+                      Team {reg.teamCode} · {reg.isTeamLeader ? 'Leader' : 'Member'}
+                    </p>
+                  )}
                 </div>
               </div>
             ))}
@@ -355,6 +378,14 @@ export function AttendeesPage() {
                       )}
                       {att.phoneVerified && (
                         <p className="text-[11px] text-[#1E3F35] font-semibold">✓ Verified</p>
+                      )}
+                      {att.participationType === 'team' && att.teamCode && (
+                        <p className="text-[11px] text-[#1E3F35] font-semibold">
+                          Team {att.teamCode} · {att.isTeamLeader ? 'Leader' : 'Member'}
+                          {!att.isTeamLeader && teamCounts.has(att.teamCode)
+                            ? ` · ${teamCounts.get(att.teamCode)?.count}/${teamCounts.get(att.teamCode)?.size || '?'}`
+                            : ''}
+                        </p>
                       )}
                     </td>
 

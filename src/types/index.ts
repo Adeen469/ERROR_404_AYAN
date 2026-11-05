@@ -29,6 +29,20 @@ export interface Organizer {
   totalAttendeesServed: number;
 }
 
+export type ParticipationMode = 'individual' | 'team' | 'both';
+
+// Team participation for Technology & Hackathons events (f-1 + f-2).
+// The organizer picks the mode while creating the event: attendees
+// register as individuals only, as teams only, or either. In team
+// mode the leader registers and pays once; members join free with
+// the leader's team code (see api/registrations.ts). minTeamSize /
+// maxTeamSize bound the team size the attendee picks (2..10).
+export interface EventParticipation {
+  mode: ParticipationMode;
+  minTeamSize: number;
+  maxTeamSize: number;
+}
+
 export interface EventItem {
   id: string;
   title: string;
@@ -69,6 +83,10 @@ export interface EventItem {
   // are shared with the organizer only. When false, registration needs
   // no details at all. Set on the create/edit forms.
   requireAttendeeDetails?: boolean;
+  // Team participation config (Technology & Hackathons only; see
+  // EventParticipation). Absent on older events and every other
+  // category — those are individual-only. Never sent in ?slim=1 lists.
+  participation?: EventParticipation;
   capacity: number;
   registeredCount: number;
   status: EventStatus;
@@ -117,11 +135,13 @@ export interface AttendeeRegistration {
   // Razorpay Standard Checkout payments. 'manual' is the original
   // UPI/UTR flow (or absent on older rows); 'razorpay' rows are
   // confirmed automatically by api/payments.ts on verified payment,
-  // never by organizer approval. The order id is stored on the pending
-  // row so verify can bind the payment to exactly this registration;
+  // never by organizer approval. 'team' rows are members who joined
+  // a leader-paid team with a team code: confirmed immediately, no
+  // payment of their own, amountPaise 0 (see participationType /
+  // teamCode below). The order id is stored on the pending row so verify can bind the payment to exactly this registration;
   // the payment id is stored on confirmation. Neither field is ever
   // set from an unverified client claim.
-  paymentMethod?: 'manual' | 'razorpay';
+  paymentMethod?: 'manual' | 'razorpay' | 'team';
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   // Price snapshot at payment time, in paise (server-set from the
@@ -143,6 +163,17 @@ export interface AttendeeRegistration {
   refundAmountPaise?: number;
   refundFeePaise?: number;
   paidAt?: string;
+  // Team participation (Technology & Hackathons only, server-set —
+  // a client-sent value is never trusted, see api/registrations.ts).
+  // 'team' rows belong to one team: teamCode is the leader-generated
+  // 6-character code, teamSize is the size the leader picked, and
+  // isTeamLeader marks the one registration that paid for the team.
+  // Members join with the code and are confirmed immediately with
+  // paymentMethod 'team' and amountPaise 0 — only the leader pays.
+  participationType?: 'individual' | 'team';
+  teamCode?: string;
+  teamSize?: number;
+  isTeamLeader?: boolean;
 }
 
 export interface UserProfile {

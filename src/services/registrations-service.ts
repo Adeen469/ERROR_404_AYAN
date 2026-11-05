@@ -49,6 +49,51 @@ function newTicketCode(): string {
   return `LOC-${Math.floor(1000 + Math.random() * 9000)}-TK`;
 }
 
+// Team participation options, passed from the event page when the
+// event's participation mode allows teams (see src/types).
+export interface TeamRegistrationOptions {
+  participationType: 'individual' | 'team';
+  teamAction?: 'create' | 'join';
+  teamSize?: number;
+  teamCode?: string;
+}
+
+// Client-side team code, used ONLY for local/demo rows (the shared
+// server always generates the real code — see api/registrations.ts).
+// Same no-lookalike alphabet as the server code.
+function newTeamCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let out = '';
+  for (let i = 0; i < 6; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return out;
+}
+
+// Body fields for a team registration. For a leader (create) the
+// teamCode here is a local placeholder — the server generates the
+// real code and returns it on the stored row. For a member (join)
+// the code is the leader's code, uppercased; the server validates
+// it, the leader's confirmed status, and the team size cap.
+function teamBodyFields(team?: TeamRegistrationOptions): Partial<AttendeeRegistration> & { teamAction?: 'create' | 'join' } {
+  if (!team || team.participationType !== 'team') return { participationType: 'individual' };
+  if (team.teamAction === 'join') {
+    return {
+      participationType: 'team',
+      teamAction: 'join',
+      teamCode: (team.teamCode || '').trim().toUpperCase(),
+      isTeamLeader: false,
+      paymentMethod: 'team',
+      amountPaise: 0,
+    };
+  }
+  return {
+    participationType: 'team',
+    teamAction: 'create',
+    teamSize: team.teamSize,
+    teamCode: newTeamCode(),
+    isTeamLeader: true,
+  };
+}
+
 // Refund preview — CLIENT-SIDE ONLY. The server is the source of
 // truth (api/registrations.ts has the identical refundQuote logic);
 // this is what the cancel dialogs show before the user confirms.
@@ -147,7 +192,9 @@ export const registrationsService = {
 
   // Free events only: instant confirmed pass. Paid events must go through
   // registerWithRazorpay — a paid event must never get an instant pass.
-  async register(event: EventItem): Promise<AttendeeRegistration> {
+  // The exception is a team JOIN on a paid event (joinTeam below): the
+  // member pays nothing because the leader already paid.
+  async register(event: EventItem, team?: TeamRegistrationOptions): Promise<AttendeeRegistration> {
     const user = authService.getCurrentUser();
     if (!user) {
       throw new Error('Please sign in or select a demo user profile to register for events.');
@@ -178,6 +225,7 @@ export const registrationsService = {
       return existing;
     }
 
+    const teamFields = teamBodyFields(team);
     const newReg: AttendeeRegistration = {
       id: `reg-${Date.now()}`,
       eventId: event.id,
@@ -196,6 +244,7 @@ export const registrationsService = {
       registeredAt: new Date().toISOString(),
       ticketCode: newTicketCode(),
       checkedIn: false,
+      ...teamFields,
     };
 
     // Server first in non-demo mode: a failed shared write used to be
@@ -207,8 +256,13 @@ export const registrationsService = {
       try {
         const saved = await apiClient.post<AttendeeRegistration>(
           '/registrations',
+          // A reactivation reuses the cancelled row's id server-side:
+          // overlay the team choices the user just picked, so a
+          // changed team size or a different team code wins over the
+          // stale values on the old row (the server re-validates and,
+          // for a leader, generates a fresh code).
           existing
-            ? { ...existing, status: 'confirmed', ticketCode: newReg.ticketCode }
+            ? { ...existing, ...teamFields, status: 'confirmed', ticketCode: newReg.ticketCode }
             : newReg,
         );
         const row = saved || newReg;
@@ -238,6 +292,7 @@ export const registrationsService = {
       existing.ticketCode = newReg.ticketCode;
       existing.userPhone = newReg.userPhone || existing.userPhone;
       existing.phoneVerified = newReg.phoneVerified || existing.phoneVerified;
+      Object.assign(existing, teamFields);
     } else {
       all.unshift(newReg);
     }
@@ -264,7 +319,7 @@ export const registrationsService = {
   // order for this row and confirms it (issuing the pass) only after
   // a verified captured payment. There is no organizer approval step
   // anywhere in this flow.
-  async registerWithRazorpay(event: EventItem): Promise<AttendeeRegistration> {
+  async registerWithRazorpay(event: EventItem, team?: TeamRegistrationOptions): Promise<AttendeeRegistration> {
     const user = authService.getCurrentUser();
     if (!user) {
       throw new Error('Please sign in or select a demo user profile to register for events.');
@@ -301,6 +356,10 @@ export const registrationsService = {
       ticketCode: '',
       checkedIn: false,
       paymentMethod: 'razorpay',
+      // Team leader path: the pending row carries the team fields so
+      // the leader's code is on the row from the start; the server
+      // generates the real code (the client one is a placeholder).
+      ...teamBodyFields(team),
     };
 
     // Server first in non-demo mode (see register): only a 503 falls
@@ -329,6 +388,109 @@ export const registrationsService = {
     // taken only on verified payment (api/payments.ts).
 
     return newReg;
+  },
+
+  // Team join (Technology & Hackathons, paid or free): the member
+  // registers with the leader's 6-character team code and is
+  // confirmed immediately — no payment step, because the leader
+  // already paid for the team. The server validates the code, that
+  // the leader's row is confirmed (a still-pending leader has not
+  // finished paying), and that the team is not full. Works for free
+  // events too (same instant confirm, same no-payment rule).
+  async joinTeam(event: EventItem, teamCode: string): Promise<AttendeeRegistration> {
+    const user = authService.getCurrentUser();
+    if (!user) {
+      throw new Error('Please sign in or select a demo user profile to register for events.');
+    }
+    const code = (teamCode || '').trim().toUpperCase();
+    if (!/^[A-Z0-9]{6}$/.test(code)) {
+      throw new Error('Enter the 6-character team code shared by your team leader.');
+    }
+    if (event.registeredCount >= event.capacity) {
+      throw new Error('This event is at full capacity. Join the waitlist or explore nearby alternatives.');
+    }
+
+    // Merged-state check (see register): a confirmed pass bought on
+    // another device means this user is already in.
+    if (!isDemoMode()) {
+      const merged = await this.getRegistrationForEvent(event.id);
+      if (merged && merged.status === 'confirmed') return merged;
+    }
+
+    const all = getStoredRegistrations();
+    const existing = all.find((r) => r.eventId === event.id && r.userId === user.id);
+    if (existing && existing.status === 'confirmed') {
+      return existing;
+    }
+
+    const newReg: AttendeeRegistration = {
+      id: `reg-${Date.now()}`,
+      eventId: event.id,
+      event,
+      userId: user.id,
+      userName: user.name,
+      userEmail: user.email,
+      userPhone: user.phone || undefined,
+      phoneVerified: user.phoneVerified || undefined,
+      status: 'confirmed',
+      registeredAt: new Date().toISOString(),
+      ticketCode: newTicketCode(),
+      checkedIn: false,
+      participationType: 'team',
+      teamCode: code,
+      isTeamLeader: false,
+      paymentMethod: 'team',
+      amountPaise: 0,
+    };
+    // teamAction is a request-only field (not stored on the row):
+    // it tells the server this is a join, not a leader create.
+    const body = { ...newReg, teamAction: 'join' as const };
+
+    // Server first in non-demo mode (see register): only a 503 falls
+    // back to the local row; other failures are thrown, so a bad code
+    // or a full team is reported instead of faking a pass.
+    if (!isDemoMode()) {
+      try {
+        const saved = await apiClient.post<AttendeeRegistration>('/registrations', body);
+        const row = saved || newReg;
+        if (existing) Object.assign(existing, row);
+        else all.unshift(row);
+        saveStoredRegistrations(all);
+        try {
+          await eventsService.adjustRegisteredCount(
+            event.id,
+            Math.min(event.capacity, event.registeredCount + 1),
+          );
+        } catch (e) {
+          console.warn('Could not increment event registered count:', e);
+        }
+        return row;
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 503) {
+          console.warn('Shared registration unavailable (backend unconfigured), keeping local registration:', err);
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    if (existing) {
+      Object.assign(existing, newReg, { status: 'confirmed' });
+    } else {
+      all.unshift(newReg);
+    }
+    saveStoredRegistrations(all);
+
+    try {
+      await eventsService.adjustRegisteredCount(
+        event.id,
+        Math.min(event.capacity, event.registeredCount + 1),
+      );
+    } catch (e) {
+      console.warn('Could not increment event registered count:', e);
+    }
+
+    return existing || newReg;
   },
 
   // Returns the cancelled row as the server stored it (carrying

@@ -51,6 +51,10 @@ export function EditEventPage() {
   // organizer opted out. Older events predate this flag and behave as
   // if it were on.
   const [requireAttendeeDetails, setRequireAttendeeDetails] = useState(true);
+  // Team participation (hackathons only, f-1 + f-2; see CreateEventPage).
+  const [participationMode, setParticipationMode] = useState<'individual' | 'team' | 'both'>('individual');
+  const [minTeamSize, setMinTeamSize] = useState('2');
+  const [maxTeamSize, setMaxTeamSize] = useState('4');
   const [capacity, setCapacity] = useState('50');
   const [tagsInput, setTagsInput] = useState('');
 
@@ -82,6 +86,11 @@ export function EditEventPage() {
           setMapUrl(data.mapUrl || '');
           setPrice(String(data.price));
           setRequireAttendeeDetails(data.requireAttendeeDetails ?? true);
+          // Team participation: older events and non-hackathons carry
+          // none, so they load as individual-only.
+          setParticipationMode(data.participation?.mode || 'individual');
+          setMinTeamSize(String(data.participation?.minTeamSize ?? 2));
+          setMaxTeamSize(String(data.participation?.maxTeamSize ?? 4));
           setCapacity(String(data.capacity));
           setTagsInput(data.tags.join(', '));
         }
@@ -138,6 +147,15 @@ export function EditEventPage() {
     }
     if (Number(price) < 0) errs.price = 'Price cannot be negative.';
 
+    // Team participation only applies to hackathons (the section is
+    // hidden for every other category).
+    if (category === 'Technology & Hackathons' && participationMode !== 'individual') {
+      const min = Number(minTeamSize);
+      const max = Number(maxTeamSize);
+      if (!Number.isInteger(min) || min < 2 || min > 10) errs.minTeamSize = 'Minimum team size must be between 2 and 10.';
+      if (!Number.isInteger(max) || max < 2 || max > 10) errs.maxTeamSize = 'Maximum team size must be between 2 and 10.';
+      if (Number.isInteger(min) && Number.isInteger(max) && min > max) errs.maxTeamSize = 'Maximum team size cannot be below the minimum.';
+    }
 
     setErrors(errs);
     return Object.keys(errs).length === 0;
@@ -175,6 +193,13 @@ export function EditEventPage() {
         neighborhood: event?.state ? (event?.city || '') : '',
         price: Number(price),
         requireAttendeeDetails,
+        // Team participation (hackathons only): the server validates
+        // the mode and size bounds, and strips this whenever the
+        // event is not a hackathon.
+        participation:
+          category === 'Technology & Hackathons'
+            ? { mode: participationMode, minTeamSize: Number(minTeamSize), maxTeamSize: Number(maxTeamSize) }
+            : null,
         capacity: Number(capacity),
         tags,
       }, { ...ownershipOpts, allowAdmin: false });
@@ -421,6 +446,79 @@ export function EditEventPage() {
               />
             </div>
           </div>
+
+          {/* Participation — hackathons only (f-1 + f-2). Hidden for
+              every other category. Changing the category away from
+              hackathons clears this on save. */}
+          {category === 'Technology & Hackathons' && (
+            <div className="space-y-4">
+              <h2 className="font-editorial text-base font-bold text-[#1E2320] pb-2 border-b border-[#EBE7DF]">
+                Participation
+              </h2>
+              <p className="text-[11px] text-[#5F635D] leading-relaxed">
+                Choose how attendees register. The ticket price is per person for individual
+                registrations and per team for team registrations: the team leader pays once, and
+                members join free with the leader&apos;s team code.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                {([
+                  { value: 'individual', label: 'Individual only', hint: 'Everyone registers alone' },
+                  { value: 'team', label: 'Team only', hint: 'Everyone registers in a team' },
+                  { value: 'both', label: 'Individual or Team', hint: 'Each attendee chooses' },
+                ] as const).map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setParticipationMode(opt.value)}
+                    className={`text-left p-3 rounded-xl border text-xs transition-colors ${
+                      participationMode === opt.value
+                        ? 'border-[#1E3F35] bg-[#EAF1ED]'
+                        : 'border-[#E2DFD8] bg-white hover:border-[#1E3F35]'
+                    }`}
+                  >
+                    <span className="block font-semibold text-[#1E2320]">{opt.label}</span>
+                    <span className="block text-[11px] text-[#5F635D] mt-0.5">{opt.hint}</span>
+                  </button>
+                ))}
+              </div>
+              {participationMode !== 'individual' && (
+                <div className="grid grid-cols-2 gap-4 max-w-sm">
+                  <div>
+                    <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+                      Minimum team size
+                    </label>
+                    <input
+                      type="number"
+                      min="2"
+                      max="10"
+                      value={minTeamSize}
+                      onChange={(e) => setMinTeamSize(e.target.value)}
+                      className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] ${
+                        errors.minTeamSize ? 'border-rose-500' : 'border-[#E2DFD8]'
+                      }`}
+                    />
+                    {errors.minTeamSize && <p className="text-[11px] text-rose-600 mt-1">{errors.minTeamSize}</p>}
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+                      Maximum team size
+                    </label>
+                    <input
+                      type="number"
+                      min="2"
+                      max="10"
+                      value={maxTeamSize}
+                      onChange={(e) => setMaxTeamSize(e.target.value)}
+                      className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] ${
+                        errors.maxTeamSize ? 'border-rose-500' : 'border-[#E2DFD8]'
+                      }`}
+                    />
+                    {errors.maxTeamSize && <p className="text-[11px] text-rose-600 mt-1">{errors.maxTeamSize}</p>}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="pt-6 border-t border-[#EBE7DF] flex items-center justify-end gap-3">

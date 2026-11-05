@@ -778,6 +778,24 @@ export default async function handler(req: any, res: any) {
         } catch { okUrl = false; }
         if (!okUrl) return sendJson(res, 400, { message: "Map link must be a valid http(s) URL" });
       }
+      // Team participation (Technology & Hackathons only, f-1 + f-2):
+      // the organizer picks Individual only / Team only / Individual
+      // or Team, plus the min/max team size (2..10, min <= max). Any
+      // other category stores no participation config at all — the
+      // config is stripped below, never trusted from the body.
+      let participation: any = undefined;
+      if (p.category === "Technology & Hackathons" && p.participation && typeof p.participation === "object") {
+        const mode = p.participation.mode;
+        if (mode !== undefined && mode !== "individual" && mode !== "team" && mode !== "both") {
+          return sendJson(res, 400, { message: "Participation mode must be individual, team or both" });
+        }
+        const minTeamSize = p.participation.minTeamSize === undefined ? 2 : Number(p.participation.minTeamSize);
+        const maxTeamSize = p.participation.maxTeamSize === undefined ? 4 : Number(p.participation.maxTeamSize);
+        if (!Number.isInteger(minTeamSize) || minTeamSize < 2 || minTeamSize > 10) return sendJson(res, 400, { message: "Minimum team size must be between 2 and 10" });
+        if (!Number.isInteger(maxTeamSize) || maxTeamSize < 2 || maxTeamSize > 10) return sendJson(res, 400, { message: "Maximum team size must be between 2 and 10" });
+        if (minTeamSize > maxTeamSize) return sendJson(res, 400, { message: "Minimum team size cannot exceed the maximum" });
+        participation = { mode: mode || "individual", minTeamSize, maxTeamSize };
+      }
       const price = p.price === undefined || p.price === null || p.price === "" ? 0 : Number(p.price);
       if (!Number.isFinite(price) || price < 0) return sendJson(res, 400, { message: "Price must be zero or more" });
       const capacity = p.capacity === undefined || p.capacity === null || p.capacity === "" ? 50 : Number(p.capacity);
@@ -818,6 +836,9 @@ export default async function handler(req: any, res: any) {
         // there is nothing to collect one for. (Legacy rows keep
         // theirs stored, still stripped for non-owners above.)
         requireAttendeeDetails: p.requireAttendeeDetails ?? true,
+        // Team participation (validated above; undefined for every
+        // other category, so nothing is stored there).
+        participation,
         capacity, registeredCount: 0, status: "published",
         organizer: {
           ...(p.organizer || { id: "org-community", name: organizerName, slug: "community-organizer", avatar: "", bio: "Community organizer.", location: "Metro City", eventsCount: 0, totalAttendeesServed: 0 }),
@@ -898,6 +919,25 @@ export default async function handler(req: any, res: any) {
           updates.mapUrl = m;
         }
       }
+      // Team participation edit (same rules as POST): an object with
+      // mode + min/max team size, or null to clear it. A non-object
+      // value is refused; the merged-category check below strips the
+      // config whenever the event is not a hackathon.
+      if (updates.participation !== undefined && updates.participation !== null) {
+        if (typeof updates.participation !== "object" || Array.isArray(updates.participation)) {
+          return sendJson(res, 400, { message: "Participation must be an object" });
+        }
+        const mode = updates.participation.mode;
+        if (mode !== undefined && mode !== "individual" && mode !== "team" && mode !== "both") {
+          return sendJson(res, 400, { message: "Participation mode must be individual, team or both" });
+        }
+        const minTeamSize = updates.participation.minTeamSize === undefined ? 2 : Number(updates.participation.minTeamSize);
+        const maxTeamSize = updates.participation.maxTeamSize === undefined ? 4 : Number(updates.participation.maxTeamSize);
+        if (!Number.isInteger(minTeamSize) || minTeamSize < 2 || minTeamSize > 10) return sendJson(res, 400, { message: "Minimum team size must be between 2 and 10" });
+        if (!Number.isInteger(maxTeamSize) || maxTeamSize < 2 || maxTeamSize > 10) return sendJson(res, 400, { message: "Maximum team size must be between 2 and 10" });
+        if (minTeamSize > maxTeamSize) return sendJson(res, 400, { message: "Minimum team size cannot exceed the maximum" });
+        updates.participation = { mode: mode || "individual", minTeamSize, maxTeamSize };
+      }
       if (updates.price !== undefined) {
         const pr = Number(updates.price);
         if (!Number.isFinite(pr) || pr < 0) return sendJson(res, 400, { message: "Price must be zero or more" });
@@ -929,6 +969,10 @@ export default async function handler(req: any, res: any) {
       // gain a new event; now an admin may set it, nobody else can.
       const nextFeatured = isAdmin(session.email) && typeof updates.isFeatured === "boolean" ? updates.isFeatured : existing.isFeatured;
       const merged = { ...existing, ...safeUpdates, id: existing.id, createdByEmail: existing.createdByEmail, registeredCount: existing.registeredCount, isFeatured: nextFeatured };
+      // Participation belongs to hackathons only: changing the
+      // category away (or a stale config on a non-hackathon) drops it.
+      if (merged.category !== "Technology & Hackathons") delete merged.participation;
+      if (updates.participation === null) delete merged.participation;
       const supa = await fetch(
         supabaseBase() + "/rest/v1/events?id=eq." + encodeURIComponent(singleId),
         { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: merged }) },

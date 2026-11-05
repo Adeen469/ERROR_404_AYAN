@@ -526,6 +526,9 @@ export const eventsService = {
       price: Number(payload.price) || 0,
       // Older events predate this flag and behave as if it were on.
       requireAttendeeDetails: payload.requireAttendeeDetails ?? true,
+      // Team participation (hackathons only): carried through so a
+      // device-only copy still shows the team flow until it syncs.
+      participation: payload.participation,
       capacity: Number(payload.capacity) || 50,
       registeredCount: 0,
       status: 'published',
