@@ -133,8 +133,16 @@ export interface AttendeeRegistration {
   // 'initiated' with a refund id means Razorpay accepted the refund,
   // 'failed' means the organizer must refund manually from the
   // Razorpay dashboard; absent means no refund was attempted.
+  // refundAmountPaise is the amount actually requested from Razorpay
+  // (full price within 24h of purchase, 90% after that) and
+  // refundFeePaise is the 10% cancellation fee kept after 24h (0
+  // within 24h). paidAt is set by api/payments.ts when the payment
+  // is verified — it is the anchor for the 24h refund window.
   refundStatus?: 'initiated' | 'failed';
   refundId?: string;
+  refundAmountPaise?: number;
+  refundFeePaise?: number;
+  paidAt?: string;
 }
 
 export interface UserProfile {

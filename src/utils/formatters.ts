@@ -55,6 +55,15 @@ export function formatPrice(price: number): string {
   return `₹${price.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 }
 
+// Format an amount stored in paise (e.g. a refund). Whole rupees use
+// the same ₹ + en-IN grouping as formatPrice; paise are shown with
+// exactly two decimals (₹179.10, not ₹179.1).
+export function formatPaise(paise: number): string {
+  if (!Number.isFinite(paise) || paise <= 0) return '₹0';
+  if (paise % 100 === 0) return formatPrice(paise / 100);
+  return `₹${(paise / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 // Location rule: there is no separate neighborhood anymore. When a state
 // is selected, the city IS the neighborhood; otherwise there is none.
 // Every place that used to read a stored neighborhood must use this.

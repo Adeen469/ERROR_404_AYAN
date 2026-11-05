@@ -2,9 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Ticket, Calendar, MapPin, Clock, QrCode, XCircle, ArrowLeft, CheckCircle2 } from 'lucide-react';
 import { AttendeeRegistration, EventItem } from '../types';
-import { registrationsService } from '../services/registrations-service';
+import { registrationsService, getRefundQuote } from '../services/registrations-service';
 import { eventsService } from '../services/events-service';
-import { formatEventDate, formatEventTimeRange, formatEventLocation } from '../utils/formatters';
+import { formatEventDate, formatEventTimeRange, formatEventLocation, formatPaise } from '../utils/formatters';
 import { useToast } from '../components/ui/Toast';
 import { Modal, ConfirmDialog } from '../components/ui/Modal';
 import { EmptyState, ListSkeleton } from '../components/ui/LoadingSkeleton';
@@ -53,15 +53,23 @@ export function RegistrationsPage() {
     if (!cancelTarget) return;
     setCancelling(true);
     try {
-      await registrationsService.cancelRegistration(cancelTarget.id);
+      const cancelled = await registrationsService.cancelRegistration(cancelTarget.id);
       setRegistrations((prev) =>
         prev.map((r) => (r.id === cancelTarget.id ? { ...r, status: 'cancelled' } : r))
       );
       setCancelTarget(null);
+      // The cancelled row carries the refund the server actually
+      // initiated — state it, don't guess.
+      const refundPaise = cancelled?.refundAmountPaise;
+      const refundFailed = cancelled?.refundStatus === 'failed';
       toast({
         type: 'info',
         title: cancelTarget.status === 'pending' ? 'Payment Request Withdrawn' : 'RSVP Cancelled',
-        description: `Your registration for "${liveEventOf(cancelTarget).title.slice(0, 30)}..." was cancelled.`,
+        description: refundPaise
+          ? refundFailed
+            ? `Your registration for "${liveEventOf(cancelTarget).title.slice(0, 30)}..." was cancelled. The refund of ${formatPaise(refundPaise)} could not be initiated automatically — please contact the organizer so they can refund it from the Razorpay dashboard.`
+            : `Your registration for "${liveEventOf(cancelTarget).title.slice(0, 30)}..." was cancelled. A refund of ${formatPaise(refundPaise)} has been initiated to your original payment method.`
+          : `Your registration for "${liveEventOf(cancelTarget).title.slice(0, 30)}..." was cancelled.`,
       });
     } catch {
       toast({
@@ -72,6 +80,17 @@ export function RegistrationsPage() {
       setCancelling(false);
     }
   };
+
+  // Refund preview for the cancel dialog (client-side preview only —
+  // the server computes the real refund on cancel). Paid confirmed
+  // passes only; free/pending rows get no refund line.
+  const cancelRefundQuote =
+    cancelTarget && cancelTarget.status === 'confirmed' ? getRefundQuote(cancelTarget) : null;
+  const cancelRefundMessage = !cancelRefundQuote
+    ? `Are you sure you want to cancel your RSVP for "${cancelTarget ? liveEventOf(cancelTarget).title : ''}"? Your spot will be made available to other attendees immediately.`
+    : cancelRefundQuote.isFull
+      ? `Are you sure you want to cancel your RSVP for "${cancelTarget ? liveEventOf(cancelTarget).title : ''}"? You will get a full refund of ${formatPaise(cancelRefundQuote.refundAmountPaise)}. Your ticket will be cancelled immediately.`
+      : `Are you sure you want to cancel your RSVP for "${cancelTarget ? liveEventOf(cancelTarget).title : ''}"? You will get ${formatPaise(cancelRefundQuote.refundAmountPaise)} back (90%). A 10% cancellation fee of ${formatPaise(cancelRefundQuote.refundFeePaise)} applies because it has been more than 24 hours since you bought the ticket. Your ticket will be cancelled immediately.`;
 
   // Upcoming = confirmed passes plus payments awaiting Razorpay completion.
   // Past = cancelled, rejected, and waitlisted records.
@@ -309,7 +328,7 @@ export function RegistrationsPage() {
         message={
           cancelTarget?.status === 'pending'
             ? `Withdraw your pending payment request for "${cancelTarget ? liveEventOf(cancelTarget).title : ''}"? Any held spot will be released.`
-            : `Are you sure you want to cancel your RSVP for "${cancelTarget ? liveEventOf(cancelTarget).title : ''}"? Your spot will be made available to other attendees immediately.`
+            : cancelRefundMessage
         }
         confirmLabel={cancelTarget?.status === 'pending' ? 'Yes, Withdraw Request' : 'Yes, Cancel RSVP'}
       />

@@ -49,6 +49,40 @@ function newTicketCode(): string {
   return `LOC-${Math.floor(1000 + Math.random() * 9000)}-TK`;
 }
 
+// Refund preview — CLIENT-SIDE ONLY. The server is the source of
+// truth (api/registrations.ts has the identical refundQuote logic);
+// this is what the cancel dialogs show before the user confirms.
+// Rule (2026-11-05, user-confirmed): cancel within 24 hours of
+// PURCHASE for a full refund; after 24 hours the user gets 90% back
+// (a 10% cancellation fee is kept). Amounts in paise. Anchor: paidAt
+// (set at payment verification), else createdAt, else registeredAt;
+// a missing anchor refunds in full. amountPaise <= 100 (₹1 or less)
+// always refunds in full, as does any computed refund under 100 paise.
+export const REFUND_WINDOW_MS = 24 * 60 * 60 * 1000;
+export interface RefundQuote {
+  refundAmountPaise: number;
+  refundFeePaise: number;
+  isFull: boolean;
+}
+export function getRefundQuote(
+  reg: { amountPaise?: number; paymentMethod?: string; razorpayPaymentId?: string; paidAt?: string; createdAt?: string; registeredAt?: string },
+  nowMs?: number,
+): RefundQuote | null {
+  const amount = Number(reg?.amountPaise);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  if (reg?.paymentMethod !== "razorpay") return null;
+  if (!reg?.razorpayPaymentId) return null;
+  const now = typeof nowMs === "number" ? nowMs : Date.now();
+  const anchorMs = Date.parse(reg.paidAt || "") || Date.parse(reg.createdAt || "") || Date.parse(reg.registeredAt || "");
+  if (!Number.isFinite(anchorMs)) return { refundAmountPaise: amount, refundFeePaise: 0, isFull: true };
+  if (amount <= 100) return { refundAmountPaise: amount, refundFeePaise: 0, isFull: true };
+  if (now - anchorMs <= REFUND_WINDOW_MS) return { refundAmountPaise: amount, refundFeePaise: 0, isFull: true };
+  const fee = Math.round(amount * 0.10);
+  const refund = amount - fee;
+  if (refund < 100) return { refundAmountPaise: amount, refundFeePaise: 0, isFull: true };
+  return { refundAmountPaise: refund, refundFeePaise: fee, isFull: false };
+}
+
 // Shared rows win over local rows with the same id. Every registration
 // the user creates is written to both, so the merge is how a pass bought
 // on one device shows up on another.
@@ -297,7 +331,12 @@ export const registrationsService = {
     return newReg;
   },
 
-  async cancelRegistration(registrationId: string): Promise<boolean> {
+  // Returns the cancelled row as the server stored it (carrying
+  // refundAmountPaise / refundStatus for paid passes), so the caller
+  // can tell the user exactly what refund was initiated. Returns the
+  // local record when the server is unreachable (503 fallback), and
+  // null when no record exists at all.
+  async cancelRegistration(registrationId: string): Promise<AttendeeRegistration | null> {
     // Load the record (shared first, local fallback) so a pass bought on
     // another device can be cancelled from here too.
     let target: AttendeeRegistration | undefined;
@@ -311,8 +350,8 @@ export const registrationsService = {
     const all = getStoredRegistrations();
     const localTarget = all.find((r) => r.id === registrationId);
     const record = target || localTarget;
-    if (!record) return false;
-    if (record.status === 'cancelled') return true;
+    if (!record) return null;
+    if (record.status === 'cancelled') return record;
 
     // Only a held slot is released: confirmed passes always hold one;
     // pending payments hold one only if they predate the holdsSpot flag
@@ -323,9 +362,10 @@ export const registrationsService = {
       (record.status === 'pending' && record.holdsSpot !== false);
     const user = authService.getCurrentUser();
 
+    let updated: AttendeeRegistration | undefined;
     if (!isDemoMode()) {
       try {
-        await apiClient.patch('/registrations', { status: 'cancelled' }, { id: registrationId });
+        updated = await apiClient.patch<AttendeeRegistration>('/registrations', { status: 'cancelled' }, { id: registrationId });
       } catch (err) {
         // Same honesty rule as register: only a 503 (backend
         // unconfigured) falls back to a local cancel. Any other
@@ -343,6 +383,7 @@ export const registrationsService = {
     await new Promise((resolve) => setTimeout(resolve, 200));
     if (localTarget) {
       localTarget.status = 'cancelled';
+      if (updated) Object.assign(localTarget, updated);
       saveStoredRegistrations(all);
     }
 
@@ -360,7 +401,7 @@ export const registrationsService = {
       }
     }
 
-    return true;
+    return updated || localTarget || { ...record, status: 'cancelled' };
   },
 
   async getEventAttendees(eventId: string): Promise<AttendeeRegistration[]> {

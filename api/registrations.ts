@@ -598,9 +598,39 @@ function newTicketCode(): string {
   return `LOC-${out}-TK`;
 }
 
+// Refund rule (2026-11-05, user-confirmed): a paid Razorpay ticket
+// cancelled within 24 hours of PURCHASE gets a full refund; after
+// 24 hours the user gets 90% back (a 10% cancellation fee is kept).
+// Amounts are in paise. Anchor: paidAt (set by api/payments.ts at
+// verify time), else createdAt, else registeredAt; a missing anchor
+// refunds in full (fail in the user's favour). amountPaise <= 100
+// (₹1 or less) always refunds in full — a 10% fee would leave under
+// ₹1, which a partial refund cannot usefully pay. A computed refund
+// under 100 paise is likewise rounded up to a full refund.
+// Returns null when there is nothing refundable (no/zero amount, or
+// not a Razorpay row) — the caller then skips the refund call.
+const REFUND_WINDOW_MS = 24 * 60 * 60 * 1000;
+function refundQuote(reg: any, nowMs?: number): { refundAmountPaise: number; refundFeePaise: number; isFull: boolean } | null {
+  const amount = Number(reg?.amountPaise);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  if (reg?.paymentMethod !== "razorpay") return null;
+  if (!reg?.razorpayPaymentId) return null;
+  const now = typeof nowMs === "number" ? nowMs : Date.now();
+  const anchorMs = Date.parse(reg.paidAt || "") || Date.parse(reg.createdAt || "") || Date.parse(reg.registeredAt || "");
+  if (!Number.isFinite(anchorMs)) return { refundAmountPaise: amount, refundFeePaise: 0, isFull: true };
+  if (amount <= 100) return { refundAmountPaise: amount, refundFeePaise: 0, isFull: true };
+  if (now - anchorMs <= REFUND_WINDOW_MS) return { refundAmountPaise: amount, refundFeePaise: 0, isFull: true };
+  const fee = Math.round(amount * 0.10);
+  const refund = amount - fee;
+  if (refund < 100) return { refundAmountPaise: amount, refundFeePaise: 0, isFull: true };
+  return { refundAmountPaise: refund, refundFeePaise: fee, isFull: false };
+}
+
 // Full refund of a captured Razorpay payment (attendee-cancelled paid
 // passes). The organizer's dashboard is the fallback when this fails.
-async function refundRazorpayPayment(paymentId: string): Promise<{ ok: boolean; refundId?: string }> {
+// Pass amountPaise for a PARTIAL refund (Razorpay `amount` in paise);
+// omit it for a full refund (today's behaviour everywhere else).
+async function refundRazorpayPayment(paymentId: string, amountPaise?: number): Promise<{ ok: boolean; refundId?: string }> {
   try {
     const keyId = getEnv("RAZORPAY_KEY_ID");
     const secret = getEnv("RAZORPAY_KEY_SECRET");
@@ -615,7 +645,7 @@ async function refundRazorpayPayment(paymentId: string): Promise<{ ok: boolean; 
     const res = await fetchJson(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}/refund`, {
       method: "POST",
       headers: { Authorization: auth, "Content-Type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify(amountPaise ? { amount: amountPaise } : {}),
     });
     if (res.ok && res.body?.id) return { ok: true, refundId: res.body.id };
     return { ok: false };
@@ -774,6 +804,12 @@ export default async function handler(req: any, res: any): Promise<void> {
       // codes are always generated here, never kept from the client.
       reg.holdsSpot = false;
       reg.userEmail = me;
+      // Refund bookkeeping is server-only: a crafted body must not
+      // plant refundStatus / refundId / refund amounts on a row.
+      delete (reg as any).refundStatus;
+      delete (reg as any).refundId;
+      delete (reg as any).refundAmountPaise;
+      delete (reg as any).refundFeePaise;
       if (reg.status === "confirmed") reg.ticketCode = newTicketCode();
       if (reg.status === "pending") reg.ticketCode = "";
       // Capacity is enforced here, not just in the UI: a confirmed row
@@ -794,7 +830,12 @@ export default async function handler(req: any, res: any): Promise<void> {
       } catch { reg.phoneVerified = undefined; }
       let stored: any = null;
       if (reactivating) {
-        const merged = { ...existingCancelled, ...reg, id: existingCancelled.id };
+        // A reactivated row is a NEW purchase: the old pass's refund
+        // bookkeeping must not survive — a stale refundId would also
+        // block the next cancel's refund via the !refundId guard.
+        // (undefined keys are dropped by JSON.stringify, so the stored
+        // row has no refund fields at all until a new refund happens.)
+        const merged = { ...existingCancelled, ...reg, id: existingCancelled.id, refundStatus: undefined, refundId: undefined, refundAmountPaise: undefined, refundFeePaise: undefined };
         const { ok: patchOk, body: patchBody } = await fetchJson(`${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(reg.id)}`, {
           method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: merged }),
         });
@@ -876,16 +917,24 @@ export default async function handler(req: any, res: any): Promise<void> {
       }
       const merged: any = { ...existing, ...allowedUpdates, id: existing.id, userEmail: existing.userEmail, userId: existing.userId, eventId: existing.eventId, utr: existing.utr };
       if (merged.event) merged.event = stripEventPublic(merged.event);
-      // Cancelling a confirmed Razorpay pass refunds it automatically:
-      // previously the pass vanished but the money stayed with the
-      // organizer and nothing recorded that a refund was owed. If the
-      // refund call fails, the cancel still proceeds (the attendee
-      // asked to leave) but refundStatus "failed" stays on the row for
-      // the organizer to resolve in the Razorpay dashboard.
+      // Cancelling a confirmed Razorpay pass refunds it automatically
+      // under the 24h / 10% rule (see refundQuote): full refund when
+      // cancelled within 24h of purchase, 90% back after that (10%
+      // cancellation fee). The ticket is cancelled on the spot in this
+      // same request regardless of the refund outcome: if the refund
+      // call fails, the cancel still proceeds (the attendee asked to
+      // leave) but refundStatus "failed" stays on the row — with the
+      // amount owed recorded in refundAmountPaise — for the organizer
+      // to resolve in the Razorpay dashboard.
       if (merged.status === 'cancelled' && existing.status === 'confirmed' && existing.paymentMethod === 'razorpay' && existing.razorpayPaymentId && !existing.refundId) {
-        const rf = await refundRazorpayPayment(existing.razorpayPaymentId);
-        merged.refundStatus = rf.ok ? "initiated" : "failed";
-        if (rf.refundId) merged.refundId = rf.refundId;
+        const quote = refundQuote(existing);
+        if (quote) {
+          const rf = await refundRazorpayPayment(existing.razorpayPaymentId, quote.isFull ? undefined : quote.refundAmountPaise);
+          merged.refundAmountPaise = quote.refundAmountPaise;
+          merged.refundFeePaise = quote.refundFeePaise;
+          merged.refundStatus = rf.ok ? "initiated" : "failed";
+          if (rf.refundId) merged.refundId = rf.refundId;
+        }
       }
       const { ok } = await fetchJson(
         `${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(id)}`,

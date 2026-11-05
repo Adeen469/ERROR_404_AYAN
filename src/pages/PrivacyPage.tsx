@@ -116,7 +116,10 @@ export function PrivacyPage() {
           <ul className="list-disc pl-5 space-y-1.5">
             <li>
               <strong className="text-[#1E2320]">Cancel a registration</strong>{' '}
-              from the event page at any time. Note that this does not delete
+              from the event page at any time. Your ticket is cancelled
+              immediately. Refunds for paid tickets: cancel within 24
+              hours of purchase for a full refund; after that you get
+              90% back (a 10% cancellation fee applies). Note that this does not delete
               an event you already saved to your own Google Calendar with the
               &quot;Add to Google Calendar&quot; button — delete that in
               Google Calendar if you no longer want it.

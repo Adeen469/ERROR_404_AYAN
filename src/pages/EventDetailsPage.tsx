@@ -19,12 +19,12 @@ import {
 } from 'lucide-react';
 import { EventItem, AttendeeRegistration } from '../types';
 import { eventsService, isEventOwner } from '../services/events-service';
-import { registrationsService } from '../services/registrations-service';
+import { registrationsService, getRefundQuote } from '../services/registrations-service';
 import { paymentsService } from '../services/payments-service';
 import { savedEventsService } from '../services/saved-events-service';
 import { authService } from '../services/auth-service';
 import { AttendeeDetailsGate } from '../components/events/AttendeeDetailsGate';
-import { formatEventDate, formatEventTimeRange, formatPrice, getMapsSearchUrl, formatEventLocation, getEventNeighborhood } from '../utils/formatters';
+import { formatEventDate, formatEventTimeRange, formatPrice, formatPaise, getMapsSearchUrl, formatEventLocation, getEventNeighborhood } from '../utils/formatters';
 import { useToast } from '../components/ui/Toast';
 import { ConfirmDialog, Modal } from '../components/ui/Modal';
 import { EventDetailsSkeleton } from '../components/ui/LoadingSkeleton';
@@ -165,6 +165,16 @@ export function EventDetailsPage() {
   const isFull = event.registeredCount >= event.capacity;
   const isRegistered = Boolean(registration && registration.status === 'confirmed');
   const isPaymentPending = Boolean(registration && registration.status === 'pending');
+  // Refund preview for the cancel dialog (client-side preview only —
+  // the server computes the real refund on cancel). Paid confirmed
+  // passes only; free/pending rows get no refund line.
+  const cancelRefundQuote =
+    registration && registration.status === 'confirmed' ? getRefundQuote(registration) : null;
+  const cancelRefundMessage = !cancelRefundQuote
+    ? 'Are you sure you want to cancel your RSVP? This will free your spot for other attendees.'
+    : cancelRefundQuote.isFull
+      ? `Are you sure you want to cancel your RSVP? You will get a full refund of ${formatPaise(cancelRefundQuote.refundAmountPaise)}. Your ticket will be cancelled immediately.`
+      : `Are you sure you want to cancel your RSVP? You will get ${formatPaise(cancelRefundQuote.refundAmountPaise)} back (90%). A 10% cancellation fee of ${formatPaise(cancelRefundQuote.refundFeePaise)} applies because it has been more than 24 hours since you bought the ticket. Your ticket will be cancelled immediately.`;
   const isPaymentRejected = Boolean(registration && registration.status === 'rejected');
   const isPaidEvent = event.price > 0;
   const spotsLeft = Math.max(0, event.capacity - event.registeredCount);
@@ -351,7 +361,7 @@ export function EventDetailsPage() {
     if (!registration) return;
     setActionLoading(true);
     try {
-      await registrationsService.cancelRegistration(registration.id);
+      const cancelled = await registrationsService.cancelRegistration(registration.id);
       // Only a held slot frees a count: confirmed passes always hold
       // one; pending payments hold one only if they predate holdsSpot.
       const heldSpot =
@@ -362,12 +372,22 @@ export function EventDetailsPage() {
         setEvent((prev) => (prev ? { ...prev, registeredCount: Math.max(0, prev.registeredCount - 1) } : null));
       }
       setConfirmCancelOpen(false);
+      // The cancelled row carries the refund the server actually
+      // initiated (refundAmountPaise / refundStatus) — state it, don't
+      // guess: a failed Razorpay call means the organizer must refund
+      // manually from the dashboard.
+      const refundPaise = cancelled?.refundAmountPaise;
+      const refundFailed = cancelled?.refundStatus === 'failed';
       toast({
         type: 'info',
         title: 'Registration Cancelled',
-        description: heldSpot
-          ? 'Your spot has been freed up for other community members.'
-          : 'Your pending payment request has been withdrawn.',
+        description: refundPaise
+          ? refundFailed
+            ? `Your ticket is cancelled. The refund of ${formatPaise(refundPaise)} could not be initiated automatically — please contact the organizer so they can refund it from the Razorpay dashboard.`
+            : `Your ticket is cancelled. A refund of ${formatPaise(refundPaise)} has been initiated to your original payment method.`
+          : heldSpot
+            ? 'Your spot has been freed up for other community members.'
+            : 'Your pending payment request has been withdrawn.',
       });
     } catch {
       toast({
@@ -864,7 +884,7 @@ export function EventDetailsPage() {
         message={
           isPaymentPending
             ? 'Withdraw your pending payment request? Any held spot will be released for other attendees.'
-            : 'Are you sure you want to cancel your RSVP? This will free your spot for other attendees.'
+            : cancelRefundMessage
         }
         confirmLabel={isPaymentPending ? 'Yes, Withdraw Request' : 'Yes, Cancel RSVP'}
       />
