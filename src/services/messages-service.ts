@@ -22,6 +22,15 @@ export interface MessageAttachment {
   path: string;
 }
 
+export interface ReplySnapshot {
+  id: string;
+  senderEmail: string;
+  senderName?: string;
+  text: string;
+  attachmentName?: string;
+  deleted?: boolean;
+}
+
 export interface EventMessage {
   id: string;
   eventId: string;
@@ -44,6 +53,13 @@ export interface EventMessage {
   // public attachment URL used to keep serving after the row vanished).
   deletedForEveryone?: boolean;
   deletedAt?: string;
+  // Reply quote: frozen server-side at send time (see api/messages.ts
+  // buildReplySnapshot). The snapshot is the quote's display data —
+  // never the full quoted text, never URLs. If the quoted message is
+  // deleted later, the server scrubs the snapshot to text:"" with
+  // deleted:true instead of removing the reply.
+  replyToId?: string;
+  replySnapshot?: ReplySnapshot;
   createdAt: string;
 }
 
@@ -139,6 +155,10 @@ export interface SendMessageInput {
   organizerId?: string;
   text?: string;
   attachment?: { name: string; size: number; type: string; path: string };
+  // Optional quote target: the server validates it (same event +
+  // same thread pair, not deleted) and builds the frozen snapshot.
+  // A caller-supplied snapshot is never sent or trusted.
+  replyToId?: string;
   // Stable per draft: a retry reuses the same key and the server
   // returns the already-created row instead of a duplicate message.
   idempotencyKey?: string;

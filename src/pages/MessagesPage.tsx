@@ -6,6 +6,7 @@ import {
   FileText,
   MessageCircle,
   Paperclip,
+  Reply,
   Send,
   X,
 } from 'lucide-react';
@@ -21,6 +22,7 @@ import {
   validateAttachment,
   formatFileSize,
 } from '../services/messages-service';
+import { subscribeToInbox, broadcastToInbox } from '../services/realtime-service';
 
 function fmtTime(iso: string): string {
   if (!iso) return '';
@@ -109,6 +111,55 @@ function AttachmentView({ m }: { m: EventMessage }) {
   );
 }
 
+function quoteText(m: EventMessage): string {
+  if (m.deletedForEveryone) return 'This message was deleted';
+  if (m.text && m.text.trim()) return m.text.trim();
+  if (m.attachment) return `Sent an attachment: ${m.attachment.name}`;
+  return 'Message';
+}
+
+// WhatsApp-style quote shown above a reply's text. Rendered from the
+// frozen server snapshot (m.replySnapshot), never by re-reading the
+// original — so it still reads correctly after the original is edited.
+// Tapping it jumps to the original; a deleted / missing original
+// shows "This message was deleted" and does nothing on tap.
+function QuoteView({
+  m,
+  meEmail,
+  onJump,
+}: {
+  m: EventMessage;
+  meEmail: string;
+  onJump: (id: string) => void;
+}) {
+  const snap = m.replySnapshot;
+  if (!m.replyToId || !snap) return null;
+  const deleted = snap.deleted === true;
+  const senderLabel = deleted
+    ? ''
+    : snap.senderEmail.toLowerCase() === meEmail
+      ? 'You'
+      : snap.senderName || snap.senderEmail;
+  const body = deleted ? 'This message was deleted' : snap.text || (snap.attachmentName ? `Sent an attachment: ${snap.attachmentName}` : 'Message');
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (!deleted) onJump(snap.id);
+      }}
+      className="block w-full text-left border-l-2 border-[#C25E00] bg-black/10 rounded-r-lg px-2 py-1.5 space-y-0.5"
+      title={deleted ? 'This message was deleted' : 'Jump to quoted message'}
+    >
+      {!deleted && (
+        <span className="block text-[11px] font-bold text-[#C25E00] truncate">{senderLabel}</span>
+      )}
+      <span className="block text-[11px] leading-snug opacity-80 line-clamp-2 break-words">
+        {body}
+      </span>
+    </button>
+  );
+}
+
 export function MessagesPage() {
   const [searchParams] = useSearchParams();
   // Subscribed, not captured once at mount: a sign-in/out while the
@@ -146,6 +197,22 @@ export function MessagesPage() {
   const pressTimer = useRef<number | null>(null);
   const pollInFlight = useRef(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  // Reply state: the message being quoted in the composer. The quote
+  // bar above the composer shows it; handleSend clears it on success.
+  const [replyTo, setReplyTo] = useState<EventMessage | null>(null);
+  // Quote jump: the message id to highlight after jumpToQuoted.
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  // Realtime: true once the ping channel is SUBSCRIBED — polling then
+  // drops to a 30s safety net (see the polling effect below).
+  const [realtimeLive, setRealtimeLive] = useState(false);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  // Bubble elements by message id, for quote jumps (jumpToQuoted).
+  const messageRefs = useRef(new Map<string, HTMLDivElement>());
+  // Swipe-to-reply tracking (mobile): touch start point + time. A
+  // right swipe (>60px, mostly horizontal, <500ms) starts a reply
+  // and cancels the long-press menu timer.
+  const touchStartRef = useRef<{ x: number; y: number; t: number } | null>(null);
+  const highlightTimer = useRef<number | null>(null);
 
   const meEmail = (currentUser?.email || '').toLowerCase();
   const queryEventId = searchParams.get('eventId') || '';
@@ -176,19 +243,40 @@ export function MessagesPage() {
 
   useEffect(() => {
     loadMessages();
-    // 3s refresh while the inbox is open (was 30s, then 5s): each poll
-    // costs one ~2s server call, so polling faster than this would
-    // mostly overlap requests without fresher data — the in-flight
-    // guard skips a tick when the previous poll is still running.
+    // Poll interval depends on Realtime: 3s while polling is the only
+    // delivery path, 30s safety net once the ping channel is live
+    // (pings trigger an immediate silent reload — see the subscribe
+    // effect below). Each poll costs one ~2s server call, so polling
+    // faster than this would mostly overlap requests without fresher
+    // data — the in-flight guard skips a tick when the previous poll
+    // is still running.
+    const intervalMs = realtimeLive ? 30000 : 3000;
     const timer = setInterval(() => {
       if (pollInFlight.current) return;
       pollInFlight.current = true;
       loadMessages(true).finally(() => {
         pollInFlight.current = false;
       });
-    }, 3000);
+    }, intervalMs);
     return () => clearInterval(timer);
-  }, [loadMessages]);
+  }, [loadMessages, realtimeLive]);
+
+  // Realtime pings (content-free, see realtime-service.ts): a ping
+  // means "something changed for this inbox" — refetch via the
+  // session-authenticated API. Never trust a ping as data. When the
+  // client is null (VITE_SUPABASE_* not set) subscribeToInbox is a
+  // silent no-op and polling above stays at 3s.
+  useEffect(() => {
+    if (!meEmail) return;
+    const unsubscribe = subscribeToInbox(
+      meEmail,
+      () => {
+        loadMessages(true);
+      },
+      (status) => setRealtimeLive(status === 'SUBSCRIBED'),
+    );
+    return unsubscribe;
+  }, [meEmail, loadMessages]);
 
   // Leaving the page inside an undo window must not resurrect a
   // confirmed delete: flush any still-pending deletes immediately.
@@ -370,12 +458,59 @@ export function MessagesPage() {
     setSendError('');
   }
 
+  // ---- Replies ----
+  // The other participant of a message, for Realtime pings after a
+  // send/edit/delete. A ping carries only the message id (see
+  // realtime-service.ts) — the recipient refetches the real message
+  // through the session-authenticated API.
+  function otherEmailFor(m: EventMessage): string {
+    return m.senderEmail.toLowerCase() === meEmail ? m.recipientEmail : m.senderEmail;
+  }
+
+  function notifyOther(m: EventMessage, type: 'message' | 'edited' | 'deleted'): void {
+    const other = otherEmailFor(m);
+    if (!other) return;
+    broadcastToInbox(other, { type, id: m.id }).catch(() => {});
+  }
+
+  function startReply(m: EventMessage) {
+    if (m.deletedForEveryone) return;
+    if ((m as ChatMessage).pending || (m as ChatMessage).failed) return;
+    setReplyTo(m);
+    composerRef.current?.focus();
+  }
+
+  // Tap a quote to jump to the original message: scroll it into view
+  // and highlight it for 2s. If it is not in the loaded list (e.g. a
+  // poll has not picked it up yet), reload once and retry; if it is
+  // still missing (deleted, or not in this thread) do nothing — the
+  // quote itself already says "This message was deleted" when the
+  // server scrubbed its snapshot.
+  function jumpToQuoted(id: string) {
+    const highlight = (el: HTMLDivElement | null | undefined) => {
+      if (!el) return false;
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setHighlightId(id);
+      if (highlightTimer.current !== null) window.clearTimeout(highlightTimer.current);
+      highlightTimer.current = window.setTimeout(() => setHighlightId(null), 2000);
+      return true;
+    };
+    if (highlight(messageRefs.current.get(id))) return;
+    loadMessages(true).finally(() => {
+      window.setTimeout(() => {
+        highlight(messageRefs.current.get(id));
+      }, 300);
+    });
+  }
+
   // Block state is per-session: the server does not expose blocks on
   // read (GET never lists block rows), so the toggle resets on thread
   // change and block calls are idempotent server-side.
   const [blocked, setBlocked] = useState(false);
   useEffect(() => {
     setBlocked(false);
+    // A quote belongs to the thread it was started in.
+    setReplyTo(null);
   }, [selectedKey]);
 
   async function handleBlockToggle() {
@@ -405,6 +540,7 @@ export function MessagesPage() {
     text: string;
     file?: File | null;
     idempotencyKey?: string;
+    replyToId?: string;
   }): Promise<EventMessage> {
     if (!currentUser?.email) throw new Error('Sign in to send messages.');
     let attachmentMeta: { name: string; size: number; type: string; path: string } | undefined;
@@ -438,6 +574,7 @@ export function MessagesPage() {
         text: input.text,
         attachment: attachmentMeta,
         idempotencyKey: input.idempotencyKey,
+        replyToId: input.replyToId,
       });
     } catch (err) {
       // The file uploaded but the message did not send: delete the
@@ -467,6 +604,7 @@ export function MessagesPage() {
     const text = draft.trim();
     if (!text && !file) return;
     const sendingFile = file;
+    const replyingTo = replyTo;
     const temp: ChatMessage = {
       id: `temp-${Date.now()}`,
       eventId: selected.eventId,
@@ -488,6 +626,24 @@ export function MessagesPage() {
           ? URL.createObjectURL(sendingFile)
           : undefined,
       idempotencyKey: `msg-${selected.key}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      // Optimistic quote: the server rebuilds the frozen snapshot on
+      // send, so this local copy is display-only until the server
+      // copy swaps in.
+      ...(replyingTo
+        ? {
+            replyToId: replyingTo.id,
+            replySnapshot: {
+              id: replyingTo.id,
+              senderEmail: replyingTo.senderEmail,
+              senderName: replyingTo.senderName || replyingTo.senderEmail,
+              text: (replyingTo.text || '').trim().slice(0, 200),
+              ...(replyingTo.attachment?.name
+                ? { attachmentName: replyingTo.attachment.name }
+                : {}),
+              deleted: false,
+            },
+          }
+        : {}),
     };
     setPending((prev) => [...prev, temp]);
     // The draft is cleared only on success now: clearing it before the
@@ -502,6 +658,7 @@ export function MessagesPage() {
         text,
         file: sendingFile,
         idempotencyKey: temp.idempotencyKey,
+        replyToId: replyingTo?.id,
       });
       setPending((prev) => prev.filter((p) => p.id !== temp.id));
       // Dedupe by id: the 3s poll can already have fetched this very
@@ -511,6 +668,10 @@ export function MessagesPage() {
       setPendingThread(null);
       setDraft('');
       setFile(null);
+      setReplyTo(null);
+      // Realtime ping (id only) so the recipient's inbox refetches
+      // immediately; polling is the fallback if this is missed.
+      notifyOther(created, 'message');
       // Switch to the real thread key at once (the deep-link effect
       // also does this on the next poll, but waiting for it left the
       // pane blank after the first send).
@@ -537,11 +698,14 @@ export function MessagesPage() {
         text: temp.text || '',
         file: temp.localFile || null,
         idempotencyKey: temp.idempotencyKey,
+        replyToId: temp.replyToId,
       });
       setPending((prev) => prev.filter((p) => p.id !== temp.id));
       setMessages((prev) => (prev.some((m) => m.id === created.id) ? prev : [...prev, created]));
       setDraft('');
       setFile(null);
+      setReplyTo(null);
+      notifyOther(created, 'message');
       setSelectedKey(threadKey(created.eventId, created.senderEmail, created.recipientEmail));
       await loadMessages(true);
     } catch (err: any) {
@@ -558,7 +722,7 @@ export function MessagesPage() {
     // or edit there (failed ones get an inline Retry instead).
     if ((m as ChatMessage).pending || (m as ChatMessage).failed) return;
     const width = 224;
-    const height = 240;
+    const height = 280;
     setMenu({
       x: Math.max(8, Math.min(clientX, window.innerWidth - width - 8)),
       y: Math.max(8, Math.min(clientY, window.innerHeight - height - 8)),
@@ -580,10 +744,34 @@ export function MessagesPage() {
   function onBubbleTouchStart(e: React.TouchEvent, m: EventMessage) {
     const touch = e.touches[0];
     clearPress();
+    touchStartRef.current = { x: touch.clientX, y: touch.clientY, t: Date.now() };
     pressTimer.current = window.setTimeout(
       () => openMenu(m, touch.clientX, touch.clientY),
       500,
     );
+  }
+
+  // Swipe right on a bubble (>60px, mostly horizontal, <500ms)
+  // starts a reply. Moving far enough cancels the long-press menu
+  // timer, so a swipe never also opens the menu.
+  function onBubbleTouchMove(e: React.TouchEvent) {
+    const start = touchStartRef.current;
+    if (!start) return;
+    const touch = e.touches[0];
+    if (Math.abs(touch.clientX - start.x) > 60) clearPress();
+  }
+
+  function onBubbleTouchEnd(e: React.TouchEvent, m: EventMessage) {
+    const start = touchStartRef.current;
+    touchStartRef.current = null;
+    clearPress();
+    if (!start) return;
+    const touch = e.changedTouches[0];
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    if (dx > 60 && Math.abs(dy) < 40 && Date.now() - start.t < 500) {
+      startReply(m);
+    }
   }
 
   // Menu actions only OPEN the confirm dialog; nothing is deleted yet.
@@ -617,6 +805,10 @@ export function MessagesPage() {
         }
         // Remove locally at once; the reload below is just consistency.
         setMessages((prev) => prev.filter((m) => m.id !== message.id));
+        // Delete-for-everyone also tombstones the other side's copy:
+        // ping them (id only) so their inbox refetches at once.
+        // Delete-for-me is local only and needs no ping.
+        if (scope === 'everyone') notifyOther(message, 'deleted');
         await loadMessages(true);
       } catch (err: any) {
         // Server delete failed: the filter drops below, so the message
@@ -659,6 +851,7 @@ export function MessagesPage() {
     setEditDraft('');
     try {
       await messagesService.editMessage(id, currentUser.email, text);
+      if (original) notifyOther(original, 'edited');
       await loadMessages(true);
     } catch (err: any) {
       if (original) {
@@ -814,20 +1007,25 @@ export function MessagesPage() {
                     return (
                       <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
                         <div
+                          ref={(el) => {
+                            if (el) messageRefs.current.set(m.id, el);
+                            else messageRefs.current.delete(m.id);
+                          }}
                           className={`max-w-[85%] rounded-2xl px-3 py-2 space-y-1 select-none ${
                             mine
                               ? 'bg-[#1E3F35] text-white rounded-br-md'
                               : 'bg-[#F4F1EA] text-[#1E2320] rounded-bl-md'
-                          }`}
+                          }${highlightId === m.id ? ' ring-2 ring-[#C25E00]' : ''}`}
                           style={{ WebkitTouchCallout: 'none' } as React.CSSProperties}
                           onContextMenu={(e) => {
                             e.preventDefault();
                             clearPress();
                             openMenu(m, e.clientX, e.clientY);
                           }}
+                          onDoubleClick={() => startReply(m)}
                           onTouchStart={(e) => onBubbleTouchStart(e, m)}
-                          onTouchEnd={clearPress}
-                          onTouchMove={clearPress}
+                          onTouchEnd={(e) => onBubbleTouchEnd(e, m)}
+                          onTouchMove={(e) => onBubbleTouchMove(e)}
                         >
                           {isEditing ? (
                             <div className="space-y-2 min-w-[220px]">
@@ -864,6 +1062,7 @@ export function MessagesPage() {
                             </p>
                           ) : (
                             <>
+                              <QuoteView m={m} meEmail={meEmail} onJump={jumpToQuoted} />
                               {m.text && (
                                 <p className="text-xs leading-relaxed whitespace-pre-wrap break-words">{m.text}</p>
                               )}
@@ -907,6 +1106,31 @@ export function MessagesPage() {
               </div>
 
               <div className="p-3 border-t border-[#EBE7DF] space-y-2">
+                {/* Reply quote bar (WhatsApp-style): shows the message
+                    being quoted, X cancels it. Cleared on send, on
+                    thread switch, and when the quoted message is gone. */}
+                {replyTo && (
+                  <div className="flex items-center gap-2 bg-[#F4F1EA] border border-[#E2DFD8] rounded-lg px-3 py-2">
+                    <Reply className="w-4 h-4 text-[#C25E00] shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[11px] font-bold text-[#C25E00] truncate">
+                        Replying to{' '}
+                        {replyTo.senderEmail.toLowerCase() === meEmail
+                          ? 'You'
+                          : replyTo.senderName || replyTo.senderEmail}
+                      </p>
+                      <p className="text-[11px] text-[#5F635D] truncate">{quoteText(replyTo)}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setReplyTo(null)}
+                      className="text-[#8C887E] hover:text-[#1E2320] p-1 rounded-md shrink-0"
+                      aria-label="Cancel reply"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
                 {file && (
                   <div className="flex items-center justify-between gap-2 bg-[#F4F1EA] border border-[#E2DFD8] rounded-lg px-3 py-2">
                     <span className="text-xs text-[#1E2320] truncate">
@@ -949,6 +1173,7 @@ export function MessagesPage() {
                       border in its own colour so it is 38px too, not
                       36px. Longer messages scroll inside the box. */}
                   <textarea
+                    ref={composerRef}
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
                     onKeyDown={(e) => {
@@ -998,6 +1223,18 @@ export function MessagesPage() {
             className="fixed z-50 w-56 bg-white rounded-xl border border-[#E5E1D8] shadow-xl py-1"
             style={{ left: menu.x, top: menu.y }}
           >
+            {!menuMessage.deletedForEveryone && (
+              <button
+                type="button"
+                onClick={() => {
+                  startReply(menuMessage);
+                  closeMenu();
+                }}
+                className="block w-full text-left px-4 py-2 text-xs font-medium text-[#1E2320] hover:bg-[#F4F1EA]"
+              >
+                Reply
+              </button>
+            )}
             <p className="px-4 py-1.5 text-[11px] font-semibold text-[#8C887E] uppercase tracking-wider">
               Delete
             </p>

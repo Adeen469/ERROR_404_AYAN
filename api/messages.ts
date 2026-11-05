@@ -370,9 +370,14 @@ export function esc(s: string): string {
 // GET  /api/messages?userEmail=x&unreadCount=1 -> { count } unread
 //      messages addressed to x (the Navbar badge).
 // POST /api/messages { eventId, senderEmail, senderName?, recipientEmail,
-//                      text?, attachment? }
+//                      text?, attachment?, replyToId? }
 //      -> stores one message and emails the recipient (best-effort).
 //         text max 2000 chars; at least one of text / attachment.
+//         replyToId (optional) quotes another message in the SAME
+//         event + thread pair; the server validates it and freezes a
+//         ~200-char snapshot (replySnapshot) at send time. Replying to
+//         a deleted message is refused (400); quotes of a message
+//         deleted later are scrubbed to text:"", deleted:true.
 //         attachment is { name, size, type, path } — the public URL is
 //         rebuilt here from path, never trusted from the caller.
 // POST /api/messages { action: "upload-url", eventId, senderEmail,
@@ -425,6 +430,81 @@ const SITE_URL = "https://locora-hyperlocal.vercel.app";
 const BUCKET = "message-attachments";
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_TEXT_CHARS = 2000;
+
+// One shared scrub for every message row returned to a viewer: the GET
+// list deliberately strips these, but hide / mark-read / send / edit
+// used to return the raw row — so a recipient could recover text the
+// sender edited away (editHistory), learn the other side hid the
+// message (hiddenFor), or reuse the sender's idempotency key.
+function stripMessageForViewer(m: any, viewerEmail: string): any {
+  const out: any = { ...m };
+  delete out.hiddenFor;
+  delete out.idempotencyKey;
+  if (m.senderEmail !== viewerEmail) delete out.editHistory;
+  // replySnapshot is rebuilt from a whitelist, never passed through
+  // verbatim: a stored row must not be able to smuggle extra fields
+  // (e.g. a forged snapshot carrying hidden data) to the viewer.
+  if (m.replySnapshot && typeof m.replySnapshot === "object") {
+    const s = m.replySnapshot;
+    out.replySnapshot = {
+      id: String(s.id || ""),
+      senderEmail: String(s.senderEmail || ""),
+      ...(s.senderName ? { senderName: String(s.senderName).slice(0, 80) } : {}),
+      text: String(s.text || "").slice(0, 200),
+      ...(s.attachmentName ? { attachmentName: String(s.attachmentName).slice(0, 200) } : {}),
+      deleted: s.deleted === true,
+    };
+  }
+  return out;
+}
+
+// ---- Replies (ported 2026-11-05 onto main@e1848d4; PR #4 is parked,
+// so no audit #3 code is carried here) ----
+// A reply freezes a snapshot of the quoted message at send time, so
+// the quote still reads correctly after the original is edited. The
+// snapshot is deliberately small and whitelisted (see
+// stripMessageForViewer): id, sender, a ~200-char text slice, and the
+// attachment name only — never the full text, never URLs, never
+// internal fields. Edits to the original do NOT update quotes.
+function buildReplySnapshot(quoted: any): any {
+  const snap: any = {
+    id: String(quoted.id || ""),
+    senderEmail: String(quoted.senderEmail || ""),
+    senderName: String(quoted.senderName || quoted.senderEmail || "").slice(0, 80),
+    text: String(quoted.text || "").trim().slice(0, 200),
+    deleted: false,
+  };
+  if (quoted.attachment && quoted.attachment.name) {
+    snap.attachmentName = String(quoted.attachment.name).slice(0, 200);
+  }
+  return snap;
+}
+
+// Pure reply validation, kept separate from the handler so it is
+// unit-testable (see test_replies.mts). Returns an error string, or
+// null when the quoted message may be replied to. Self-contained
+// (no norm() call) so the extracted function runs standalone.
+function replyTargetError(quoted: any, eventId: string, sender: string, recipient: string): string | null {
+  const lower = (s: any) => String(s || "").trim().toLowerCase();
+  if (!quoted || typeof quoted !== "object") return "Quoted message not found";
+  if (quoted.type === "block") return "Quoted message not found";
+  if (String(quoted.eventId || "") !== String(eventId || "")) {
+    return "You can only reply to a message in this conversation";
+  }
+  const pairOk =
+    (lower(quoted.senderEmail) === lower(sender) && lower(quoted.recipientEmail) === lower(recipient)) ||
+    (lower(quoted.senderEmail) === lower(recipient) && lower(quoted.recipientEmail) === lower(sender));
+  if (!pairOk) return "You can only reply to a message in this conversation";
+  // DESIGN CHOICE: replying to a deleted-for-everyone message is
+  // refused (400) instead of storing a "deleted" snapshot. A deleted
+  // message's text must not be resurrected inside a new quote, and a
+  // quote that starts life as "This message was deleted" is useless.
+  // Older quotes pointing at a message deleted AFTER they were sent
+  // are handled the other way: the DELETE scrub below rewrites their
+  // snapshot to text:"", deleted:true.
+  if (quoted.deletedForEveryone) return "The message you are replying to was deleted";
+  return null;
+}
 
 // Extension -> expected MIME family. The server checks the extension
 // (the client also checks File.type); a mismatch is rejected.
@@ -561,6 +641,23 @@ async function loadMessage(id: string): Promise<any | null> {
   );
   if (!ok || !Array.isArray(body) || body.length === 0) return null;
   return body[0].data;
+}
+
+// All messages quoting a given id, from EITHER side of the thread.
+// Main's original DELETE scrub only scanned loadMessagesFor(deleter),
+// so a reply written by the OTHER side kept quoting a deleted
+// message. Targeted jsonb lookup (same data->> pattern main's
+// loadMessagesFor already uses); on failure returns [] — a failed
+// lookup must never block the delete, the scrub is best-effort.
+async function loadMessagesReplyingTo(id: string): Promise<any[]> {
+  try {
+    const { ok, body } = await fetchJson(
+      `${supabaseBase()}/rest/v1/messages?select=id,data&data->>replyToId=eq.${encodeURIComponent(id)}&limit=1000`,
+      { headers: supabaseHeaders() },
+    );
+    if (ok && Array.isArray(body)) return body.map((row: any) => row.data).filter(Boolean);
+  } catch { /* fall through to the empty result below */ }
+  return [];
 }
 
 async function storeMessage(msg: any): Promise<void> {
@@ -760,12 +857,18 @@ export default async function handler(req: any, res: any): Promise<void> {
       // "Delete for me" hides via hiddenFor; old rows predate the field
       // and are treated as hidden for nobody. Block rows are internal
       // state and never listed as messages.
-      const mine = all.filter(
-        (m: any) =>
-          m.type !== "block" &&
-          (m.senderEmail === userEmail || m.recipientEmail === userEmail) &&
-          !((m.hiddenFor || []) as string[]).includes(userEmail),
-      );
+      const mine = all
+        .filter(
+          (m: any) =>
+            m.type !== "block" &&
+            (m.senderEmail === userEmail || m.recipientEmail === userEmail) &&
+            !((m.hiddenFor || []) as string[]).includes(userEmail),
+        )
+        // Server-internal fields must not leak to the counterparty:
+        // hiddenFor would tell B that A deleted the message for
+        // themselves, idempotencyKey is a bearer-ish token, and
+        // editHistory keeps edited-away text readable after an edit.
+        .map((m: any) => stripMessageForViewer(m, userEmail));
       if (req.query?.unreadCount === "1") {
         sendJson(res, 200, {
           count: mine.filter((m: any) => m.recipientEmail === userEmail && !m.read)
@@ -854,11 +957,13 @@ export default async function handler(req: any, res: any): Promise<void> {
       }
       // Scrub quotes of this message in the same threads (the reply
       // feature freezes a quote snapshot at send time; a deleted
-      // message must not survive inside someone else's quote).
+      // message must not survive inside someone else's quote). Both
+      // sides are scrubbed: loadMessagesReplyingTo finds replies from
+      // either participant, not just the deleter's own messages.
       try {
-        const mine = await loadMessagesFor(userEmail);
-        for (const m of mine) {
-          if (m.replyToId === id && m.replySnapshot) {
+        const quoting = await loadMessagesReplyingTo(id);
+        for (const m of quoting) {
+          if (m.replySnapshot) {
             m.replySnapshot = { ...m.replySnapshot, text: "", deleted: true };
             try { await updateMessageData(m); } catch { /* best-effort */ }
           }
@@ -899,7 +1004,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
       }
-      sendJson(res, 200, { message: msg });
+      sendJson(res, 200, { message: stripMessageForViewer(msg, userEmail) });
       return;
     }
 
@@ -1204,6 +1309,28 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 409, { message: "This event is not open for new messages" });
         return;
       }
+      // Replies: optional replyToId, validated server-side — the
+      // quoted message must exist, be in this event, and be in this
+      // exact thread pair (either direction). A caller-supplied
+      // snapshot is NEVER trusted: the snapshot is rebuilt here from
+      // the stored quoted row, frozen at send time.
+      let replyToId = "";
+      let replySnapshot: any = null;
+      if (body.replyToId !== undefined && body.replyToId !== null && String(body.replyToId).trim() !== "") {
+        replyToId = String(body.replyToId).trim().slice(0, 200);
+        let quoted: any = null;
+        try { quoted = await loadMessage(replyToId); } catch { quoted = null; }
+        if (!quoted) {
+          sendJson(res, 400, { message: "Quoted message not found" });
+          return;
+        }
+        const replyError = replyTargetError(quoted, eventId, sender, recipient);
+        if (replyError) {
+          sendJson(res, 400, { message: replyError });
+          return;
+        }
+        replySnapshot = buildReplySnapshot(quoted);
+      }
       // Send idempotency: a lost response + Retry used to create a
       // duplicate message (the client cleared the draft before the send
       // completed). A retry carrying the same key returns the original
@@ -1212,7 +1339,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       if (idempotencyKey) {
         const prior = existing.find((m: any) => m.idempotencyKey === idempotencyKey && m.senderEmail === sender);
         if (prior) {
-          sendJson(res, 200, { message: prior, mailed: false, idempotent: true });
+          sendJson(res, 200, { message: stripMessageForViewer(prior, sender), mailed: false, idempotent: true });
           return;
         }
       }
@@ -1258,6 +1385,10 @@ export default async function handler(req: any, res: any): Promise<void> {
         createdAt: new Date().toISOString(),
       };
       if (idempotencyKey) msg.idempotencyKey = idempotencyKey;
+      if (replyToId) {
+        msg.replyToId = replyToId;
+        msg.replySnapshot = replySnapshot;
+      }
       try {
         await storeMessage(msg);
       } catch {
@@ -1266,7 +1397,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       }
       // Best-effort alert; a mail failure must never unsend the message.
       const mailed = await sendMail(buildMessageEmail(msg, event));
-      sendJson(res, 200, { message: msg, mailed });
+      sendJson(res, 200, { message: stripMessageForViewer(msg, sender), mailed });
       return;
     }
 
@@ -1317,7 +1448,7 @@ export default async function handler(req: any, res: any): Promise<void> {
           sendJson(res, 503, { message: "Messages are not set up yet" });
           return;
         }
-        sendJson(res, 200, { message: msg });
+        sendJson(res, 200, { message: stripMessageForViewer(msg, me) });
         return;
       }
       const recipient = me;
@@ -1341,7 +1472,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
       }
-      sendJson(res, 200, { message: msg });
+      sendJson(res, 200, { message: stripMessageForViewer(msg, recipient) });
       return;
     }
 
