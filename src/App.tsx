@@ -80,6 +80,31 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+// Guests must not browse the app: Home, Discover, SmartMatch, event
+// details and organizer profiles all redirect a signed-out visitor to
+// the landing page. This is a UX guard (the server APIs still enforce
+// the session themselves). It subscribes to auth state, so when a
+// session is revoked elsewhere — "sign out everywhere" on another
+// device — the revalidation in App's mount effect flips the user to
+// null and the page the user is sitting on redirects to /landing by
+// itself, with no manual refresh. Account pages (dashboard,
+// registrations, profile, messages, organizer hub) keep RequireAuth's
+// sign-in redirect with returnTo; only the public browsing routes
+// land here.
+function RequireSignedIn({ children }: { children: React.ReactNode }) {
+  const [currentUser, setCurrentUser] = React.useState(() => authService.getCurrentUser());
+
+  useEffect(() => {
+    const unsub = authService.subscribe((u) => setCurrentUser(u));
+    return unsub;
+  }, []);
+
+  if (!currentUser) {
+    return <Navigate to="/landing" replace />;
+  }
+  return <>{children}</>;
+}
+
 export default function App() {
   // Re-check the stored session against the server (see
   // authService.validateSession): without this, a session revoked
@@ -128,11 +153,11 @@ export default function App() {
               {/* Root Route: Shows Landing Page if guest/logged out; shows Community HomePage if logged in */}
               <Route path="/" element={<HomeOrLanding />} />
               <Route path="/landing" element={<LandingPage />} />
-              <Route path="/home" element={<HomePage />} />
-              <Route path="/discover" element={<DiscoverPage />} />
-              <Route path="/events/:eventId" element={<EventDetailsPage />} />
-              <Route path="/organizers/:organizerId" element={<OrganizerProfilePage />} />
-              <Route path="/smart-match" element={<SmartMatchPage />} />
+              <Route path="/home" element={<RequireSignedIn><HomePage /></RequireSignedIn>} />
+              <Route path="/discover" element={<RequireSignedIn><DiscoverPage /></RequireSignedIn>} />
+              <Route path="/events/:eventId" element={<RequireSignedIn><EventDetailsPage /></RequireSignedIn>} />
+              <Route path="/organizers/:organizerId" element={<RequireSignedIn><OrganizerProfilePage /></RequireSignedIn>} />
+              <Route path="/smart-match" element={<RequireSignedIn><SmartMatchPage /></RequireSignedIn>} />
 
               {/* Attendee Protected Areas */}
               <Route path="/dashboard" element={<RequireAuth><DashboardPage /></RequireAuth>} />
