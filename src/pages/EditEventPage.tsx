@@ -10,6 +10,7 @@ import { useToast } from '../components/ui/Toast';
 import { ThemedSelect } from '../components/ui/ThemedSelect';
 import { FormSkeleton } from '../components/ui/LoadingSkeleton';
 import { PRESET_COVER_IMAGES } from './CreateEventPage';
+import { getOptionGroups } from '../utils/event-options';
 
 export function EditEventPage() {
   const { eventId } = useParams<{ eventId: string }>();
@@ -55,6 +56,19 @@ export function EditEventPage() {
   const [participationMode, setParticipationMode] = useState<'individual' | 'team' | 'both'>('individual');
   const [minTeamSize, setMinTeamSize] = useState('2');
   const [maxTeamSize, setMaxTeamSize] = useState('4');
+  // Category registration options (workshops & concerts; see
+  // CreateEventPage). Drafts are strings until save (blank extra
+  // price = 0, blank cap = unlimited).
+  const [optionDrafts, setOptionDrafts] = useState<Record<string, { label: string; extraPrice: string; cap: string }[]>>({});
+  const addOptionChoice = (groupKey: string) =>
+    setOptionDrafts((prev) => ({ ...prev, [groupKey]: [...(prev[groupKey] || []), { label: '', extraPrice: '', cap: '' }] }));
+  const updateOptionChoice = (groupKey: string, idx: number, patch: Partial<{ label: string; extraPrice: string; cap: string }>) =>
+    setOptionDrafts((prev) => ({
+      ...prev,
+      [groupKey]: (prev[groupKey] || []).map((c, i) => (i === idx ? { ...c, ...patch } : c)),
+    }));
+  const removeOptionChoice = (groupKey: string, idx: number) =>
+    setOptionDrafts((prev) => ({ ...prev, [groupKey]: (prev[groupKey] || []).filter((_, i) => i !== idx) }));
   const [capacity, setCapacity] = useState('50');
   const [tagsInput, setTagsInput] = useState('');
 
@@ -91,6 +105,20 @@ export function EditEventPage() {
           setParticipationMode(data.participation?.mode || 'individual');
           setMinTeamSize(String(data.participation?.minTeamSize ?? 2));
           setMaxTeamSize(String(data.participation?.maxTeamSize ?? 4));
+          // Category registration options: older events and other
+          // categories carry none, so the groups load empty.
+          const loadedOptions: Record<string, { label: string; extraPrice: string; cap: string }[]> = {};
+          if (data.options && typeof data.options === 'object') {
+            for (const g of getOptionGroups(data.category)) {
+              const list = Array.isArray(data.options[g.key]) ? data.options[g.key] : [];
+              loadedOptions[g.key] = list.map((c: any) => ({
+                label: String(c?.label || ''),
+                extraPrice: c?.extraPrice ? String(c.extraPrice) : '',
+                cap: c?.cap !== undefined && c?.cap !== null ? String(c.cap) : '',
+              }));
+            }
+          }
+          setOptionDrafts(loadedOptions);
           setCapacity(String(data.capacity));
           setTagsInput(data.tags.join(', '));
         }
@@ -157,6 +185,27 @@ export function EditEventPage() {
       if (Number.isInteger(min) && Number.isInteger(max) && min > max) errs.maxTeamSize = 'Maximum team size cannot be below the minimum.';
     }
 
+    // Category registration options: only workshops and concerts show
+    // the section; mirror the server rules (see CreateEventPage).
+    for (const g of getOptionGroups(category)) {
+      const rows = optionDrafts[g.key] || [];
+      if (rows.length > 20) errs[`options_${g.key}`] = 'At most 20 choices per group.';
+      const seen = new Set<string>();
+      rows.forEach((row, i) => {
+        const label = row.label.trim();
+        if (!label) errs[`options_${g.key}_${i}`] = 'Choice label is required.';
+        else if (label.length > 60) errs[`options_${g.key}_${i}`] = 'Labels must be 60 characters or fewer.';
+        else if (seen.has(label.toLowerCase())) errs[`options_${g.key}_${i}`] = 'Labels must be unique within a group.';
+        else seen.add(label.toLowerCase());
+        const extra = row.extraPrice.trim() === '' ? 0 : Number(row.extraPrice);
+        if (!Number.isInteger(extra) || extra < 0 || extra > 100000) errs[`options_${g.key}_${i}`] = 'Extra price must be a whole number of rupees between 0 and 100000.';
+        if (row.cap.trim() !== '') {
+          const cap = Number(row.cap);
+          if (!Number.isInteger(cap) || cap < 1 || cap > 10000) errs[`options_${g.key}_${i}`] = 'Cap must be a whole number between 1 and 10000.';
+        }
+      });
+    }
+
     setErrors(errs);
     return Object.keys(errs).length === 0;
   };
@@ -172,6 +221,26 @@ export function EditEventPage() {
         .split(',')
         .map((t) => t.trim())
         .filter(Boolean);
+
+      // Category registration options (workshops & concerts only):
+      // null clears the config (no choices left, or the category
+      // changed away); the server validates the same rules.
+      const buildOptions = () => {
+        const out: Record<string, { label: string; extraPrice: number; cap?: number }[]> = {};
+        for (const g of getOptionGroups(category)) {
+          const rows = (optionDrafts[g.key] || []).filter((r) => r.label.trim());
+          if (rows.length === 0) continue;
+          out[g.key] = rows.map((r) => {
+            const choice: { label: string; extraPrice: number; cap?: number } = {
+              label: r.label.trim(),
+              extraPrice: r.extraPrice.trim() === '' ? 0 : Number(r.extraPrice),
+            };
+            if (r.cap.trim() !== '') choice.cap = Number(r.cap);
+            return choice;
+          });
+        }
+        return Object.keys(out).length > 0 ? out : null;
+      };
 
       await eventsService.updateEvent(eventId, {
         title: title.trim(),
@@ -200,6 +269,9 @@ export function EditEventPage() {
           category === 'Technology & Hackathons'
             ? { mode: participationMode, minTeamSize: Number(minTeamSize), maxTeamSize: Number(maxTeamSize) }
             : null,
+        // Category registration options (workshops & concerts only):
+        // null clears a previously saved config.
+        options: buildOptions(),
         capacity: Number(capacity),
         tags,
       }, { ...ownershipOpts, allowAdmin: false });
@@ -517,6 +589,78 @@ export function EditEventPage() {
                   </div>
                 </div>
               )}
+            </div>
+          )}
+          {/* Registration Options — workshops & concerts only.
+              Hidden for every other category. Changing the category
+              away from workshops/concerts clears this on save. */}
+          {getOptionGroups(category).length > 0 && (
+            <div className="space-y-4">
+              <h2 className="font-editorial text-base font-bold text-[#1E2320] pb-2 border-b border-[#EBE7DF]">
+                Registration Options
+              </h2>
+              <p className="text-[11px] text-[#5F635D] leading-relaxed">
+                Add the choices attendees pick when registering. Each choice can add an
+                extra amount to the ticket price and can have a limit on how many
+                attendees may take it. Leave a group empty to skip it.
+              </p>
+              {getOptionGroups(category).map((g) => (
+                <div key={g.key} className="space-y-2">
+                  <h3 className="text-xs font-semibold text-[#1E2320]">{g.label}</h3>
+                  {(optionDrafts[g.key] || []).map((row, i) => (
+                    <div key={i}>
+                      <div className="grid grid-cols-[1fr_84px_84px_32px] gap-2 items-center">
+                        <input
+                          type="text"
+                          value={row.label}
+                          onChange={(e) => updateOptionChoice(g.key, i, { label: e.target.value })}
+                          placeholder="Choice label, e.g. VIP"
+                          className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] ${
+                            errors[`options_${g.key}_${i}`] ? 'border-rose-500' : 'border-[#E2DFD8]'
+                          }`}
+                        />
+                        <input
+                          type="number"
+                          min="0"
+                          max="100000"
+                          value={row.extraPrice}
+                          onChange={(e) => updateOptionChoice(g.key, i, { extraPrice: e.target.value })}
+                          placeholder="+ ₹0"
+                          title="Extra price in ₹ (blank = included)"
+                          className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
+                        />
+                        <input
+                          type="number"
+                          min="1"
+                          max="10000"
+                          value={row.cap}
+                          onChange={(e) => updateOptionChoice(g.key, i, { cap: e.target.value })}
+                          placeholder="No limit"
+                          title="How many attendees may take this choice (blank = unlimited)"
+                          className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => removeOptionChoice(g.key, i)}
+                          aria-label="Remove choice"
+                          className="w-8 h-8 text-xs font-semibold text-rose-600 hover:bg-rose-50 border border-rose-200 rounded-lg transition-colors"
+                        >
+                          ×
+                        </button>
+                      </div>
+                      {errors[`options_${g.key}_${i}`] && <p className="text-[11px] text-rose-600 mt-1">{errors[`options_${g.key}_${i}`]}</p>}
+                    </div>
+                  ))}
+                  {errors[`options_${g.key}`] && <p className="text-[11px] text-rose-600">{errors[`options_${g.key}`]}</p>}
+                  <button
+                    type="button"
+                    onClick={() => addOptionChoice(g.key)}
+                    className="text-xs font-semibold text-[#1E3F35] hover:underline"
+                  >
+                    + Add choice
+                  </button>
+                </div>
+              ))}
             </div>
           )}
         </div>

@@ -43,6 +43,20 @@ export interface EventParticipation {
   maxTeamSize: number;
 }
 
+// Category registration options (Workshops & Learning, Live Music &
+// Culture): the organizer defines choices per group; the attendee
+// picks one per group at registration. extraPrice is added to the
+// event base price (₹, integer >= 0); cap limits how many attendees
+// may take that choice (undefined = unlimited). Labels are unique
+// within a group, so a label identifies the choice.
+export interface EventOptionChoice {
+  label: string;
+  extraPrice: number;
+  cap?: number;
+}
+export type EventOptions = Record<string, EventOptionChoice[]>;
+export type RegistrationSelections = Record<string, string>;
+
 export interface EventItem {
   id: string;
   title: string;
@@ -87,6 +101,11 @@ export interface EventItem {
   // EventParticipation). Absent on older events and every other
   // category — those are individual-only. Never sent in ?slim=1 lists.
   participation?: EventParticipation;
+  // Category registration options (Workshops & Learning, Live Music &
+  // Culture only; see EventOptions). Absent on older events and every
+  // other category — those behave exactly as before. Never sent in
+  // ?slim=1 lists.
+  options?: EventOptions;
   capacity: number;
   registeredCount: number;
   status: EventStatus;
@@ -174,6 +193,12 @@ export interface AttendeeRegistration {
   teamCode?: string;
   teamSize?: number;
   isTeamLeader?: boolean;
+  // Category registration options (server-set — a client-sent value
+  // is never trusted, see api/registrations.ts). groupKey -> the
+  // label of the choice the attendee picked; labels are unique per
+  // group, so a label identifies the choice. The amountPaise snapshot
+  // on the row already includes the chosen extras.
+  selections?: RegistrationSelections;
 }
 
 export interface UserProfile {

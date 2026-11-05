@@ -474,12 +474,18 @@ async function handleCreateOrder(req: any, res: any): Promise<void> {
     sendJson(res, 409, { message: "This event has ended" });
     return;
   }
-  const price = Number(event.price);
-  if (!Number.isFinite(price) || price <= 0) {
+  // The amount is the snapshot stored on the registration at POST
+  // time (base price + chosen option extras) — never the live event
+  // price, which the organizer may have edited after registration
+  // (and which is 0 for a free-base event with a paid extra). Legacy
+  // rows without a snapshot fall back to the live event price.
+  const amountPaise = typeof reg.amountPaise === "number" && Number.isFinite(reg.amountPaise) && reg.amountPaise > 0
+    ? Math.round(reg.amountPaise)
+    : Math.round(Number(event.price || 0) * 100);
+  if (!Number.isFinite(amountPaise) || amountPaise <= 0) {
     sendJson(res, 400, { message: "This event is not a paid event" });
     return;
   }
-  const amountPaise = Math.round(price * 100);
   if (amountPaise < 100) {
     sendJson(res, 400, { message: "Amount must be at least 100 paise" });
     return;

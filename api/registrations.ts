@@ -934,6 +934,71 @@ export default async function handler(req: any, res: any): Promise<void> {
         reg.teamSize = undefined;
         reg.isTeamLeader = false;
       }
+      // Category registration options (Workshops & Learning, Live
+      // Music & Culture): the attendee picks one choice per
+      // configured group. The stored event.options is the source of
+      // truth — labels are unique per group, so a label identifies
+      // the choice, and the total is the base price + chosen extras,
+      // stored as the amountPaise snapshot below. A free base price
+      // with a paid extra is a paid registration, so the paid rule
+      // below keys off totalPaise, not the event price alone.
+      // Per-choice caps count non-cancelled rows with the same
+      // group+choice (same accepted race pattern as the event
+      // capacity check: check-then-insert, no transaction).
+      const eventOptions = event.options && typeof event.options === "object" ? event.options : null;
+      const optionGroupKeys = eventOptions
+        ? Object.keys(eventOptions).filter((k: string) => Array.isArray(eventOptions[k]) && eventOptions[k].length > 0)
+        : [];
+      let totalPaise = Math.round(Number(event.price || 0) * 100);
+      if (optionGroupKeys.length > 0) {
+        if (isTeamJoin) {
+          if (reg.selections !== undefined && reg.selections !== null) {
+            sendJson(res, 400, { message: "Team registrations cannot include options" });
+            return;
+          }
+        } else {
+          const selections = reg.selections;
+          if (!selections || typeof selections !== "object" || Array.isArray(selections)) {
+            sendJson(res, 400, { message: "Please choose an option for each group" });
+            return;
+          }
+          for (const k of Object.keys(selections)) {
+            if (!optionGroupKeys.includes(k)) {
+              sendJson(res, 400, { message: "Unknown option group" });
+              return;
+            }
+          }
+          let extrasPaise = 0;
+          const cleanSelections: any = {};
+          for (const k of optionGroupKeys) {
+            const sel = selections[k];
+            if (typeof sel !== "string" || !sel.trim()) {
+              sendJson(res, 400, { message: "Please choose an option" });
+              return;
+            }
+            const choice = (eventOptions[k] || []).find((c: any) => c && typeof c.label === "string" && c.label === sel.trim());
+            if (!choice) {
+              sendJson(res, 400, { message: `"${sel.trim()}" is not available` });
+              return;
+            }
+            cleanSelections[k] = choice.label;
+            extrasPaise += Math.round(Number(choice.extraPrice || 0) * 100);
+            if (typeof choice.cap === "number" && choice.cap >= 1) {
+              const taken = allRegs.filter((r: any) => r.eventId === reg.eventId && r.status !== "cancelled" && r.selections && r.selections[k] === choice.label).length;
+              if (taken >= choice.cap) {
+                sendJson(res, 409, { message: `"${choice.label}" is full` });
+                return;
+              }
+            }
+          }
+          reg.selections = cleanSelections;
+          totalPaise = Math.round(Number(event.price || 0) * 100) + extrasPaise;
+        }
+      } else {
+        // No options configured: a crafted body must not smuggle
+        // selections onto the row.
+        reg.selections = undefined;
+      }
       // Server-side paid rule: a paid event never gets an instant pass,
       // and never gets a manual pending row either. Paid rows exist
       // only as Razorpay rows (paymentMethod 'razorpay', created by
@@ -946,8 +1011,8 @@ export default async function handler(req: any, res: any): Promise<void> {
       // confirmed above with paymentMethod 'team' (the leader already
       // paid), so it must never be flipped to pending or refused here.
       if (!isTeamJoin) {
-        if (Number(event.price) > 0 && reg.status === "confirmed") reg.status = "pending";
-        if (Number(event.price) > 0 && reg.paymentMethod !== "razorpay" && reg.status === "pending") {
+        if (totalPaise > 0 && reg.status === "confirmed") reg.status = "pending";
+        if (totalPaise > 0 && reg.paymentMethod !== "razorpay" && reg.status === "pending") {
           sendJson(res, 400, { message: "Paid events use Razorpay checkout — manual payments are no longer accepted" });
           return;
         }
@@ -975,7 +1040,10 @@ export default async function handler(req: any, res: any): Promise<void> {
       // Expected-amount snapshot for the Razorpay order (the amount
       // create-order charges and verify checks against). A team-join
       // member pays nothing, so their snapshot stays 0 (set above).
-      if (!isTeamJoin && Number(event.price) > 0) reg.amountPaise = Math.round(Number(event.price) * 100);
+      // The snapshot is the TOTAL (base price + chosen option
+      // extras), so a free-base event with a paid extra is a paid
+      // registration for exactly that total.
+      if (!isTeamJoin && totalPaise > 0) reg.amountPaise = totalPaise;
       reg.registeredAt = reg.registeredAt || new Date().toISOString();
       // Do not store a full nested event with organiser email/UPI.
       // Store only the public snapshot the UI needs.

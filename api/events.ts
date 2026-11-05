@@ -476,6 +476,57 @@ export function esc(s: string): string {
   return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+// Category registration options (Workshops & Learning, Live Music &
+// Culture): the organizer defines choices per group (f-1/f-2/f-3);
+// the attendee picks one per group at registration. The group keys
+// are the contract with the client (src/utils/event-options.ts) —
+// keep them in sync. Only these two categories may store options;
+// every other category strips them (see POST/PATCH below).
+const EVENT_OPTION_GROUPS: Record<string, string[]> = {
+  "Workshops & Learning": ["activity", "session", "kit"],
+  "Live Music & Culture": ["ticketCategory", "seatingZone", "showTiming"],
+};
+
+// Validates + normalizes an `options` payload: { groupKey: [
+// { label, extraPrice?, cap? } ] }. Returns { value } with the
+// normalized object (empty object = no groups configured), or
+// { error } with the first problem found. Unknown group keys, empty
+// or over-long labels, duplicate labels within a group, non-integer
+// or out-of-range extraPrice / cap are all refused.
+function validateEventOptions(category: string, raw: any): { value?: any; error?: string } {
+  const allowed = EVENT_OPTION_GROUPS[category];
+  if (!allowed) return { value: {} };
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { error: "Options must be an object" };
+  const value: any = {};
+  for (const key of Object.keys(raw)) {
+    if (!allowed.includes(key)) return { error: `Unknown option group "${key}"` };
+    const list = raw[key];
+    if (!Array.isArray(list)) return { error: `Options for "${key}" must be a list` };
+    if (list.length > 20) return { error: "At most 20 choices per option group" };
+    const seen = new Set<string>();
+    const choices: any[] = [];
+    for (const c of list) {
+      if (!c || typeof c !== "object" || Array.isArray(c)) return { error: "Each option choice must be an object" };
+      const label = typeof c.label === "string" ? c.label.trim() : "";
+      if (!label) return { error: "Each option choice needs a label" };
+      if (label.length > 60) return { error: "Option labels must be 60 characters or fewer" };
+      const lower = label.toLowerCase();
+      if (seen.has(lower)) return { error: `Duplicate option "${label}"` };
+      seen.add(lower);
+      const extraPrice = c.extraPrice === undefined || c.extraPrice === null || c.extraPrice === "" ? 0 : Number(c.extraPrice);
+      if (!Number.isInteger(extraPrice) || extraPrice < 0 || extraPrice > 100000) return { error: "Extra price must be a whole number of rupees between 0 and 100000" };
+      let cap: number | undefined = undefined;
+      if (c.cap !== undefined && c.cap !== null && c.cap !== "") {
+        cap = Number(c.cap);
+        if (!Number.isInteger(cap) || cap < 1 || cap > 10000) return { error: "Option cap must be a whole number between 1 and 10000" };
+      }
+      choices.push(cap === undefined ? { label, extraPrice } : { label, extraPrice, cap });
+    }
+    if (choices.length > 0) value[key] = choices;
+  }
+  return { value };
+}
+
 // SECURITY FIX — Phase 1 Finding 2: /api/events responses never include
 // organiser.email, createdByEmail or upiId for viewers who are NOT the
 // event's owner or an admin (list or single). The owner/admin exception
@@ -796,6 +847,16 @@ export default async function handler(req: any, res: any) {
         if (minTeamSize > maxTeamSize) return sendJson(res, 400, { message: "Minimum team size cannot exceed the maximum" });
         participation = { mode: mode || "individual", minTeamSize, maxTeamSize };
       }
+      // Category registration options (Workshops & Learning, Live
+      // Music & Culture): organizer-defined choices per group; any
+      // other category stores no options at all — the config is
+      // stripped below, never trusted from the body.
+      let options: any = undefined;
+      if (p.options !== undefined && p.options !== null && EVENT_OPTION_GROUPS[p.category]) {
+        const v = validateEventOptions(p.category, p.options);
+        if (v.error) return sendJson(res, 400, { message: v.error });
+        options = Object.keys(v.value || {}).length > 0 ? v.value : undefined;
+      }
       const price = p.price === undefined || p.price === null || p.price === "" ? 0 : Number(p.price);
       if (!Number.isFinite(price) || price < 0) return sendJson(res, 400, { message: "Price must be zero or more" });
       const capacity = p.capacity === undefined || p.capacity === null || p.capacity === "" ? 50 : Number(p.capacity);
@@ -839,6 +900,9 @@ export default async function handler(req: any, res: any) {
         // Team participation (validated above; undefined for every
         // other category, so nothing is stored there).
         participation,
+        // Category registration options (validated above; undefined
+        // for every other category, so nothing is stored there).
+        options,
         capacity, registeredCount: 0, status: "published",
         organizer: {
           ...(p.organizer || { id: "org-community", name: organizerName, slug: "community-organizer", avatar: "", bio: "Community organizer.", location: "Metro City", eventsCount: 0, totalAttendeesServed: 0 }),
@@ -938,6 +1002,24 @@ export default async function handler(req: any, res: any) {
         if (minTeamSize > maxTeamSize) return sendJson(res, 400, { message: "Minimum team size cannot exceed the maximum" });
         updates.participation = { mode: mode || "individual", minTeamSize, maxTeamSize };
       }
+      // Category registration options edit (same rules as POST): an
+      // object with per-group choice lists, or null to clear it. A
+      // non-object value is refused. Validated against the MERGED
+      // category (the category may change in the same edit); the
+      // merged-category check below strips options whenever the
+      // event is not a workshop or concert. An object that
+      // normalizes to no groups clears the config.
+      if (updates.options !== undefined && updates.options !== null) {
+        if (typeof updates.options !== "object" || Array.isArray(updates.options)) {
+          return sendJson(res, 400, { message: "Options must be an object" });
+        }
+        const mergedCategory = updates.category !== undefined ? updates.category : existing.category;
+        if (EVENT_OPTION_GROUPS[mergedCategory]) {
+          const v = validateEventOptions(mergedCategory, updates.options);
+          if (v.error) return sendJson(res, 400, { message: v.error });
+          updates.options = Object.keys(v.value || {}).length > 0 ? v.value : null;
+        }
+      }
       if (updates.price !== undefined) {
         const pr = Number(updates.price);
         if (!Number.isFinite(pr) || pr < 0) return sendJson(res, 400, { message: "Price must be zero or more" });
@@ -973,6 +1055,10 @@ export default async function handler(req: any, res: any) {
       // category away (or a stale config on a non-hackathon) drops it.
       if (merged.category !== "Technology & Hackathons") delete merged.participation;
       if (updates.participation === null) delete merged.participation;
+      // Options belong to workshops and concerts only: changing the
+      // category away (or a stale config on another category) drops them.
+      if (!EVENT_OPTION_GROUPS[merged.category]) delete merged.options;
+      if (updates.options === null) delete merged.options;
       const supa = await fetch(
         supabaseBase() + "/rest/v1/events?id=eq." + encodeURIComponent(singleId),
         { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: merged }) },

@@ -7,6 +7,7 @@ import { DEMO_EVENTS } from '../mocks/demo-data';
 import { eventsService } from './events-service';
 import { authService } from './auth-service';
 import { apiClient, ApiError, isDemoMode } from './api-client';
+import { computeOptionsTotal } from '../utils/event-options';
 
 const REG_STORAGE_KEY = 'locora_registrations';
 
@@ -210,13 +211,16 @@ export const registrationsService = {
   // Free events only: instant confirmed pass. Paid events must go through
   // registerWithRazorpay — a paid event must never get an instant pass.
   // The exception is a team JOIN on a paid event (joinTeam below): the
-  // member pays nothing because the leader already paid.
-  async register(event: EventItem, team?: TeamRegistrationOptions): Promise<AttendeeRegistration> {
+  // member pays nothing because the leader already paid. "Paid" means
+  // the TOTAL (base price + chosen option extras): a free-base event
+  // with a paid extra is a paid registration. The server recomputes
+  // the total and is the source of truth.
+  async register(event: EventItem, team?: TeamRegistrationOptions, selections?: Record<string, string>): Promise<AttendeeRegistration> {
     const user = authService.getCurrentUser();
     if (!user) {
       throw new Error('Please sign in or select a demo user profile to register for events.');
     }
-    if (event.price > 0) {
+    if (computeOptionsTotal(event, selections || {}).total > 0) {
       throw new Error('This is a paid event. Please pay with Razorpay.');
     }
 
@@ -262,6 +266,9 @@ export const registrationsService = {
       ticketCode: newTicketCode(),
       checkedIn: false,
       ...teamFields,
+      // Category option picks (workshops & concerts): the server
+      // validates them against the event's configured options.
+      ...(selections ? { selections } : {}),
     };
 
     // Server first in non-demo mode: a failed shared write used to be
@@ -279,7 +286,7 @@ export const registrationsService = {
           // stale values on the old row (the server re-validates and,
           // for a leader, generates a fresh code).
           existing
-            ? { ...existing, ...teamFields, status: 'confirmed', ticketCode: newReg.ticketCode }
+            ? { ...existing, ...teamFields, ...(selections ? { selections } : {}), status: 'confirmed', ticketCode: newReg.ticketCode }
             : newReg,
         );
         const row = saved || newReg;
@@ -309,7 +316,7 @@ export const registrationsService = {
       existing.ticketCode = newReg.ticketCode;
       existing.userPhone = newReg.userPhone || existing.userPhone;
       existing.phoneVerified = newReg.phoneVerified || existing.phoneVerified;
-      Object.assign(existing, teamFields);
+      Object.assign(existing, teamFields, selections ? { selections } : {});
     } else {
       all.unshift(newReg);
     }
@@ -336,7 +343,7 @@ export const registrationsService = {
   // order for this row and confirms it (issuing the pass) only after
   // a verified captured payment. There is no organizer approval step
   // anywhere in this flow.
-  async registerWithRazorpay(event: EventItem, team?: TeamRegistrationOptions): Promise<AttendeeRegistration> {
+  async registerWithRazorpay(event: EventItem, team?: TeamRegistrationOptions, selections?: Record<string, string>): Promise<AttendeeRegistration> {
     const user = authService.getCurrentUser();
     if (!user) {
       throw new Error('Please sign in or select a demo user profile to register for events.');
@@ -377,6 +384,9 @@ export const registrationsService = {
       // the leader's code is on the row from the start; the server
       // generates the real code (the client one is a placeholder).
       ...teamBodyFields(team),
+      // Category option picks (workshops & concerts): the server
+      // validates them and stores the total as the amount snapshot.
+      ...(selections ? { selections } : {}),
     };
 
     // Server first in non-demo mode (see register): only a 503 falls

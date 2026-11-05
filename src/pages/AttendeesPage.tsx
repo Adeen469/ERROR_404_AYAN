@@ -7,6 +7,7 @@ import { authService } from '../services/auth-service';
 import { isAdminEmail } from '../services/roles-service';
 import { registrationsService } from '../services/registrations-service';
 import { formatEventDate } from '../utils/formatters';
+import { formatSelectionsSummary, getConfiguredOptionGroups } from '../utils/event-options';
 import { useToast } from '../components/ui/Toast';
 import { TableSkeleton } from '../components/ui/LoadingSkeleton';
 
@@ -103,7 +104,10 @@ export function AttendeesPage() {
       toast({ type: 'info', title: 'No attendees to export' });
       return;
     }
-    const headers = ['Registration ID', 'Name', 'Email', 'Phone', 'Ticket Code', 'Status', 'Checked In', 'Participation', 'Team Code', 'Team Leader', 'Team Size'];
+    // One column per configured option group (workshops & concerts);
+    // events without options export the same columns as before.
+    const optionGroups = getConfiguredOptionGroups(event);
+    const headers = ['Registration ID', 'Name', 'Email', 'Phone', 'Ticket Code', 'Status', 'Checked In', 'Participation', 'Team Code', 'Team Leader', 'Team Size', ...optionGroups.map((g) => g.label)];
     const rows = tableAttendees.map((a) => [
       a.id,
       `"${a.userName}"`,
@@ -116,6 +120,7 @@ export function AttendeesPage() {
       `"${a.teamCode || ''}"`,
       a.participationType === 'team' ? (a.isTeamLeader ? 'Yes' : 'No') : '',
       a.teamSize ? String(a.teamSize) : '',
+      ...optionGroups.map((g) => `"${a.selections?.[g.key] || ''}"`),
     ]);
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
     const encodedUri = encodeURI(csvContent);
@@ -141,6 +146,7 @@ export function AttendeesPage() {
       a.userEmail.toLowerCase().includes(q) ||
       (a.userPhone || '').toLowerCase().includes(q) ||
       (a.teamCode || '').toLowerCase().includes(q) ||
+      formatSelectionsSummary(event, a.selections).toLowerCase().includes(q) ||
       a.ticketCode.toLowerCase().includes(q);
 
     if (!matchesSearch) return false;
@@ -295,6 +301,9 @@ export function AttendeesPage() {
                       Team {reg.teamCode} · {reg.isTeamLeader ? 'Leader' : 'Member'}
                     </p>
                   )}
+                  {reg.selections && formatSelectionsSummary(event, reg.selections) && (
+                    <p className="text-[#5F635D]">{formatSelectionsSummary(event, reg.selections)}</p>
+                  )}
                 </div>
               </div>
             ))}
@@ -385,6 +394,11 @@ export function AttendeesPage() {
                           {!att.isTeamLeader && teamCounts.has(att.teamCode)
                             ? ` · ${teamCounts.get(att.teamCode)?.count}/${teamCounts.get(att.teamCode)?.size || '?'}`
                             : ''}
+                        </p>
+                      )}
+                      {att.selections && formatSelectionsSummary(event, att.selections) && (
+                        <p className="text-[11px] text-[#5F635D]">
+                          {formatSelectionsSummary(event, att.selections)}
                         </p>
                       )}
                     </td>

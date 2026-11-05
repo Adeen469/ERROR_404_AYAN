@@ -5,6 +5,7 @@ import { AttendeeRegistration, EventItem } from '../types';
 import { registrationsService, getRefundQuote } from '../services/registrations-service';
 import { eventsService } from '../services/events-service';
 import { formatEventDate, formatEventTimeRange, formatEventLocation, formatPaise } from '../utils/formatters';
+import { formatSelectionsSummary } from '../utils/event-options';
 import { useToast } from '../components/ui/Toast';
 import { Modal, ConfirmDialog } from '../components/ui/Modal';
 import { EmptyState, ListSkeleton } from '../components/ui/LoadingSkeleton';
@@ -210,6 +211,11 @@ export function RegistrationsPage() {
                       {ev.venueName}
                     </span>
                   </div>
+                  {reg.selections && formatSelectionsSummary(ev, reg.selections) && (
+                    <p className="text-xs text-[#5F635D] pt-1">
+                      {formatSelectionsSummary(ev, reg.selections)}
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -309,6 +315,11 @@ export function RegistrationsPage() {
               <div className="font-mono text-sm tracking-wider font-bold text-[#A3D9C9]">
                 {selectedPass.ticketCode}
               </div>
+              {selectedPass.selections && formatSelectionsSummary(liveEventOf(selectedPass), selectedPass.selections) && (
+                <div className="text-[11px] text-white/60">
+                  {formatSelectionsSummary(liveEventOf(selectedPass), selectedPass.selections)}
+                </div>
+              )}
               <div className="text-[11px] text-white/60">
                 Attendee: {selectedPass.userName} ({selectedPass.userEmail})
               </div>

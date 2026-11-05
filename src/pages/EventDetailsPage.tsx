@@ -25,6 +25,7 @@ import { savedEventsService } from '../services/saved-events-service';
 import { authService } from '../services/auth-service';
 import { AttendeeDetailsGate } from '../components/events/AttendeeDetailsGate';
 import { formatEventDate, formatEventTimeRange, formatPrice, formatPaise, getMapsSearchUrl, formatEventLocation, getEventNeighborhood } from '../utils/formatters';
+import { getConfiguredOptionGroups, hasOptionExtras, computeOptionsTotal, formatSelectionsSummary } from '../utils/event-options';
 import { useToast } from '../components/ui/Toast';
 import { ConfirmDialog, Modal } from '../components/ui/Modal';
 import { EventDetailsSkeleton } from '../components/ui/LoadingSkeleton';
@@ -122,6 +123,15 @@ export function EventDetailsPage() {
   const [teamError, setTeamError] = useState('');
   const [teamOpts, setTeamOpts] = useState<TeamRegistrationOptions | undefined>(undefined);
   const [copiedTeamCode, setCopiedTeamCode] = useState(false);
+  // Category registration options (workshops & concerts): the
+  // attendee picks one choice per configured group after the details
+  // gate; the total (base + extras) decides paid vs free.
+  // pendingSelections carries the picks into the payment / confirm
+  // step; the server recomputes the total and is the source of truth.
+  const [optionsModalOpen, setOptionsModalOpen] = useState(false);
+  const [optionsSelections, setOptionsSelections] = useState<Record<string, string>>({});
+  const [optionsError, setOptionsError] = useState('');
+  const [pendingSelections, setPendingSelections] = useState<Record<string, string> | undefined>(undefined);
 
   useEffect(() => {
     async function loadEventData() {
@@ -200,14 +210,34 @@ export function EventDetailsPage() {
   const teamEnabled = Boolean(participation && (participation.mode === 'team' || participation.mode === 'both'));
   const minTeamSize = participation?.minTeamSize ?? 2;
   const maxTeamSize = participation?.maxTeamSize ?? 4;
+  // Category registration options (workshops & concerts): the
+  // configured groups, whether any choice adds an extra, and the
+  // live total for the attendee's current picks. The payment modal's
+  // total is the picks' total when paying fresh, the stored snapshot
+  // when a pending row already exists (Pay Now retry), else the base.
+  const optionGroups = getConfiguredOptionGroups(event);
+  const optionsEnabled = optionGroups.length > 0;
+  const optionExtras = hasOptionExtras(event);
+  const optionsTotal = computeOptionsTotal(event, optionsSelections);
+  const allOptionsPicked = optionGroups.every((g) => optionsSelections[g.key]);
+  const paymentTotal = pendingSelections
+    ? computeOptionsTotal(event, pendingSelections).total
+    : registration && registration.status === 'pending' && typeof registration.amountPaise === 'number'
+      ? registration.amountPaise / 100
+      : event.price;
+  const paymentSelections = pendingSelections || registration?.selections;
   const priceSuffix =
     event.price === 0
-      ? '/ attendee'
+      ? optionExtras
+        ? ' onwards'
+        : '/ attendee'
       : participation?.mode === 'team'
         ? '/ team'
         : participation?.mode === 'both'
           ? '/ person · / team'
-          : undefined;
+          : optionExtras
+            ? ' onwards'
+            : undefined;
   const spotsLeft = Math.max(0, event.capacity - event.registeredCount);
   // Owner state: since the server GET is now session-aware, an owner
   // viewing their own event receives createdByEmail/organizer.email and
@@ -264,6 +294,23 @@ export function EventDetailsPage() {
       setTeamModalOpen(true);
       return;
     }
+    // Options events pause at the options modal so the attendee picks
+    // one choice per group; the modal's Continue button decides paid
+    // vs free from the total. Pre-fill from the pending/rejected row
+    // when re-paying (the stored selections are what the order
+    // charges); otherwise start empty so every choice is explicit.
+    if (optionsEnabled) {
+      const preset: Record<string, string> = {};
+      if (registration?.selections) {
+        for (const g of optionGroups) {
+          if (registration.selections[g.key]) preset[g.key] = registration.selections[g.key];
+        }
+      }
+      setOptionsSelections(preset);
+      setOptionsError('');
+      setOptionsModalOpen(true);
+      return;
+    }
     if (target === 'paid') setPaymentOpen(true);
     else setConfirmRegisterOpen(true);
   };
@@ -284,10 +331,10 @@ export function EventDetailsPage() {
       ? ` Share your team code ${reg.teamCode} with your team so they can join.`
       : '';
 
-  const handleRegisterConfirm = async (team?: TeamRegistrationOptions) => {
+  const handleRegisterConfirm = async (team?: TeamRegistrationOptions, selections?: Record<string, string>) => {
     setActionLoading(true);
     try {
-      const reg = await registrationsService.register(event, team);
+      const reg = await registrationsService.register(event, team, selections);
       setRegistration(reg);
       setEvent((prev) => (prev ? { ...prev, registeredCount: prev.registeredCount + 1 } : null));
       setConfirmRegisterOpen(false);
@@ -305,6 +352,23 @@ export function EventDetailsPage() {
     } finally {
       setActionLoading(false);
     }
+  };
+
+  // Options modal's Continue button: every group must be picked.
+  // The total decides paid vs free — a free-base event with a paid
+  // extra goes through Razorpay for the total, like any paid event.
+  const handleOptionsContinue = () => {
+    if (!event) return;
+    if (!allOptionsPicked) {
+      setOptionsError('Please choose an option for each group.');
+      return;
+    }
+    const picks = { ...optionsSelections };
+    const total = computeOptionsTotal(event, picks).total;
+    setPendingSelections(picks);
+    setOptionsModalOpen(false);
+    if (total > 0) setPaymentOpen(true);
+    else void handleRegisterConfirm(undefined, picks);
   };
 
   // Team modal's Continue button. Individual: straight to the
@@ -370,7 +434,7 @@ export function EventDetailsPage() {
   // never issues a pass — handleRazorpayPay always calls verify first.
   // Dismissing the modal or a failed payment leaves the registration
   // pending, so the attendee can retry or fall back to manual UPI.
-  const handleRazorpayPay = async (team?: TeamRegistrationOptions) => {
+  const handleRazorpayPay = async (team?: TeamRegistrationOptions, selections?: Record<string, string>) => {
     if (!event) return;
     setRazorpayError('');
     setActionLoading(true);
@@ -380,7 +444,7 @@ export function EventDetailsPage() {
       // pending row. Never create a second pending row for this user.
       let reg = registration && registration.status === 'pending' ? registration : null;
       if (!reg) {
-        reg = await registrationsService.registerWithRazorpay(event, team);
+        reg = await registrationsService.registerWithRazorpay(event, team, selections);
         setRegistration(reg);
       }
       const order = await paymentsService.createOrder(reg.id);
@@ -800,6 +864,11 @@ export function EventDetailsPage() {
                     <p className="text-[11px] text-[#1E3F35]/80 mt-0.5">
                       Pass code: <span className="font-mono font-bold">{registration?.ticketCode}</span>
                     </p>
+                    {registration?.selections && formatSelectionsSummary(event, registration.selections) && (
+                      <p className="text-[11px] text-[#1E3F35]/80 mt-0.5">
+                        {formatSelectionsSummary(event, registration.selections)}
+                      </p>
+                    )}
                     {/* Team leader's code, shown again after leaving
                         the page so it can be shared with the team.
                         Only the leader sees it: members joined with
@@ -846,6 +915,11 @@ export function EventDetailsPage() {
                     <p className="text-[11px] mt-0.5">
                       Your Razorpay payment is not complete yet. Pay now and your pass will be issued automatically once the payment is verified.
                     </p>
+                    {registration?.selections && formatSelectionsSummary(event, registration.selections) && (
+                      <p className="text-[11px] mt-0.5">
+                        {formatSelectionsSummary(event, registration.selections)}
+                      </p>
+                    )}
                   </div>
                 </div>
 
@@ -921,7 +995,7 @@ export function EventDetailsPage() {
                       : 'bg-[#1E3F35] hover:bg-[#163028] cursor-pointer'
                   }`}
                 >
-                  {isFull ? 'Event Sold Out' : isPaidEvent ? `Register · ${formatPrice(event.price)}` : 'Register for Event'}
+                  {isFull ? 'Event Sold Out' : isPaidEvent ? `Register · ${formatPrice(event.price)}${optionExtras ? ' onwards' : ''}` : 'Register for Event'}
                 </button>
               </div>
             )}
@@ -944,7 +1018,7 @@ export function EventDetailsPage() {
 
             <div className="pt-2 text-center">
               <p className="text-[11px] text-[#8C887E]">
-                {isPaidEvent
+                {isPaidEvent || optionExtras
                   ? 'Payment verified by Razorpay · Digital entry'
                   : 'Instant confirmation · No booking fees · Digital entry'}
               </p>
@@ -1030,7 +1104,7 @@ export function EventDetailsPage() {
           setRazorpayError('');
         }}
         title="Pay & Register"
-        description={`This is a paid event (${formatPrice(event.price)}). Pay securely with Razorpay — your pass is issued automatically once the payment is verified.`}
+        description={`This is a paid event (${formatPrice(paymentTotal)}). Pay securely with Razorpay — your pass is issued automatically once the payment is verified.`}
       >
         <div className="space-y-4">
           <div className="p-4 bg-[#EAF1ED] border border-[#D0E2D9] rounded-lg space-y-2">
@@ -1042,13 +1116,37 @@ export function EventDetailsPage() {
             <button
               type="button"
               disabled={actionLoading}
-              onClick={() => handleRazorpayPay(teamOpts)}
+              onClick={() => handleRazorpayPay(teamOpts, pendingSelections)}
               className="w-full py-3 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors disabled:opacity-60"
             >
-              {actionLoading ? 'Starting payment…' : `Pay ${formatPrice(event.price)} with Razorpay`}
+              {actionLoading ? 'Starting payment…' : `Pay ${formatPrice(paymentTotal)} with Razorpay`}
             </button>
             {razorpayError && <p className="text-[11px] text-rose-600">{razorpayError}</p>}
           </div>
+          {/* Options breakdown (workshops & concerts): what the total
+              is made of — the order charges the stored total. */}
+          {paymentSelections && optionGroups.length > 0 && (
+            <div className="p-3 bg-[#F4F1EA] border border-[#E2DFD8] rounded-lg space-y-1 text-xs text-[#1E2320]">
+              {optionGroups.map((g) => {
+                const label = paymentSelections[g.key];
+                if (!label) return null;
+                const choice = g.choices.find((c) => c.label === label);
+                const extra = choice ? Number(choice.extraPrice || 0) : 0;
+                return (
+                  <p key={g.key} className="flex justify-between gap-2">
+                    <span>
+                      {g.label}: {label}
+                    </span>
+                    <span className="text-[#5F635D]">{extra > 0 ? `+${formatPrice(extra)}` : 'Included'}</span>
+                  </p>
+                );
+              })}
+              <p className="flex justify-between gap-2 font-semibold pt-1 border-t border-[#E2DFD8]">
+                <span>Total</span>
+                <span>{formatPrice(paymentTotal)}</span>
+              </p>
+            </div>
+          )}
           <p className="text-[11px] text-[#5F635D] text-center leading-relaxed">
             Payments go through Razorpay to the event account. If your payment
             succeeds but no pass appears, use Pay Now again — it recovers
@@ -1220,6 +1318,75 @@ export function EventDetailsPage() {
               </button>
             </div>
           )}
+        </div>
+      </Modal>
+
+      {/* Category registration options (workshops & concerts): one
+          pick per configured group, with the live total. The total
+          decides paid vs free; the server recomputes it and is the
+          source of truth. */}
+      <Modal
+        isOpen={optionsModalOpen}
+        onClose={() => {
+          setOptionsModalOpen(false);
+          setOptionsError('');
+        }}
+        title="Choose your options"
+        description={`Pick one option for each group. Your total updates as you choose — the base price is ${formatPrice(event.price)}.`}
+      >
+        <div className="space-y-4">
+          {optionGroups.map((g) => (
+            <div key={g.key} className="space-y-2">
+              <p className="text-xs font-semibold text-[#1E2320]">{g.label}</p>
+              <div className="grid grid-cols-1 gap-2">
+                {g.choices.map((c) => (
+                  <button
+                    key={c.label}
+                    type="button"
+                    onClick={() => setOptionsSelections((prev) => ({ ...prev, [g.key]: c.label }))}
+                    className={`text-left p-3 rounded-xl border text-xs transition-colors ${
+                      optionsSelections[g.key] === c.label
+                        ? 'border-[#1E3F35] bg-[#EAF1ED]'
+                        : 'border-[#E2DFD8] bg-white hover:border-[#1E3F35]'
+                    }`}
+                  >
+                    <span className="block font-semibold text-[#1E2320]">{c.label}</span>
+                    <span className="block text-[11px] text-[#5F635D] mt-0.5">
+                      {Number(c.extraPrice || 0) > 0 ? `+${formatPrice(Number(c.extraPrice))}` : 'Included'}
+                      {typeof c.cap === 'number' ? ` · Limited to ${c.cap}` : ''}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+          <div className="p-3 bg-[#F4F1EA] border border-[#E2DFD8] rounded-lg space-y-1 text-xs text-[#1E2320]">
+            <p className="flex justify-between gap-2">
+              <span>Base price</span>
+              <span>{formatPrice(event.price)}</span>
+            </p>
+            <p className="flex justify-between gap-2">
+              <span>Options</span>
+              <span>{optionsTotal.extras > 0 ? `+${formatPrice(optionsTotal.extras)}` : 'Included'}</span>
+            </p>
+            <p className="flex justify-between gap-2 font-semibold pt-1 border-t border-[#E2DFD8]">
+              <span>Total</span>
+              <span>{formatPrice(optionsTotal.total)}</span>
+            </p>
+          </div>
+          {optionsError && <p className="text-[11px] text-rose-600">{optionsError}</p>}
+          <button
+            type="button"
+            disabled={actionLoading || !allOptionsPicked}
+            onClick={handleOptionsContinue}
+            className="w-full py-3 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors disabled:opacity-60"
+          >
+            {actionLoading
+              ? 'Please wait…'
+              : optionsTotal.total > 0
+                ? `Continue to payment · ${formatPrice(optionsTotal.total)}`
+                : 'Continue & Register'}
+          </button>
         </div>
       </Modal>
 
