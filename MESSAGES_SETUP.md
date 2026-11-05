@@ -60,11 +60,13 @@ no redeploy step beyond that.
   3 seconds while open. Edits also apply optimistically: the edited
   text shows at once and reverts only if the server patch fails.
 - Message actions (right-click / long-press on a bubble): Delete for
-  everyone (sender only, any time — removes the row and, best effort,
-  its Storage object), Delete for me (either side, any time — hides it
-  for that user only via a hiddenFor list), Edit (own text only,
-  within 1 hour of sending; the bubble then shows "edited"). Deletes
-  have no time limit; the 1-hour limit applies to edits only.
+  everyone (sender only, within 24 hours of sending — replaces the
+  message with a tombstone and, best effort, deletes its Storage
+  object; after 24 hours the server refuses with 403), Delete for me
+  (either side, any time — hides it for that user only via a hiddenFor
+  list), Edit (own text only, within 1 hour of sending; the bubble
+  then shows "edited"). The 24-hour delete window and the 1-hour edit
+  window are both server-enforced.
 - Deletes are confirmed first (shared Modal dialog), then hidden
   locally at once with a "Message deleted" toast and an Undo button.
   The real server call only runs when the 3-second toast expires, so
@@ -73,7 +75,8 @@ no redeploy step beyond that.
   (X) only hides it — the delete still runs; only Undo cancels it.
   A full browser refresh inside the 3s window is the one exception:
   the timers die with the page and the message comes back.
-- Honest limit, same as registrations: there is no session auth, so
-  sender/recipient checks trust the signed-in email the app sends.
-  They stop misuse through the API, but they are not proof of identity
-  the way a signed session would be.
+- Session auth: every endpoint verifies the HttpOnly `locora_session`
+  cookie, and the sender/recipient are taken from that verified
+  session — never from the request body. A caller cannot read, send,
+  edit, or delete as another user, and blocked senders are refused by
+  the server (block rows are looked up by blocker/blocked email).
