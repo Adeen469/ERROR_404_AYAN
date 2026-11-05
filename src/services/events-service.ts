@@ -290,7 +290,7 @@ export const eventsService = {
         void flushPending();
         // Pending ops overlay the default first page only, flagged, so a
         // not-yet-synced event never vanishes from its creator's view.
-        return applyPendingToPage(shared, page, filters, getPendingOps(localStorage));
+        return applyPendingToPage(shared, page, filters, getPendingOps(localStorage), viewer === 'guest' ? undefined : viewer);
       } catch (err) {
         lastListFromLocal = true;
         console.warn('Backend API /events unavailable, falling back to local events store:', err);
@@ -599,6 +599,7 @@ export const eventsService = {
     opts?: OwnershipOptions,
   ): Promise<{
     deleted: boolean;
+    pending?: boolean;
     summary?: {
       cancelledCount?: number;
       refundedCount?: number;
@@ -627,7 +628,24 @@ export const eventsService = {
         }>('/events', { id });
         return { deleted: true, summary: summary || undefined };
       } catch (err) {
+        const status = (err as { status?: unknown } | null)?.status;
+        // Already gone server-side: the delete effectively succeeded.
+        if (status === 404) return { deleted: true };
+        // A permission error will never succeed on retry: surface it
+        // instead of queuing a delete that can never land.
+        if (status === 401 || status === 403) throw err;
+        // Network/server error: queue for sync, but report honestly —
+        // the old code returned { deleted: true } here, so the UI told
+        // the organizer the event was gone when it still existed.
         console.warn('Backend API delete event unavailable, queuing the delete for sync:', err);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        let events = getStoredEvents();
+        events = events.filter((e) => e.id !== id);
+        saveStoredEvents(events);
+        // Queued, unless the event itself never reached the server: a pending
+        // create for this id is simply cancelled by addPendingOp.
+        addPendingOp(localStorage, { op: 'delete', id }, opts.ownerEmail);
+        return { deleted: false, pending: true };
       }
     }
 

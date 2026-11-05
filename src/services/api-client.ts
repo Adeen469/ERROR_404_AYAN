@@ -102,10 +102,14 @@ class ApiClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15000);
     try {
+      // customConfig spreads FIRST: a caller-supplied signal used to
+      // silently override the timeout controller's signal (and disable
+      // the 15s timeout entirely). No caller passes a signal today, and
+      // the timeout must always apply, so the controller wins.
       const response = await fetch(url, {
+        ...customConfig,
         headers: defaultHeaders,
         signal: controller.signal,
-        ...customConfig,
       });
 
       if (!response.ok) {

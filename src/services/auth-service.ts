@@ -109,7 +109,7 @@ export const authService = {
   async signup(name: string, email: string, password?: string): Promise<UserProfile> {
     // Every new account starts as an attendee. Organizer status is granted
     // later by an admin approval, never chosen at sign-up.
-    if (!password || password.length < 6) throw new Error('Password must be at least 6 characters');
+    if (!password || password.length < 8) throw new Error('Password must be at least 8 characters');
     if (ADMIN_EMAILS.includes(email.trim().toLowerCase())) {
       throw new Error('Admin accounts must sign in with Google.');
     }

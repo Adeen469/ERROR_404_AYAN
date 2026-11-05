@@ -123,7 +123,7 @@ export async function signSession(email: string, role: string, authProvider: str
 export async function verifySession(req: any): Promise<SessionUser | null> {
   try {
     const secret = getEnv("SESSION_SECRET");
-    if (!secret) return null;
+    if (!secret || secret.length < 32) return null;
     const token = parseCookies(req).locora_session;
     if (!token) return null;
     const parts = token.split(".");
@@ -140,7 +140,11 @@ export async function verifySession(req: any): Promise<SessionUser | null> {
         const exp = rev.body[0].data?.expiresAt;
         if (!exp || new Date(exp).getTime() > Date.now()) return null;
       }
-    } catch {}
+    } catch {
+      // Fail CLOSED: a Supabase error must not silently skip the
+      // revocation check (sign-out-everywhere would stop working).
+      return null;
+    }
     try {
       const userRow = await loadUserByEmail(email);
       if (userRow && userRow.data && typeof userRow.data.sessionVersion === "number") {
@@ -151,7 +155,11 @@ export async function verifySession(req: any): Promise<SessionUser | null> {
           return null;
         }
       }
-    } catch {}
+    } catch {
+      // Fail CLOSED: a Supabase error must not silently skip the
+      // session-version check (sign-out-everywhere would stop working).
+      return null;
+    }
     return { email, role: payload.role || "attendee", authProvider: payload.authProvider || "local", sessionVersion: typeof payload.v === "number" ? payload.v : undefined };
   } catch {
     return null;
@@ -246,9 +254,38 @@ export function randomTokenHex(bytes = 32): string {
 }
 
 // ---- Rate limiting (Supabase-backed counter, table rate_limits) ----
+// Fail-CLOSED rate-limit helper for mutations (see api/auth.ts).
+function limited(res: any, rl: { allowed: boolean; retryAfter: number; tableMissing: boolean }, message: string): boolean {
+  if (rl.tableMissing) {
+    sendJson(res, 503, { message: "Rate limiting is not configured. Please ask the admin to run the rate_limits setup SQL." });
+    return true;
+  }
+  if (!rl.allowed) {
+    sendJson(res, 429, { message }, { "Retry-After": String(rl.retryAfter) });
+    return true;
+  }
+  return false;
+}
+
 export async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
   try {
     if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
+    // Atomic path first: the rate_limit_hit RPC (see
+    // SUPABASE_RPC_SETUP.md) increments and checks in one Postgres
+    // call. Falls back to the read-modify-write path below when the
+    // RPC has not been created yet.
+    try {
+      const rpc = await fetchJson(`${supabaseBase()}/rest/v1/rpc/rate_limit_hit`, {
+        method: "POST",
+        headers: supabaseHeaders(),
+        body: JSON.stringify({ p_key: key, p_limit: limit, p_window_ms: windowMs }),
+      });
+      if (rpc.ok) {
+        const r = rpc.body;
+        if (typeof r === "boolean") return { allowed: r, retryAfter: 0, tableMissing: false };
+        if (r && typeof r === "object") return { allowed: r.allowed !== false, retryAfter: Number(r.retry_after || 0), tableMissing: false };
+      }
+    } catch { /* fall through to the legacy path */ }
     const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
     const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
     if (!ok) {
@@ -523,6 +560,12 @@ export default async function handler(req: any, res: any): Promise<void> {
     if (req.method === "POST") {
       const body = await readBody(req);
       const action = body.action;
+
+      // These actions had no rate limiting at all: an attacker could
+      // spam organizer requests or hammer admin decisions. Fail
+      // CLOSED when the rate_limits table is missing.
+      const rlOrg = await checkRateLimit(`org-access:${session.email}`, 30, 60 * 60 * 1000);
+      if (limited(res, rlOrg, "Too many organizer-access requests. Try again shortly.")) return;
 
       if (action === "request") {
         const reqEmail = session.email;

@@ -53,8 +53,16 @@ export function parseCookies(req: any): Record<string, string> {
 }
 
 export function getClientIp(req: any): string {
+  // LAST entry, like every other api file: the first entry is
+  // client-controlled (spoofable), the last is appended by the
+  // platform's own proxy. The sign-in alert IP/location below used
+  // the first entry, so a forged header could plant a false location
+  // in the alert email.
   const fwd = req.headers?.["x-forwarded-for"] || "";
-  if (typeof fwd === "string" && fwd.trim()) return fwd.split(",")[0].trim();
+  if (typeof fwd === "string" && fwd.trim()) {
+    const parts = fwd.split(",").map((x: string) => x.trim()).filter(Boolean);
+    if (parts.length > 0) return parts[parts.length - 1];
+  }
   return req.headers?.["x-real-ip"] || "unknown";
 }
 
@@ -464,15 +472,18 @@ async function getLocation(ip: string): Promise<string> {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 3000);
+    // ip-api.com over plain HTTP leaked the user's IP to the network
+    // in cleartext. ipwho.is over HTTPS is already used by the
+    // client's location service, and returns { city, region, country }.
     const res = await fetch(
-      `http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,city,regionName,country`,
+      `https://ipwho.is/${encodeURIComponent(ip)}`,
       { signal: ctrl.signal },
     );
     clearTimeout(t);
     if (!res.ok) return "";
     const body: any = await res.json();
-    if (body?.status !== "success") return "";
-    return [body.city, body.regionName, body.country].filter(Boolean).join(", ");
+    if (body?.success === false) return "";
+    return [body.city, body.region, body.country].filter(Boolean).join(", ");
   } catch {
     return "";
   }
@@ -640,8 +651,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       sendJson(res, 200, { mailed: false, reason: "rate-limited" });
       return;
     }
-    const forwarded = req.headers?.["x-forwarded-for"] || req.headers?.["X-Forwarded-For"] || "";
-    const ip = String(forwarded).split(",")[0].trim();
+    const ip = getClientIp(req);
     const ua = req.headers?.["user-agent"] || req.headers?.["User-Agent"] || "";
     const device = parseDevice(String(ua));
     const location = await getLocation(ip);

@@ -487,7 +487,7 @@ export function MessagesPage() {
         sendingFile && sendingFile.type.startsWith('image/')
           ? URL.createObjectURL(sendingFile)
           : undefined,
-      idempotencyKey: `msg-${selected.key}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      idempotencyKey: `msg-${selected.key}-${Date.now()}-${(() => { const b = new Uint8Array(4); crypto.getRandomValues(b); return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join(''); })()}`,
     };
     setPending((prev) => [...prev, temp]);
     // The draft is cleared only on success now: clearing it before the
