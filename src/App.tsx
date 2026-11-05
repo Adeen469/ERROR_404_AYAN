@@ -81,13 +81,32 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-  // Once per page load, re-check the stored session against the
-  // server (see authService.validateSession): without this, a session
-  // revoked elsewhere — "sign out everywhere", password reset — kept
-  // showing as signed in on this browser, because the app only ever
-  // read localStorage.
+  // Re-check the stored session against the server (see
+  // authService.validateSession): without this, a session revoked
+  // elsewhere — "sign out everywhere", password reset — kept showing
+  // as signed in on this browser, because the app only ever read
+  // localStorage. Page load alone is not enough: a tab left open
+  // while the sign-out happens on another device would stay stale
+  // until a manual refresh. So re-check whenever the tab becomes
+  // visible or the window regains focus (the moment the user
+  // switches back to this tab), plus a 60s backstop while the tab
+  // stays visible. Background tabs are skipped.
   useEffect(() => {
     void authService.validateSession();
+    const recheck = () => {
+      if (document.visibilityState === 'visible') void authService.validateSession();
+    };
+    const onVisibility = () => {
+      if (!document.hidden) recheck();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('focus', recheck);
+    const timer = window.setInterval(recheck, 60000);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', recheck);
+      window.clearInterval(timer);
+    };
   }, []);
 
   return (
