@@ -391,6 +391,29 @@ export function ProfilePage() {
                   />
                 </div>
                 {phoneVerified ? (
+                  <span className="text-xs font-semibold text-[#1E3F35] shrink-0">
+                    ✓ {currentUser?.phone} is verified
+                  </span>
+                ) : otpSent ? (
+                  <span className="text-xs font-semibold text-[#1E3F35] shrink-0">
+                    OTP sent — enter it below
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleSendOtp}
+                    disabled={otpSending || !currentUser?.phone || phone.trim() !== currentUser.phone}
+                    className="px-4 py-2.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-60 cursor-pointer shrink-0 w-full sm:w-auto"
+                  >
+                    {otpSending ? 'Sending…' : 'Verify via SMS OTP'}
+                  </button>
+                )}
+              </div>
+              <span className="text-[11px] text-[#8C887E]">
+                Shared with event organizers only, when you register for events that require attendee details.
+              </span>
+              <div className="mt-2 space-y-2">
+                {phoneVerified ? (
                   <p className="text-[11px] text-[#5F635D] leading-relaxed">
                     Verified via SMS OTP. Changing the number and saving will remove verification until the new number is confirmed.
                   </p>
