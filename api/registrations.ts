@@ -370,6 +370,9 @@ export function esc(s: string): string {
 // GET  /api/registrations?pendingCounts=1 -> { counts: { eventId: n } }
 //                                            for pending (unpaid
 //                                            Razorpay) registrations
+// GET  /api/registrations?action=team-members&eventId=x&teamCode=XXXXXX
+//      -> that team's members (name + email only), for teammates in
+//         My Hub. Membership is the gate: strangers get 404.
 // POST /api/registrations { ...registration }
 //      -> stores a registration (status 'pending' for a Razorpay row,
 //         'confirmed' for free). A paid row that is NOT a Razorpay row
@@ -726,6 +729,49 @@ export default async function handler(req: any, res: any): Promise<void> {
           }
         }
         sendJson(res, 200, { counts });
+        return;
+      }
+      if (q.get("action") === "team-members") {
+        // Team roster for teammates (My Hub): the leader and the
+        // members see each other's name + email so they know who is
+        // on their team. Membership is the gate — the caller must
+        // hold a non-cancelled registration for this event + code;
+        // anyone else gets 404 (not 403) so the endpoint cannot be
+        // used to probe whether a team code exists. Only name + email
+        // are ever returned: never phone numbers, payment fields, or
+        // ticket codes.
+        const teamEventId = (q.get("eventId") || "").trim();
+        const teamCode = (q.get("teamCode") || "").trim().toUpperCase();
+        if (!teamEventId || !/^[A-Z0-9]{6}$/.test(teamCode)) {
+          sendJson(res, 404, { message: "Team not found" });
+          return;
+        }
+        const teamEvent = await loadEvent(teamEventId);
+        const teamPart = teamEvent && teamEvent.participation && typeof teamEvent.participation === "object" ? teamEvent.participation : null;
+        if (!teamEvent || !teamPart || (teamPart.mode !== "team" && teamPart.mode !== "both")) {
+          sendJson(res, 404, { message: "Team not found" });
+          return;
+        }
+        const mine = all.find((r: any) => r.eventId === teamEventId && r.teamCode === teamCode && norm(r.userEmail) === me && r.status !== "cancelled");
+        if (!mine) {
+          sendJson(res, 404, { message: "Team not found" });
+          return;
+        }
+        const members = all
+          .filter((r: any) => r.eventId === teamEventId && r.teamCode === teamCode && r.status !== "cancelled")
+          .map((r: any) => ({
+            name: typeof r.userName === "string" ? r.userName : "",
+            email: norm(r.userEmail),
+            isTeamLeader: r.isTeamLeader === true,
+            registeredAt: r.registeredAt || r.createdAt || "",
+          }))
+          .sort((a: any, b: any) => {
+            if (a.isTeamLeader !== b.isTeamLeader) return a.isTeamLeader ? -1 : 1;
+            return (a.registeredAt || "").localeCompare(b.registeredAt || "");
+          });
+        const teamLeader = all.find((r: any) => r.eventId === teamEventId && r.teamCode === teamCode && r.isTeamLeader === true && r.status !== "cancelled");
+        const teamSize = Number(teamLeader?.teamSize) || Number((mine as any).teamSize) || members.length;
+        sendJson(res, 200, { eventId: teamEventId, teamCode, teamSize, members });
         return;
       }
       if (q.get("id")) {

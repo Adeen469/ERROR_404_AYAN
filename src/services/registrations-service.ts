@@ -141,6 +141,23 @@ function mergeRegistrations(
   return [...byId.values()].sort((a, b) => (b.registeredAt || '').localeCompare(a.registeredAt || ''));
 }
 
+// Team roster for My Hub: what teammates see about each other.
+// Name + email only — never phone numbers, payment fields, or
+// ticket codes (attendee details are "shared with organizer only").
+export interface TeamMember {
+  name: string;
+  email: string;
+  isTeamLeader: boolean;
+  registeredAt: string;
+}
+
+export interface TeamMembersResult {
+  eventId: string;
+  teamCode: string;
+  teamSize: number;
+  members: TeamMember[];
+}
+
 export const registrationsService = {
   async getMyRegistrations(): Promise<AttendeeRegistration[]> {
     const user = authService.getCurrentUser();
@@ -627,5 +644,37 @@ export const registrationsService = {
     } catch {
       return {};
     }
+  },
+
+  // Team members for My Hub (/dashboard "My Teams"). The server only
+  // answers when the caller holds a non-cancelled registration for
+  // that event + code; strangers get 404. In demo mode the roster is
+  // derived from this browser's local rows (in practice just the
+  // requester's own row).
+  async getTeamMembers(eventId: string, teamCode: string): Promise<TeamMembersResult> {
+    const code = (teamCode || '').trim().toUpperCase();
+    if (isDemoMode()) {
+      const local = getStoredRegistrations().filter(
+        (r) => r.eventId === eventId && r.teamCode === code && r.status !== 'cancelled',
+      );
+      const size =
+        local.find((r) => r.isTeamLeader)?.teamSize || local[0]?.teamSize || local.length;
+      return {
+        eventId,
+        teamCode: code,
+        teamSize: size,
+        members: local.map((r) => ({
+          name: r.userName || '',
+          email: (r.userEmail || '').toLowerCase(),
+          isTeamLeader: r.isTeamLeader === true,
+          registeredAt: r.registeredAt || '',
+        })),
+      };
+    }
+    return apiClient.get<TeamMembersResult>('/registrations', {
+      action: 'team-members',
+      eventId,
+      teamCode: code,
+    });
   },
 };
