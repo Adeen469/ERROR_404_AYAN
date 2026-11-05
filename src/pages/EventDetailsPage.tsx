@@ -473,7 +473,7 @@ export function EventDetailsPage() {
                 <div className="flex items-center justify-between">
                   <p className="text-xs font-semibold text-[#1E2320]">{event.venueName}</p>
                   <a
-                    href={getMapsSearchUrl(event.address, event.city)}
+                    href={event.mapUrl || getMapsSearchUrl(event.address, event.city)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1 text-[11px] font-medium text-[#1E3F35] hover:underline"

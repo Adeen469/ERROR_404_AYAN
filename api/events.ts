@@ -334,6 +334,73 @@ async function refundRazorpayPayment(paymentId: string): Promise<{ ok: boolean; 
   }
 }
 
+const SITE_URL = "https://locora-hyperlocal.vercel.app";
+
+// Recommendation emails (new event created): every user whose saved
+// profile interests include this event's category gets one mail
+// inviting them to it. Interests already live server-side in
+// locora_users (Profile saves sync via /api/auth?endpoint=me), so no
+// new table is needed. Best-effort and capped: at most 10 recipients
+// per event, sent in parallel with a 10s overall cap so a slow mail
+// server cannot stall event creation; the organizer is excluded, and
+// any failure is swallowed — the event is created regardless. A
+// retry/replay of the same create (same client id) returns the stored
+// event before this runs, so nobody is mailed twice for one event.
+async function sendEventRecommendationEmails(event: any, organizerEmail: string): Promise<void> {
+  try {
+    const user = getEnv("GMAIL_USER");
+    const pass = getEnv("GMAIL_APP_PASSWORD");
+    if (!user || !pass) return;
+    const cat = String(event?.category || "").trim().toLowerCase();
+    if (!cat) return;
+    const { ok, body } = await fetchJson(
+      `${supabaseBase()}/rest/v1/locora_users?select=data&limit=1000`,
+      { headers: supabaseHeaders() },
+    );
+    if (!ok || !Array.isArray(body)) return;
+    const orgEmail = String(organizerEmail || "").toLowerCase();
+    const recipients: string[] = [];
+    for (const row of body) {
+      const d = row?.data || {};
+      const email = typeof d.email === "string" ? d.email.trim().toLowerCase() : "";
+      if (!email || email === orgEmail) continue;
+      const interests = Array.isArray(d.profile?.interests)
+        ? d.profile.interests
+        : (Array.isArray(d.interests) ? d.interests : []);
+      if (interests.some((i: any) => typeof i === "string" && i.trim().toLowerCase() === cat)) {
+        recipients.push(email);
+      }
+      if (recipients.length >= 10) break;
+    }
+    if (recipients.length === 0) return;
+    const nodemailer = (await import("nodemailer")).default;
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user, pass: pass.replace(/\s+/g, "") },
+    });
+    const title = event?.title || "a new event";
+    const when = event?.startDate ? new Date(event.startDate).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "";
+    const where = [event?.venueName, event?.city].filter(Boolean).join(", ");
+    const price = typeof event?.price === "number" && event.price > 0 ? `₹${event.price}` : "Free";
+    const link = `${SITE_URL}/events/${event?.id}`;
+    const sends = recipients.map((to) =>
+      transporter.sendMail({
+        from: user,
+        to,
+        subject: `New event for you: ${title}`,
+        text: `A new event matching your interest in ${event.category} was just added on Locora: "${title}"${when ? ` on ${when}` : ""}${where ? ` at ${where}` : ""} (${price}). See it here: ${link}`,
+        html: `<div style="font-family:Georgia,serif;max-width:560px;margin:0 auto;background:#FAF8F5;padding:24px;"><div style="background:#fff;border:1px solid #E7E3DB;border-radius:16px;padding:24px;"><h2 style="color:#1E3F35;">New event for you: ${esc(title)}</h2><p style="color:#1E2320;">A new event matching your interest in <strong>${esc(String(event.category))}</strong> was just added on Locora.</p><p style="color:#5F635D;">${when ? `${esc(when)} · ` : ""}${esc(where)} · ${esc(price)}</p><p><a href="${link}" style="display:inline-block;background:#1E3F35;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none;">View event &amp; RSVP</a></p><p style="color:#5F635D;font-size:12px;">You get this because “${esc(String(event.category))}” is one of your saved interests on Locora. Update your interests any time on your Profile page.</p></div></div>`,
+      }).then(() => true).catch(() => false),
+    );
+    await Promise.race([
+      Promise.allSettled(sends),
+      new Promise((resolve) => setTimeout(resolve, 10000)),
+    ]);
+  } catch {
+    // Recommendation mail must never fail event creation.
+  }
+}
+
 // Best-effort cancellation email (event deleted). Email must never
 // fail the delete itself: every failure returns false and is swallowed.
 async function sendEventCancelledEmail(to: string, event: any, refunded: boolean): Promise<boolean> {
@@ -692,6 +759,16 @@ export default async function handler(req: any, res: any) {
       if (description.length > 5000) return sendJson(res, 400, { message: "Description must be 5000 characters or fewer" });
       const venueName = typeof p.venueName === "string" ? p.venueName : "Community Hall";
       if (venueName.length > 200) return sendJson(res, 400, { message: "Venue name must be 200 characters or fewer" });
+      // Optional exact map link: must be an http(s) URL when given.
+      const mapUrl = typeof p.mapUrl === "string" ? p.mapUrl.trim() : "";
+      if (mapUrl) {
+        let okUrl = false;
+        try {
+          const u = new URL(mapUrl);
+          okUrl = (u.protocol === "http:" || u.protocol === "https:") && mapUrl.length <= 500;
+        } catch { okUrl = false; }
+        if (!okUrl) return sendJson(res, 400, { message: "Map link must be a valid http(s) URL" });
+      }
       const price = p.price === undefined || p.price === null || p.price === "" ? 0 : Number(p.price);
       if (!Number.isFinite(price) || price < 0) return sendJson(res, 400, { message: "Price must be zero or more" });
       const capacity = p.capacity === undefined || p.capacity === null || p.capacity === "" ? 50 : Number(p.capacity);
@@ -722,6 +799,7 @@ export default async function handler(req: any, res: any) {
         coverImage: p.coverImage || "", startDate: startRaw,
         endDate: endRaw,
         venueName, address: typeof p.address === "string" ? p.address.slice(0, 300) : "100 Main Street",
+        mapUrl: mapUrl || undefined,
         neighborhood: p.state ? (p.city || "") : "", city: p.city || "Metro City",
         state: p.state || undefined, country: p.country || undefined,
         // Ownership is forced from the session, never from the body.
@@ -747,6 +825,9 @@ export default async function handler(req: any, res: any) {
         try { console.error("Events POST failed:", supa.status); } catch {}
         return sendJson(res, 502, { message: "Could not save shared event" });
       }
+      // Recommendation emails for matching saved interests
+      // (best-effort, capped — see sendEventRecommendationEmails).
+      await sendEventRecommendationEmails(event, session.email);
       return sendJson(res, 201, stripEventPublic(event));
     } catch (err: any) {
       try { console.error("Events POST failed:", err?.message || err); } catch {}
@@ -795,6 +876,19 @@ export default async function handler(req: any, res: any) {
       }
       if (updates.description !== undefined && typeof updates.description === "string" && updates.description.length > 5000) return sendJson(res, 400, { message: "Description must be 5000 characters or fewer" });
       if (updates.venueName !== undefined && typeof updates.venueName === "string" && updates.venueName.length > 200) return sendJson(res, 400, { message: "Venue name must be 200 characters or fewer" });
+      if (updates.mapUrl !== undefined) {
+        if (typeof updates.mapUrl !== "string") return sendJson(res, 400, { message: "Map link must be a valid http(s) URL" });
+        const m = updates.mapUrl.trim();
+        if (m) {
+          let okUrl = false;
+          try {
+            const u = new URL(m);
+            okUrl = (u.protocol === "http:" || u.protocol === "https:") && m.length <= 500;
+          } catch { okUrl = false; }
+          if (!okUrl) return sendJson(res, 400, { message: "Map link must be a valid http(s) URL" });
+          updates.mapUrl = m;
+        }
+      }
       if (updates.price !== undefined) {
         const pr = Number(updates.price);
         if (!Number.isFinite(pr) || pr < 0) return sendJson(res, 400, { message: "Price must be zero or more" });

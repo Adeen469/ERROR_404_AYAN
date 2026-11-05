@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Sparkles, Sliders, Check, MapPin, CheckCircle } from 'lucide-react';
 import { formatEventLocation } from '../utils/formatters';
-import { EventCategory, SmartMatchResult } from '../types';
+import { SmartMatchResult } from '../types';
 import { DEMO_CATEGORIES } from '../mocks/demo-data';
 import { smartMatchService } from '../services/smart-match-service';
 import { authService } from '../services/auth-service';
@@ -12,7 +12,7 @@ import { EventListSkeleton, EmptyState } from '../components/ui/LoadingSkeleton'
 export function SmartMatchPage() {
   const currentUser = authService.getCurrentUser();
 
-  const [selectedInterests, setSelectedInterests] = useState<EventCategory[]>(
+  const [selectedInterests, setSelectedInterests] = useState<string[]>(
     currentUser?.interests || ['Food & Community', 'Live Music & Culture']
   );
   // Home city, derived from the saved location under the location rule:
@@ -24,7 +24,7 @@ export function SmartMatchPage() {
   const [results, setResults] = useState<SmartMatchResult[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const toggleInterest = (category: EventCategory) => {
+  const toggleInterest = (category: string) => {
     setSelectedInterests((prev) =>
       prev.includes(category) ? prev.filter((c) => c !== category) : [...prev, category]
     );

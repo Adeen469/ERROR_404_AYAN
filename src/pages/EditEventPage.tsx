@@ -43,6 +43,8 @@ export function EditEventPage() {
   const [endDate, setEndDate] = useState('');
   const [venueName, setVenueName] = useState('');
   const [address, setAddress] = useState('');
+  // Optional exact map link (see CreateEventPage). Empty clears it.
+  const [mapUrl, setMapUrl] = useState('');
 
   const [price, setPrice] = useState('0');
   // Attendee details gate (see CreateEventPage): on unless the
@@ -77,6 +79,7 @@ export function EditEventPage() {
           setEndDate(data.endDate.slice(0, 16));
           setVenueName(data.venueName);
           setAddress(data.address);
+          setMapUrl(data.mapUrl || '');
           setPrice(String(data.price));
           setRequireAttendeeDetails(data.requireAttendeeDetails ?? true);
           setCapacity(String(data.capacity));
@@ -95,6 +98,18 @@ export function EditEventPage() {
     if (!description.trim()) errs.description = 'Description is required.';
     if (!venueName.trim()) errs.venueName = 'Venue name is required.';
     if (!address.trim()) errs.address = 'Street address is required.';
+    if (mapUrl.trim()) {
+      try {
+        const u = new URL(mapUrl.trim());
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+          errs.mapUrl = 'Map link must start with http:// or https://.';
+        } else if (mapUrl.trim().length > 500) {
+          errs.mapUrl = 'Map link is too long.';
+        }
+      } catch {
+        errs.mapUrl = 'Map link must be a valid link.';
+      }
+    }
 
     const start = new Date(startDate);
     const end = new Date(endDate);
@@ -150,6 +165,10 @@ export function EditEventPage() {
         endDate: new Date(endDate).toISOString(),
         venueName: venueName.trim(),
         address: address.trim(),
+        // Empty string clears a previously saved link (the server
+        // stores it as-is; the details page falls back to a Maps
+        // search whenever it is empty).
+        mapUrl: mapUrl.trim(),
         // Location rule: the neighborhood is the city when a state is
         // selected, otherwise none (state/city are carried from the
         // stored event, since the edit form has no location picker).
@@ -324,6 +343,29 @@ export function EditEventPage() {
                 className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35]"
               />
             </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+              Map Location Link
+            </label>
+            <input
+              type="url"
+              value={mapUrl}
+              onChange={(e) => setMapUrl(e.target.value)}
+              placeholder="Paste a Google Maps link, e.g. https://maps.app.goo.gl/…"
+              className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] ${
+                errors.mapUrl ? 'border-rose-500' : 'border-[#E2DFD8]'
+              }`}
+            />
+            <p className="text-[11px] text-[#5F635D] mt-1">
+              Optional — visitors tap “View in Maps” on your event to open
+              this exact location. Clear it to link a search for the street
+              address instead.
+            </p>
+            {errors.mapUrl && (
+              <p className="text-[11px] text-rose-600 mt-1">{errors.mapUrl}</p>
+            )}
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

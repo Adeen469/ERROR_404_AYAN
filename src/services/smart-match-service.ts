@@ -1,11 +1,11 @@
-import { EventCategory, EventItem, SmartMatchResult } from '../types';
+import { EventItem, SmartMatchResult } from '../types';
 import { eventsService } from './events-service';
 import { authService } from './auth-service';
 import { isDemoMode, apiClient } from './api-client';
 import { formatEventLocation, getEventNeighborhood } from '../utils/formatters';
 
 export interface SmartMatchOptions {
-  userInterests?: EventCategory[];
+  userInterests?: string[];
   // The user's home city (which, under the location rule, is their
   // neighborhood when a state is selected). No separate neighborhood
   // preference exists anymore.

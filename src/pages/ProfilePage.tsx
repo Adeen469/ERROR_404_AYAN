@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { User, Check, AlertCircle, Sparkles, LogOut } from 'lucide-react';
+import { User, Check, X, AlertCircle, Sparkles, LogOut } from 'lucide-react';
 import { authService } from '../services/auth-service';
-import { UserProfile, EventCategory } from '../types';
+import { UserProfile } from '../types';
 import { DEMO_CATEGORIES } from '../mocks/demo-data';
 import { LocationPicker } from '../components/LocationPicker';
+import { detectLocationByIp } from '../services/location-service';
 import { useToast } from '../components/ui/Toast';
 import { isDemoMode } from '../services/api-client';
 import {
@@ -31,9 +32,13 @@ export function ProfilePage() {
     state: currentUser?.state || '',
     city: currentUser?.city || '',
   });
-  const [interests, setInterests] = useState<EventCategory[]>(
+  // Interests are plain strings: the 7 presets plus any custom ones
+  // the user adds below. Saved interests also power the event
+  // recommendation emails (the server matches them against new events).
+  const [interests, setInterests] = useState<string[]>(
     currentUser?.interests || ['Food & Community', 'Live Music & Culture']
   );
+  const [customInterest, setCustomInterest] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   // Organizer access for this account, from the shared record. Admins and
@@ -52,6 +57,28 @@ export function ProfilePage() {
         // Error status: leave the role unknown rather than treating
         // the failure as "attendee" (see roles-service.ts).
       });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Same IP autofill as Create Event: fill country/state/city once,
+  // only when the saved home location is completely blank. City is
+  // optional — the lookup may return only country/state, and that is
+  // fine. A saved location is never overwritten; a failed lookup is
+  // silent and the manual picker stays.
+  const [locationAutoFilled, setLocationAutoFilled] = useState(false);
+  useEffect(() => {
+    if (homeLocation.country || homeLocation.state || homeLocation.city) return;
+    let cancelled = false;
+    void detectLocationByIp().then((loc) => {
+      if (cancelled || !loc) return;
+      setHomeLocation((prev) =>
+        prev.country || prev.state || prev.city ? prev : loc,
+      );
+      setLocationAutoFilled(true);
+    });
     return () => {
       cancelled = true;
     };
@@ -189,10 +216,35 @@ export function ProfilePage() {
     }
   };
 
-  const toggleInterest = (category: EventCategory) => {
+  const toggleInterest = (category: string) => {
     setInterests((prev) =>
       prev.includes(category) ? prev.filter((c) => c !== category) : [...prev, category]
     );
+  };
+
+  // Custom interests the user typed themselves (anything not one of
+  // the presets). They behave like presets everywhere else — SmartMatch
+  // and the recommendation emails match on the plain string.
+  const customInterests = interests.filter(
+    (i) => !(DEMO_CATEGORIES as string[]).includes(i),
+  );
+  const addCustomInterest = () => {
+    const value = customInterest.trim();
+    if (!value) return;
+    if (value.length > 40) {
+      setError('Custom interest must be 40 characters or fewer.');
+      return;
+    }
+    if (interests.some((i) => i.toLowerCase() === value.toLowerCase())) {
+      setError('That interest is already in your list.');
+      return;
+    }
+    setError('');
+    setInterests((prev) => [...prev, value]);
+    setCustomInterest('');
+  };
+  const removeCustomInterest = (category: string) => {
+    setInterests((prev) => prev.filter((c) => c !== category));
   };
 
   const handleSaveProfile = async (e: React.FormEvent) => {
@@ -425,6 +477,8 @@ export function ProfilePage() {
             Your home city powers the "Near me" filter on Discover and
             SmartMatch recommendations. When a state is selected, your city
             is also your neighborhood for matching.
+            {locationAutoFilled &&
+              ' Country and state were filled from your connection — change them if they are not right.'}
           </p>
         </div>
 
@@ -454,6 +508,58 @@ export function ProfilePage() {
               );
             })}
           </div>
+
+          {/* Custom interests the user typed themselves. They render
+              with an × to remove them; presets above toggle on tap. */}
+          {customInterests.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {customInterests.map((cat) => (
+                <span
+                  key={cat}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-[#1E3F35] text-white shadow-2xs"
+                >
+                  <span>{cat}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeCustomInterest(cat)}
+                    aria-label={`Remove ${cat}`}
+                    className="cursor-pointer hover:text-[#A3D9C9]"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={customInterest}
+              onChange={(e) => setCustomInterest(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  addCustomInterest();
+                }
+              }}
+              placeholder="Add your own interest — e.g. Photography, Cricket, Startups"
+              maxLength={40}
+              className="flex-1 text-xs bg-white border border-[#E2DFD8] rounded-lg p-2.5 text-[#1E2320] focus:border-[#1E3F35]"
+            />
+            <button
+              type="button"
+              onClick={addCustomInterest}
+              className="px-4 py-2.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer shrink-0"
+            >
+              Add
+            </button>
+          </div>
+          <p className="text-[11px] text-[#5F635D]">
+            Your interests power SmartMatch and the recommendation emails —
+            when an organizer posts an event in a category you follow, you
+            get an email inviting you to it.
+          </p>
         </div>
 
         {/* Save & Sign Out CTA */}

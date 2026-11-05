@@ -619,7 +619,28 @@ async function handleMe(req: any, res: any): Promise<void> {
       const digits = updates.phone.replace(/\D/g, "");
       if (updates.phone && (digits.length < 7 || digits.length > 15)) { sendJson(res, 400, { message: "Mobile number must be 7-15 digits" }); return; }
     }
-    if (updates.interests !== undefined && !Array.isArray(updates.interests)) delete updates.interests;
+    // Interests may include custom ones typed by the user on Profile:
+    // keep only real strings, trimmed, at most 40 chars each, at most
+    // 20 total, de-duplicated case-insensitively. These saved interests
+    // are what the event-recommendation emails match against.
+    if (updates.interests !== undefined) {
+      if (!Array.isArray(updates.interests)) {
+        delete updates.interests;
+      } else {
+        const seen = new Set<string>();
+        updates.interests = updates.interests
+          .filter((i: any) => typeof i === "string")
+          .map((i: string) => i.trim().slice(0, 40))
+          .filter((i: string) => {
+            if (!i) return false;
+            const k = i.toLowerCase();
+            if (seen.has(k)) return false;
+            seen.add(k);
+            return true;
+          })
+          .slice(0, 20);
+      }
+    }
     const row = await loadUserByEmail(me);
     if (!row) {
       // Google user (or a user created before locora_users existed):

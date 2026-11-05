@@ -41,6 +41,10 @@ export interface EventItem {
   endDate: string;   // ISO String
   venueName: string;
   address: string;
+  // Organizer-pasted map link (e.g. a Google Maps share link). When
+  // present, the details page "View in Maps" opens this exact location;
+  // when absent it falls back to a Maps search for the street address.
+  mapUrl?: string;
   // Legacy stored value, kept for old records. Never displayed or
   // filtered on: the neighborhood is derived — the city when a state is
   // selected, otherwise none (see getEventNeighborhood in formatters).
@@ -160,7 +164,11 @@ export interface UserProfile {
   country?: string;
   state?: string;
   city?: string;
-  interests: EventCategory[];
+  // Interest categories: the 7 presets plus any custom ones the user
+  // adds on Profile. Plain strings (not EventCategory) so a custom
+  // interest is a first-class value everywhere — SmartMatch, the saved
+  // profile, and the server-side recommendation match.
+  interests: string[];
   role: 'attendee' | 'organizer' | 'admin';
   // How this account's email was verified: 'google' for Google sign-in
   // (email verified by Google), 'local' for the local password fallback.
