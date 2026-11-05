@@ -15,6 +15,7 @@ const RegistrationsPage = lazy(() => import('./pages/RegistrationsPage').then((m
 const SavedEventsPage = lazy(() => import('./pages/SavedEventsPage').then((m) => ({ default: m.SavedEventsPage })));
 const ProfilePage = lazy(() => import('./pages/ProfilePage').then((m) => ({ default: m.ProfilePage })));
 const MessagesPage = lazy(() => import('./pages/MessagesPage').then((m) => ({ default: m.MessagesPage })));
+const CommunityPage = lazy(() => import('./pages/CommunityPage').then((m) => ({ default: m.CommunityPage })));
 const OrganizerDashboardPage = lazy(() => import('./pages/OrganizerDashboardPage').then((m) => ({ default: m.OrganizerDashboardPage })));
 const OrganizerEventsPage = lazy(() => import('./pages/OrganizerEventsPage').then((m) => ({ default: m.OrganizerEventsPage })));
 const CreateEventPage = lazy(() => import('./pages/CreateEventPage').then((m) => ({ default: m.CreateEventPage })));
@@ -158,6 +159,7 @@ export default function App() {
               <Route path="/events/:eventId" element={<RequireSignedIn><EventDetailsPage /></RequireSignedIn>} />
               <Route path="/organizers/:organizerId" element={<RequireSignedIn><OrganizerProfilePage /></RequireSignedIn>} />
               <Route path="/smart-match" element={<RequireSignedIn><SmartMatchPage /></RequireSignedIn>} />
+              <Route path="/community" element={<RequireSignedIn><CommunityPage /></RequireSignedIn>} />
 
               {/* Attendee Protected Areas */}
               <Route path="/dashboard" element={<RequireAuth><DashboardPage /></RequireAuth>} />

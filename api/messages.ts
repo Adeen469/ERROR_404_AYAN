@@ -563,6 +563,27 @@ function communityReplyTargetError(quoted: any, eventId: string): string | null 
   return null;
 }
 
+// ---- Global community chat (one site-wide room) ----
+// Same messages table, type:"community", eventId "global",
+// recipientEmail "community:global" (built by communityRecipient
+// below — same marker pattern as event rooms, never a real email).
+// Membership: ANY signed-in user — no event lookup, no
+// registration check. The session check at the top of the handler
+// is the only gate (guests get 401 before they reach any branch).
+// Moderation: admins and approved organizers (isApprovedOrganizer,
+// which returns true for admins) may delete ANY global message;
+// everyone else deletes only their own, within 24h.
+const GLOBAL_EVENT_ID = "global";
+function isGlobalMessage(m: any): boolean {
+  return isCommunityMessage(m) && String(m.eventId || "") === GLOBAL_EVENT_ID;
+}
+// Pure membership rule for the global room (see test_global_community.mts):
+// a valid session email is a member. Kept as a function (not inlined)
+// so the rule stays testable and stays in one place.
+function isGlobalMember(email: string): boolean {
+  return !!email && typeof email === "string" && email.trim() !== "";
+}
+
 // Registrations for one event, targeted jsonb lookup first (same
 // data->> pattern as loadMessagesFor), paginated full-read fallback.
 async function loadRegistrationsForEvent(eventId: string): Promise<any[]> {
@@ -948,6 +969,35 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 400, { message: "eventId is required" });
         return;
       }
+      // Global room: no event, no registrations — any signed-in
+      // user is a member (the session check above already ran).
+      // Returns ONLY global rows; event-community rows are excluded
+      // by loadCommunityMessages("global") + the eventId filter.
+      if (eventId === GLOBAL_EVENT_ID) {
+        let rows: any[];
+        try {
+          rows = await loadCommunityMessages(GLOBAL_EVENT_ID);
+        } catch {
+          sendJson(res, 503, { message: "Messages are not set up yet" });
+          return;
+        }
+        const visible = rows
+          .filter((m: any) => !((m.hiddenFor || []) as string[]).includes(me))
+          .map((m: any) => stripMessageForViewer(m, me));
+        visible.sort((a: any, b: any) =>
+          (a.createdAt || "").localeCompare(b.createdAt || "") ||
+          (a.id || "").localeCompare(b.id || ""),
+        );
+        sendJson(res, 200, {
+          messages: visible,
+          member: true,
+          canPost: true,
+          // Moderator flag for the client (delete-any buttons):
+          // admins + approved organizers moderate the global room.
+          isOrganizer: await isApprovedOrganizer(me),
+        });
+        return;
+      }
       const event = await loadEvent(eventId);
       if (!event) {
         sendJson(res, 404, { message: "Event not found" });
@@ -1066,8 +1116,14 @@ export default async function handler(req: any, res: any): Promise<void> {
       // Private messages stay sender-only, as before.
       let canModerateCommunity = false;
       if (isCommunityMessage(msg)) {
-        const event = await loadEvent(msg.eventId);
-        canModerateCommunity = !!event && mayManageEvent(event, userEmail);
+        if (isGlobalMessage(msg)) {
+          // Global room moderation: admins + approved organizers
+          // may delete ANY global message (no 24h window).
+          canModerateCommunity = await isApprovedOrganizer(userEmail);
+        } else {
+          const event = await loadEvent(msg.eventId);
+          canModerateCommunity = !!event && mayManageEvent(event, userEmail);
+        }
       }
       if (msg.senderEmail !== userEmail && !canModerateCommunity) {
         sendJson(res, 403, { message: "Only the sender can delete for everyone" });
@@ -1307,7 +1363,13 @@ export default async function handler(req: any, res: any): Promise<void> {
         });
         return;
       }
-      const event = await loadEvent(eventId);
+      // Global room has no stored event: the session user is a
+      // member by definition, so use a stand-in event row instead
+      // of 404ing on loadEvent("global").
+      const isGlobalUpload = isCommunityUpload && eventId === GLOBAL_EVENT_ID;
+      const event = isGlobalUpload
+        ? { id: GLOBAL_EVENT_ID, title: "Community" }
+        : await loadEvent(eventId);
       if (!event) {
         sendJson(res, 404, { message: "Event not found" });
         return;
@@ -1320,16 +1382,20 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       if (isCommunityUpload) {
-        let regs: any[];
-        try {
-          regs = await loadRegistrationsForEvent(eventId);
-        } catch {
-          sendJson(res, 503, { message: "Messages are not set up yet" });
-          return;
-        }
-        if (!isCommunityMember(event, sender, regs)) {
-          sendJson(res, 403, { message: "Register to join the community chat" });
-          return;
+        // Global room: any session user is a member — no
+        // registration check. Event rooms keep the check below.
+        if (!isGlobalUpload) {
+          let regs: any[];
+          try {
+            regs = await loadRegistrationsForEvent(eventId);
+          } catch {
+            sendJson(res, 503, { message: "Messages are not set up yet" });
+            return;
+          }
+          if (!isCommunityMember(event, sender, regs)) {
+            sendJson(res, 403, { message: "Register to join the community chat" });
+            return;
+          }
         }
       } else {
         const denied = authorizeContact(event, sender, recipient, existing);
@@ -1419,21 +1485,31 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 400, { message: "eventId is required" });
         return;
       }
-      const event = await loadEvent(eventId);
+      // Global room has no stored event: use a stand-in row
+      // (title is stored as the message's eventTitle). Any
+      // session user is a member — see the check below.
+      const isGlobalSend = eventId === GLOBAL_EVENT_ID;
+      const event = isGlobalSend
+        ? { id: GLOBAL_EVENT_ID, title: "Community" }
+        : await loadEvent(eventId);
       if (!event) {
         sendJson(res, 404, { message: "Event not found" });
         return;
       }
       let regs: any[];
-      try {
-        regs = await loadRegistrationsForEvent(eventId);
-      } catch {
-        sendJson(res, 503, { message: "Messages are not set up yet" });
-        return;
-      }
-      if (!isCommunityMember(event, sender, regs)) {
-        sendJson(res, 403, { message: "Register to join the community chat" });
-        return;
+      // Global room: no registrations to check — any session
+      // user is a member (isGlobalMember). Event rooms keep it.
+      if (!isGlobalSend) {
+        try {
+          regs = await loadRegistrationsForEvent(eventId);
+        } catch {
+          sendJson(res, 503, { message: "Messages are not set up yet" });
+          return;
+        }
+        if (!isCommunityMember(event, sender, regs)) {
+          sendJson(res, 403, { message: "Register to join the community chat" });
+          return;
+        }
       }
       if (!text && !attachment) {
         sendJson(res, 400, { message: "Write a message or attach a file" });
@@ -1762,7 +1838,11 @@ export default async function handler(req: any, res: any): Promise<void> {
         // cancelled after posting can no longer edit (or post) in
         // the group chat. Organizer/admin keep access via the
         // membership rule itself.
-        if (isCommunityMessage(msg)) {
+        // Global room: any session user who sent it may edit
+        // within 1h — the sender check above already ran, and
+        // there is no registration to lose. Event rooms keep the
+        // current-membership check below.
+        if (isCommunityMessage(msg) && msg.eventId !== GLOBAL_EVENT_ID) {
           const event = await loadEvent(msg.eventId);
           if (!event) {
             sendJson(res, 404, { message: "Event not found" });

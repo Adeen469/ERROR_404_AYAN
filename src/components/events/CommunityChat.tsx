@@ -1,18 +1,30 @@
-// Community chat — one group chat per event.
+// Community chat — one group chat per event, plus the site-wide
+// global room (mode="global", eventId "global").
 //
-// Who can see/post: signed-in users with a CONFIRMED registration
-// for this event, plus the event organizer and admins. Guests and
-// signed-in non-registered users see only a locked placeholder —
-// the server enforces this on every call (403 with member:false),
-// so the placeholder here is display only, never the access check.
+// Event mode — who can see/post: signed-in users with a CONFIRMED
+// registration for this event, plus the event organizer and admins.
+// Guests and signed-in non-registered users see only a locked
+// placeholder — the server enforces this on every call (403 with
+// member:false), so the placeholder here is display only, never
+// the access check.
+//
+// Global mode — who can see/post: ANY signed-in user. No event,
+// no registration check; the route guard + the session check on
+// the server are the gates. Moderation is admins + approved
+// organizers (server DELETE), shown via the isOrganizer flag.
+//
+// Privacy (both modes): only sender NAMES are shown, never emails
+// or phones. The server strips hiddenFor/idempotencyKey/editHistory
+// from returned rows (same stripMessageForViewer as private messages).
 //
 // Privacy: only sender NAMES are shown, never emails or phones.
 // The server strips hiddenFor/idempotencyKey/editHistory from
 // returned rows (same stripMessageForViewer as private messages).
 //
 // Delivery: 3s polling while open, 30s safety net when the
-// per-event Realtime ping channel is live. Pings are content-free
-// (id only, see realtime-service.ts) on channel `community:<eventId>`.
+// Realtime ping channel is live. Pings are content-free
+// (id only, see realtime-service.ts) on channel `community:<eventId>`
+// (event mode) or `community:global` (global mode).
 // No email alerts are ever sent for community messages.
 //
 // Replies reuse the private-message pattern: replyToId + a frozen
@@ -146,12 +158,20 @@ export function CommunityChat({
   eventTitle,
   isRegistered,
   isOwner,
+  mode = 'event',
 }: {
   eventId: string;
   eventTitle: string;
-  isRegistered: boolean;
-  isOwner: boolean;
+  // Event mode only: whether the viewer is a confirmed registrant /
+  // the event owner (drives the locked placeholder). Global mode
+  // ignores them — any signed-in user is a member.
+  isRegistered?: boolean;
+  isOwner?: boolean;
+  // "event": one group chat per event (membership-gated).
+  // "global": the site-wide room (any signed-in user).
+  mode?: 'event' | 'global';
 }) {
+  const isGlobal = mode === 'global';
   const [currentUser, setCurrentUser] = useState(() => authService.getCurrentUser());
   useEffect(() => authService.subscribe((u) => setCurrentUser(u)), []);
   const [status, setStatus] = useState<'loading' | 'locked' | 'member'>('loading');
@@ -183,7 +203,9 @@ export function CommunityChat({
         return;
       }
       try {
-        const data = await messagesService.getCommunityMessages(eventId);
+        const data = isGlobal
+          ? await messagesService.getGlobalCommunityMessages()
+          : await messagesService.getCommunityMessages(eventId);
         setMessages(data.messages);
         setIsOrganizer(data.isOrganizer);
         setStatus(data.member ? 'member' : 'locked');
@@ -198,7 +220,7 @@ export function CommunityChat({
         if (!silent) setLoadError(err?.message || 'Could not load the community chat.');
       }
     },
-    [currentUser?.email, eventId],
+    [currentUser?.email, eventId, isGlobal],
   );
 
   useEffect(() => {
@@ -314,12 +336,18 @@ export function CommunityChat({
       if (sendingFile) {
         const validationError = validateAttachment(sendingFile);
         if (validationError) throw new Error(validationError);
-        const { uploadUrl, path } = await messagesService.requestCommunityUploadUrl({
-          eventId,
-          fileName: sendingFile.name,
-          fileSize: sendingFile.size,
-          fileType: sendingFile.type,
-        });
+        const { uploadUrl, path } = isGlobal
+          ? await messagesService.requestGlobalCommunityUploadUrl({
+              fileName: sendingFile.name,
+              fileSize: sendingFile.size,
+              fileType: sendingFile.type,
+            })
+          : await messagesService.requestCommunityUploadUrl({
+              eventId,
+              fileName: sendingFile.name,
+              fileSize: sendingFile.size,
+              fileType: sendingFile.type,
+            });
         try {
           await messagesService.uploadFile(uploadUrl, sendingFile);
         } catch (err) {
@@ -329,13 +357,20 @@ export function CommunityChat({
       }
       let created: EventMessage;
       try {
-        created = await messagesService.sendCommunityMessage({
-          eventId,
-          text,
-          attachment: attachmentMeta,
-          idempotencyKey: `community-${eventId}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-          replyToId: replyingTo?.id,
-        });
+        created = isGlobal
+          ? await messagesService.sendGlobalCommunityMessage({
+              text,
+              attachment: attachmentMeta,
+              idempotencyKey: `community-global-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+              replyToId: replyingTo?.id,
+            })
+          : await messagesService.sendCommunityMessage({
+              eventId,
+              text,
+              attachment: attachmentMeta,
+              idempotencyKey: `community-${eventId}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+              replyToId: replyingTo?.id,
+            });
       } catch (err) {
         if (attachmentMeta) {
           try {
@@ -404,8 +439,9 @@ export function CommunityChat({
         <h2 className="font-editorial text-xl font-bold text-[#1E2320]">Community Chat</h2>
       </div>
       <p className="text-xs text-[#5F635D] -mt-2">
-        Chat with everyone attending {eventTitle}. Only confirmed attendees, the organizer and admins can
-        see or post here — no email alerts are sent for community messages.
+        {isGlobal
+          ? 'Chat with everyone on Locora. Any signed-in member can see and post here — no email alerts are sent for community messages.'
+          : `Chat with everyone attending ${eventTitle}. Only confirmed attendees, the organizer and admins can see or post here — no email alerts are sent for community messages.`}
       </p>
 
       {status === 'loading' && (
@@ -419,9 +455,11 @@ export function CommunityChat({
             Join this event to chat with attendees
           </p>
           <p className="text-xs text-[#5F635D] leading-relaxed">
-            {meEmail
-              ? 'Register to join the community chat — only confirmed attendees, the organizer and admins can read or post here.'
-              : 'Sign in and register for this event to join the community chat.'}
+            {isGlobal
+              ? 'Sign in to join the community chat — everyone on Locora can read and post here.'
+              : meEmail
+                ? 'Register to join the community chat — only confirmed attendees, the organizer and admins can read or post here.'
+                : 'Sign in and register for this event to join the community chat.'}
           </p>
           {!meEmail ? (
             <Link
@@ -430,7 +468,7 @@ export function CommunityChat({
             >
               Sign in
             </Link>
-          ) : !isRegistered && !isOwner ? (
+          ) : !isGlobal && !isRegistered && !isOwner ? (
             <p className="text-[11px] text-[#8C887E]">
               Use the Register button on this page to get your pass, then come back here to chat.
             </p>
@@ -639,8 +677,9 @@ export function CommunityChat({
             </div>
             {sendError && <p className="text-[11px] text-rose-600">{sendError}</p>}
             <p className="text-[11px] text-[#8C887E]">
-              Only confirmed attendees can see these messages. Be kind — the organizer can remove
-              messages.
+              {isGlobal
+                ? 'Everyone on Locora can see these messages. Be kind — admins and organizers can remove messages.'
+                : 'Only confirmed attendees can see these messages. Be kind — the organizer can remove messages.'}
             </p>
           </div>
         </>
@@ -654,7 +693,9 @@ export function CommunityChat({
         title="Delete message?"
         message={
           confirmDelete && confirmDelete.senderEmail.toLowerCase() !== meEmail
-            ? 'Delete this attendee’s message from the community chat? Everyone will see "This message was deleted".'
+            ? isGlobal
+              ? 'Delete this member’s message from the community chat? Everyone will see "This message was deleted".'
+              : 'Delete this attendee’s message from the community chat? Everyone will see "This message was deleted".'
             : 'Delete your message from the community chat? Everyone will see "This message was deleted".'
         }
         confirmLabel="Delete"

@@ -359,4 +359,34 @@ export const messagesService = {
   // membership). Delete (DELETE ?id=) is shared with private
   // messages: the server tombstones it, and the organizer/admin may
   // delete any community message.
+
+  // ---- Global community chat (one site-wide room) ----
+  // Same /api/messages community endpoints with eventId "global".
+  // Any signed-in user is a member; the server enforces the session.
+  // Moderation (delete-any) is admins + approved organizers.
+  async getGlobalCommunityMessages(): Promise<{
+    messages: EventMessage[];
+    member: boolean;
+    canPost: boolean;
+    isOrganizer: boolean;
+  }> {
+    return this.getCommunityMessages("global");
+  },
+
+  async sendGlobalCommunityMessage(input: {
+    text?: string;
+    attachment?: { name: string; size: number; type: string; path: string };
+    idempotencyKey?: string;
+    replyToId?: string;
+  }): Promise<EventMessage> {
+    return this.sendCommunityMessage({ ...input, eventId: "global" });
+  },
+
+  async requestGlobalCommunityUploadUrl(input: {
+    fileName: string;
+    fileSize: number;
+    fileType: string;
+  }): Promise<{ uploadUrl: string; publicUrl: string; path: string }> {
+    return this.requestCommunityUploadUrl({ ...input, eventId: "global" });
+  },
 };

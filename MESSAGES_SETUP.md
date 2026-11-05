@@ -129,6 +129,49 @@ one exception — see the hard gate above. Do not add them yet.)
   phones. Rows go through the same `stripMessageForViewer`
   whitelist as private messages.
 
+## Global community chat (one site-wide room)
+
+- The **Community** page at `/community` (Navbar link, signed-in
+  nav only — desktop and mobile drawer; never in the profile
+  dropdown; guests never see the link) is one chat room for every
+  signed-in Locora member. The route is guarded by
+  `RequireSignedIn` in `App.tsx` (guests redirect to `/landing`),
+  and the page is the shared `CommunityChat` component in
+  `mode="global"` (`eventId "global"`, no `isRegistered`/`isOwner`
+  props — they are event-only).
+- No new Supabase table and no new Vercel function: global rows
+  live in the same `messages` table with `type: "community"`,
+  `eventId: "global"` and `recipientEmail: "community:global"`
+  (same marker pattern as event rooms — not an email, never
+  mailed). The global room is served by the same
+  `?community=1&eventId=global` GET / `community: true` POST /
+  upload-url branches in `api/messages.ts`, with a global early
+  branch that skips the event lookup and registration check.
+- **Who can see/post:** ANY signed-in user (`isGlobalMember` —
+  a valid session email is a member). Guests get 401 from the
+  server before any branch runs. No event registration is needed.
+- **No cross-leak:** the private GET filters `type: "community"`
+  out; the event-community GET loads only that event's rows
+  (`loadCommunityMessages(eventId)`); the global GET loads only
+  `loadCommunityMessages("global")`. Replies are room-scoped too:
+  `communityReplyTargetError` refuses a quoted message whose
+  `eventId` is not the room's — an event-community or private
+  `replyToId` is refused in the global room (400), and vice versa.
+- **Moderation:** admins and approved organizers
+  (`isApprovedOrganizer`, which returns true for admins) may
+  delete ANY global message (no 24h window); everyone else
+  deletes only their own within 24h, and edits only their own
+  within 1h (no membership to lose in the global room).
+  `isOrganizer` in the global GET response is the moderator flag
+  (it drives the client's delete-any buttons).
+- **Realtime:** ping channel `community:global`, id-only pings,
+  same design as the event rooms. Polling is 3s while open, 30s
+  once SUBSCRIBED; without `VITE_SUPABASE_*` it stays
+  polling-only (same hard gate as above).
+- **Privacy / no email alerts:** same as event community — names
+  only, never emails or phones, and no email alerts for global
+  messages.
+
 ## Realtime (ping-only — fixes DB-H1)
 
 - `src/services/realtime-service.ts` broadcasts **only a content-free

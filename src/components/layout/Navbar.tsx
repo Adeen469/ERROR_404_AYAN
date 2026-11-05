@@ -264,6 +264,19 @@ export function Navbar() {
                 </Link>
               )}
 
+              {currentUser && (
+                <Link
+                  to="/community"
+                  className={`transition-colors whitespace-nowrap shrink-0 pb-1 ${
+                    isCurrent('/community')
+                      ? 'text-[#1E2320] border-b-2 border-[#1E3F35] font-semibold'
+                      : 'hover:text-[#1E2320]'
+                  }`}
+                >
+                  Community
+                </Link>
+              )}
+
               {canPost && (
                 <Link
                   to="/organizer/dashboard"
@@ -540,6 +553,12 @@ export function Navbar() {
                         {unreadCount > 99 ? '99+' : unreadCount}
                       </span>
                     )}
+                  </Link>
+                  <Link
+                    to="/community"
+                    className="block px-3 py-2.5 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    Community
                   </Link>
                   <Link
                     to="/saved"
