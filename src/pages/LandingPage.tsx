@@ -154,12 +154,6 @@ export function LandingPage() {
                   <span>Join Your Neighborhood Free</span>
                   <ArrowRight className="w-4 h-4" />
                 </Link>
-                <Link
-                  to="/discover"
-                  className="px-5 py-3.5 bg-white hover:bg-[#FAF8F5] text-[#1E2320] text-sm font-medium rounded-xl border border-[#E2DFD8] transition-colors text-center whitespace-nowrap"
-                >
-                  Explore Events as Guest
-                </Link>
               </div>
 
               {/* Micro Trust Proof */}
