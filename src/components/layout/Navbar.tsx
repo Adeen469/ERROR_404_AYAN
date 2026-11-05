@@ -6,11 +6,11 @@ import { messagesService } from '../../services/messages-service';
 import { UserProfile } from '../../types';
 import { isDemoMode } from '../../services/api-client';
 import {
-import Avatar from '../ui/Avatar';
   fetchAccess,
   isAdminEmail,
   AccessRole,
 } from '../../services/roles-service';
+import Avatar from '../ui/Avatar';
 
 export function Navbar() {
   const location = useLocation();
