@@ -302,6 +302,11 @@ check("covers: registration event snapshots are cover-migrated at read time",
   eventsServiceTs.includes("export function withMigratedCover") &&
   read("src/services/registrations-service.ts").includes("withMigratedCover(reg.event)") &&
   read("src/services/registrations-service.ts").includes("withMigratedSnapshot"));
+check("covers: saved-events and organizer-events API reads are cover-migrated",
+  read("src/services/saved-events-service.ts").includes("saved.map((e) => withMigratedCover(e))") &&
+  read("src/services/organizers-service.ts").includes("events.map((e) => withMigratedCover(e))"));
+check("covers: the pending-events overlay is cover-migrated after it is applied",
+  eventsServiceTs.includes("overlaidPage.data.map((e) => withMigratedCover(e))"));
 
 // --- Discover location: no automatic IP location (owner, 2026-11-06) ---
 // Discover must never auto-fill its location filter from the

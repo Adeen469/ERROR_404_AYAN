@@ -331,7 +331,13 @@ export const eventsService = {
         };
         // Pending ops overlay the default first page only, flagged, so a
         // not-yet-synced event never vanishes from its creator's view.
-        return applyPendingToPage(migratedPage, page, filters, getPendingOps(localStorage));
+        // The overlay inserts LOCAL copies (pending creates / update
+        // payloads) that never passed through the migration above —
+        // a copy saved by an older build can still carry a stale
+        // cover path — so the overlaid page is migrated once more
+        // (the pass is idempotent for already-migrated rows).
+        const overlaidPage = applyPendingToPage(migratedPage, page, filters, getPendingOps(localStorage));
+        return { ...overlaidPage, data: overlaidPage.data.map((e) => withMigratedCover(e)) };
       } catch (err) {
         lastListFromLocal = true;
         console.warn('Backend API /events unavailable, falling back to local events store:', err);

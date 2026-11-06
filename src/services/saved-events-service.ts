@@ -1,5 +1,5 @@
 import { EventItem } from '../types';
-import { eventsService } from './events-service';
+import { eventsService, withMigratedCover } from './events-service';
 import { isDemoMode, apiClient } from './api-client';
 
 const SAVED_STORAGE_KEY = 'locora_saved_events';
@@ -96,7 +96,11 @@ export const savedEventsService = {
   async getSavedEvents(): Promise<EventItem[]> {
     if (!isDemoMode()) {
       try {
-        return await apiClient.get<EventItem[]>('/me/saved-events');
+        // The endpoint returns stored event rows verbatim — run the
+        // covers through the same stale-path migration as every
+        // other read path, or saved cards broken-render the same way.
+        const saved = await apiClient.get<EventItem[]>('/me/saved-events');
+        return Array.isArray(saved) ? saved.map((e) => withMigratedCover(e)) : saved;
       } catch (err) {
         console.warn('Backend API saved-events unavailable, falling back to local saved events:', err);
       }

@@ -1,6 +1,6 @@
 import { EventItem, Organizer } from '../types';
 import { DEMO_ORGANIZERS } from '../mocks/demo-data';
-import { eventsService } from './events-service';
+import { eventsService, withMigratedCover } from './events-service';
 import { isDemoMode, apiClient } from './api-client';
 
 export interface OrganizerStats {
@@ -52,7 +52,10 @@ export const organizersService = {
   async getOrganizerEvents(organizerId: string): Promise<EventItem[]> {
     if (!isDemoMode()) {
       try {
-        return await apiClient.get<EventItem[]>(`/organizers/${organizerId}/events`);
+        // Stored rows come back verbatim — migrate the covers like
+        // every other read path (stale bundled-asset paths).
+        const events = await apiClient.get<EventItem[]>(`/organizers/${organizerId}/events`);
+        return Array.isArray(events) ? events.map((e) => withMigratedCover(e)) : events;
       } catch {
         // Same missing endpoint as above; fall through to the event list.
       }
