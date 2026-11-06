@@ -12,7 +12,7 @@ import { ImagePlus, Loader2, RefreshCw, X } from 'lucide-react';
  */
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
-const MAX_DIMENSION = 1920;
+const MAX_DIMENSION = 1024;
 
 function formatFileSize(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -114,10 +114,20 @@ async function compressToDataUrl(file: File): Promise<string> {
     (source as ImageBitmap).close();
   }
   const mime = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
-  const blob = await new Promise<Blob | null>((resolve) =>
-    canvas.toBlob(resolve, mime, 0.85),
+  let blob = await new Promise<Blob | null>((resolve) =>
+    canvas.toBlob(resolve, mime, 0.8),
   );
   if (!blob) throw new Error('encode');
+  // A photographic PNG at cover dimensions can still exceed 1MB, and
+  // the result is stored inline as a data URL in the event record —
+  // every list response then re-ships it. Covers don't need lossless
+  // encoding, so a large PNG is re-encoded as JPEG instead.
+  if (blob.type === 'image/png' && blob.size > 200 * 1024) {
+    const jpg = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, 'image/jpeg', 0.82),
+    );
+    if (jpg && jpg.size < blob.size) blob = jpg;
+  }
   return await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));

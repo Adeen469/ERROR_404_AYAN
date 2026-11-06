@@ -56,6 +56,7 @@ const orgAcc = readFileSync("api/organizer-access.ts", "utf8");
 const callback = readFileSync("api/auth/callback/google.ts", "utf8");
 const orgProfile = readFileSync("src/pages/OrganizerProfilePage.tsx", "utf8");
 const rateLimitLib = readFileSync("api/_lib/rate-limit.ts", "utf8");
+const uploadField = readFileSync("src/components/events/ImageUploadField.tsx", "utf8");
 const vercelignore = readFileSync(".vercelignore", "utf8");
 
 // --- 1: deployed function count (Vercel Hobby cap: 12) ---
@@ -82,6 +83,10 @@ for (const f of ["api/auth.ts", "api/events.ts", "api/messages.ts", "api/registr
 
 // --- 2: C1 route gone, single shared rate limiter ---
 check("C1: api/events/[id].ts file deleted", !existsSync("api/events/[id].ts"));
+check("PERF: slim list never ships an embedded data-URI cover over ~60KB (one measured 361KB in every list response)",
+  events.includes('cover.startsWith("data:") && cover.length > 60_000'));
+check("PERF: cover uploads are capped at 1024px so embedded covers stay small",
+  uploadField.includes("const MAX_DIMENSION = 1024;"));
 const allApiSrc = listApiFiles("api").map((f) => readFileSync(f, "utf8")).join("\n");
 check("H2: checkRateLimit defined in the canonical module + inlined into the 8 deployed handlers",
   (allApiSrc.match(/function checkRateLimit\(/g) || []).length === 9);

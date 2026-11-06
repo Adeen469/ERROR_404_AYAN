@@ -1036,9 +1036,17 @@ export default async function handler(req: any, res: any) {
       // The organizer object is reduced to id+name here, so slim can
       // never leak an organizer email to any viewer.
       const slim = firstQuery(req.query, "slim") === "1";
+      // An embedded (data-URI) cover is the whole image inline in the
+      // record: one organizer upload measured 361KB of base64, which
+      // made EVERY list response ~363KB even in slim mode. Slim cards
+      // never ship a data-URI cover over ~60KB (the card renders its
+      // category fallback); the full record — the detail view — keeps
+      // the cover untouched.
+      const slimCover = (cover: any) =>
+        typeof cover === "string" && cover.startsWith("data:") && cover.length > 60_000 ? "" : cover;
       const data = slim ? pageItems.map((e: any) => ({
         id: e.id, slug: e.slug, title: e.title, summary: e.summary,
-        coverImage: e.coverImage, category: e.category,
+        coverImage: slimCover(e.coverImage), category: e.category,
         startDate: e.startDate, endDate: e.endDate,
         city: e.city, state: e.state, country: e.country,
         neighborhood: e.neighborhood, venueName: e.venueName,
