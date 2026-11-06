@@ -1,11 +1,21 @@
 // Loco — the Locora assistant (chatbot).
 //
-// POST /api/chatbot { message: string, history?: { role, text }[] }
-//   -> { reply: string, provider: "gemini" | "groq" | "none" }
+// POST /api/chatbot { message: string, history?: { role, text }[], debug?: boolean }
+//   -> { reply: string, provider: "gemini" | "groq" | "none", debug?: {...} }
 //
-// Providers: Gemini FIRST (gemini-2.5-flash via generateContent), Groq
-// as fallback (llama-3.3-70b-versatile via the OpenAI-compatible chat
-// completions endpoint). If Gemini fails for ANY reason (non-2xx incl.
+// debug: when true, the response also carries a `debug` object with one
+// entry per provider — { keyPresent, status, error } — so a failing
+// setup can be diagnosed without guessing. It NEVER contains key
+// material: only the HTTP status and the provider's own short error
+// message, truncated and scrubbed of anything key-shaped.
+//
+// Providers: Gemini FIRST (gemini-3.8-flash via generateContent), Groq
+// as fallback (openai/gpt-oss-120b via the OpenAI-compatible chat
+// completions endpoint, then openai/gpt-oss-20b if the first model 404s
+// — Groq retired llama-3.3-70b-versatile from free/developer plans on
+// 2026-08-16, and Gemini retired gemini-2.5-flash for new users; both
+// old IDs 404, which is why the bot answered with the fallback even
+// with valid keys). If Gemini fails for ANY reason (non-2xx incl.
 // 403/429, timeout, empty reply), Groq is tried once. If both fail the
 // caller gets a friendly fallback message — never raw provider errors,
 // statuses, or key material.
@@ -266,9 +276,13 @@ async function fetchJson(url: string, init?: any): Promise<{ ok: boolean; status
 
 export interface ChatTurn { role: "user" | "assistant"; text: string; }
 
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-3.8-flash";
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-const GROQ_MODEL = "llama-3.3-70b-versatile";
+// Groq's current production chat models (free/developer plans). The
+// first is the direct replacement for the retired llama-3.3-70b;
+// the second is tried only if the first 404s (retired), never on
+// auth/rate-limit errors, which would fail identically for both.
+const GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"];
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 // Generous but bounded: the two legs together stay inside a normal
 // serverless invocation even if both are slow.
@@ -439,9 +453,9 @@ async function fetchWithTimeout(fetchImpl: any, url: string, init: any, ms: numb
   }
 }
 
-export async function callGemini(message: string, history: ChatTurn[], eventsContext: string, fetchImpl: any = fetch): Promise<string | null> {
+export async function callGemini(message: string, history: ChatTurn[], eventsContext: string, fetchImpl: any = fetch, diag?: any): Promise<string | null> {
   const key = getEnv("GEMINI_API_KEY");
-  if (!key) return null;
+  if (!key) { if (diag) diag.gemini = { keyPresent: false }; return null; }
   const prompt = buildAssistantPrompt(message, history, eventsContext);
   try {
     const res = await fetchWithTimeout(
@@ -457,51 +471,93 @@ export async function callGemini(message: string, history: ChatTurn[], eventsCon
       },
       GEMINI_TIMEOUT_MS,
     );
-    if (!res || !res.ok) return null;
+    if (!res) { if (diag) diag.gemini = { keyPresent: true, status: 0, error: "no response" }; return null; }
     const body = await res.json().catch(() => null);
-    return parseGeminiText(body);
+    if (!res.ok) { if (diag) diag.gemini = { keyPresent: true, status: res.status, error: sanitizeProviderError(body) }; return null; }
+    const text = parseGeminiText(body);
+    if (!text && diag) diag.gemini = { keyPresent: true, status: res.status, error: "empty reply" };
+    return text;
   } catch {
+    if (diag) diag.gemini = { keyPresent: true, status: 0, error: "network/timeout" };
     return null;
   }
 }
 
-export async function callGroq(message: string, history: ChatTurn[], eventsContext: string, fetchImpl: any = fetch): Promise<string | null> {
+export async function callGroq(message: string, history: ChatTurn[], eventsContext: string, fetchImpl: any = fetch, diag?: any): Promise<string | null> {
   const key = getEnv("GROQ_API_KEY");
-  if (!key) return null;
-  try {
-    const res = await fetchWithTimeout(
-      fetchImpl,
-      GROQ_URL,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-        body: JSON.stringify({
-          model: GROQ_MODEL,
-          messages: buildGroqMessages(message, history, eventsContext),
-          temperature: 0.7,
-          max_tokens: 600,
-        }),
-      },
-      GROQ_TIMEOUT_MS,
-    );
-    if (!res || !res.ok) return null;
+  if (!key) { if (diag) diag.groq = { keyPresent: false }; return null; }
+  let lastStatus = 0;
+  let lastError = "provider error";
+  for (const model of GROQ_MODELS) {
+    let res: any = null;
+    try {
+      res = await fetchWithTimeout(
+        fetchImpl,
+        GROQ_URL,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+          body: JSON.stringify({
+            model,
+            messages: buildGroqMessages(message, history, eventsContext),
+            temperature: 0.7,
+            max_tokens: 600,
+          }),
+        },
+        GROQ_TIMEOUT_MS,
+      );
+    } catch {
+      lastStatus = 0; lastError = "network/timeout";
+      break;
+    }
+    if (!res) { lastStatus = 0; lastError = "no response"; break; }
     const body = await res.json().catch(() => null);
-    return parseGroqText(body);
-  } catch {
-    return null;
+    if (!res.ok) {
+      lastStatus = res.status; lastError = sanitizeProviderError(body);
+      if (res.status === 404) continue; // retired model — try the next one
+      break;
+    }
+    const text = parseGroqText(body);
+    if (text) return text;
+    lastStatus = res.status; lastError = "empty reply";
+    break;
   }
+  if (diag) diag.groq = { keyPresent: true, status: lastStatus, error: lastError };
+  return null;
+}
+
+// Short, safe provider error text for the debug object: the HTTP
+// status plus the provider's own message, truncated and scrubbed of
+// anything key-shaped. Provider errors never contain keys, but the
+// scrub is a second layer so a debug response can never leak one.
+export function sanitizeProviderError(body: any): string {
+  let msg = "";
+  try {
+    const e = body?.error;
+    if (typeof e === "string") msg = e;
+    else if (e && typeof e.message === "string") msg = e.message;
+    else if (typeof body?.message === "string") msg = body.message;
+  } catch { msg = ""; }
+  msg = (msg || "provider error").slice(0, 200);
+  msg = msg.replace(/AIza[0-9A-Za-z\-_]{10,}/g, "[key]").replace(/gsk_[0-9A-Za-z]{10,}/g, "[key]");
+  return msg || "provider error";
 }
 
 export async function askAssistant(
   message: string,
   history: any,
   fetchImpl: any = fetch,
+  diag?: any,
 ): Promise<{ reply: string; provider: string }> {
   const refused = refusalFor(message);
   if (refused) return { reply: refused, provider: "none" };
   const geminiKey = getEnv("GEMINI_API_KEY");
   const groqKey = getEnv("GROQ_API_KEY");
   if (!geminiKey && !groqKey) return { reply: NOT_SETUP_REPLY, provider: "none" };
+  if (diag) {
+    if (!geminiKey) diag.gemini = { keyPresent: false };
+    if (!groqKey) diag.groq = { keyPresent: false };
+  }
   let eventsContext = "";
   if (needsEventsContext(message)) {
     try {
@@ -512,12 +568,12 @@ export async function askAssistant(
   }
   const cleanHistory = sanitizeHistory(history);
   if (geminiKey) {
-    const reply = await callGemini(message, cleanHistory, eventsContext, fetchImpl);
+    const reply = await callGemini(message, cleanHistory, eventsContext, fetchImpl, diag);
     if (reply) return { reply, provider: "gemini" };
     try { console.warn("Chatbot: Gemini failed, falling back to Groq"); } catch {}
   }
   if (groqKey) {
-    const reply = await callGroq(message, cleanHistory, eventsContext, fetchImpl);
+    const reply = await callGroq(message, cleanHistory, eventsContext, fetchImpl, diag);
     if (reply) return { reply, provider: "groq" };
   }
   return { reply: FALLBACK_REPLY, provider: "none" };
@@ -556,8 +612,10 @@ export default async function handler(req: any, res: any): Promise<void> {
       sendJson(res, 429, { message: "You're sending messages a bit fast — please wait a moment and try again." }, { "Retry-After": String(rl.retryAfter) });
       return;
     }
-    const result = await askAssistant(message, body?.history);
-    sendJson(res, 200, { reply: result.reply, provider: result.provider });
+    const debug = body?.debug === true;
+    const diag: any = debug ? {} : undefined;
+    const result = await askAssistant(message, body?.history, fetch, diag);
+    sendJson(res, 200, { reply: result.reply, provider: result.provider, ...(debug ? { debug: diag } : {}) });
   } catch (err) {
     try { console.error("Chatbot failed:", err instanceof Error ? err.message : err); } catch {}
     sendJson(res, 200, { reply: FALLBACK_REPLY, provider: "none" });
