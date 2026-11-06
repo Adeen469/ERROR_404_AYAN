@@ -346,6 +346,9 @@ check("smartmatch: no call to the never-built server endpoint remains",
 check("smartmatch: recommendations are scored from the events list locally",
   smartMatchTs.includes("eventsService.getEvents(") &&
   smartMatchTs.includes("let score = 30; // Baseline score"));
+check("smartmatch: only interest-matching events are listed as Top Matches",
+  smartMatchTs.includes("const interestMatched = categoryMatched || matchingTags.length > 0;") &&
+  smartMatchTs.includes("if (!interestMatched) return null;"));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

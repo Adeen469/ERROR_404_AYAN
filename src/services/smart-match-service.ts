@@ -35,12 +35,13 @@ export const smartMatchService = {
 
     const { data: events } = await eventsService.getEvents({}, 1, 50);
 
-    const scored: SmartMatchResult[] = events.map((event: EventItem) => {
+    const scored: (SmartMatchResult | null)[] = events.map((event: EventItem) => {
       let score = 30; // Baseline score
       const matchReasons: string[] = [];
 
       // Category / Interest Match (+35)
-      if (interests.includes(event.category)) {
+      const categoryMatched = interests.includes(event.category);
+      if (categoryMatched) {
         score += 35;
         matchReasons.push(`Matches your interest in ${event.category}`);
       }
@@ -84,6 +85,16 @@ export const smartMatchService = {
       // Cap at 98 for realistic presentation
       const finalScore = Math.min(98, score);
 
+      // Top Matches are recommendations, not the whole catalogue:
+      // an event only lists when it genuinely aligns with the
+      // selected interests — its category is selected, or one of
+      // its tags aligns. Everything used to list with baseline +
+      // location/free points (a Technology event scored 60% for a
+      // Workshops-only user), so changing interests moved the
+      // numbers but never the events. (Owner fix, 2026-11-06.)
+      const interestMatched = categoryMatched || matchingTags.length > 0;
+      if (!interestMatched) return null;
+
       return {
         event,
         score: finalScore,
@@ -92,6 +103,8 @@ export const smartMatchService = {
     });
 
     // Sort descending by deterministic score
-    return scored.sort((a, b) => b.score - a.score);
+    return scored
+      .filter((r): r is SmartMatchResult => r !== null)
+      .sort((a, b) => b.score - a.score);
   },
 };
