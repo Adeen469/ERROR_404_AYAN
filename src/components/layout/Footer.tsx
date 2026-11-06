@@ -2,9 +2,9 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { DEMO_CATEGORIES } from '../../mocks/demo-data';
 
-export function Footer() {
+export function Footer({ flush = false }: { flush?: boolean }) {
   return (
-    <footer className="border-t border-[#E5E1D8] bg-[#FAF8F5] mt-20">
+    <footer className={`border-t border-[#E5E1D8] bg-[#FAF8F5] ${flush ? "mt-0" : "mt-20"}`}>
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
         <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-12">
           {/* Brand & Purpose */}

@@ -101,6 +101,17 @@ function ChatWidgetSlot() {
   return <ChatWidget />;
 }
 
+// Messages is a full-height WhatsApp-style page: the chat already
+// fills the viewport, so the footer's usual 80px top margin would
+// leave an empty band between the chat and the footer. On /messages
+// the footer sits flush under the chat instead; every other page
+// keeps the margin.
+function FooterSlot() {
+  const { pathname } = useLocation();
+  if (pathname === '/messages' || pathname.startsWith('/messages/')) return <Footer flush />;
+  return <Footer />;
+}
+
 // Attendee pages used to have no route guard at all: a guest opening
 // /my-registrations or /messages got each page's own inconsistent
 // handling (one rendered an empty list). Now guests are sent to sign
@@ -236,7 +247,7 @@ export default function App() {
             </Suspense>
             </PageErrorBoundary>
           </main>
-          <Footer />
+          <FooterSlot />
           <Suspense fallback={null}>
             <ChatWidgetSlot />
           </Suspense>
