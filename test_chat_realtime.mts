@@ -353,8 +353,8 @@ check("client: scroll guard + new-messages pill in both chats",
 check("client: date separators + time-only stamps in both chats",
   page.includes("dayLabel(") && page.includes("fmtChatTime(") &&
   community.includes("dayLabel(") && community.includes("fmtChatTime("));
-check("client: community box is ~60vh, not max-h-96",
-  community.includes("max-h-[60vh]") && !community.includes("max-h-96"));
+check("client: community box is ~65vh, not max-h-96",
+  community.includes("max-h-[65vh]") && !community.includes("max-h-96"));
 check("client: loading skeletons in both chats",
   page.includes("animate-pulse") && community.includes("animate-pulse"));
 check("client: typing indicator shown in both chats",
