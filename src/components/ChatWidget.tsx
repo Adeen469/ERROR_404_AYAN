@@ -6,14 +6,20 @@ import {
   CHATBOT_SUGGESTIONS,
   MAX_CHATBOT_SENT_HISTORY,
 } from '../services/chatbot-service';
+import { authService } from '../services/auth-service';
 
 // Loco — the Locora assistant, floating on every page except the auth
 // pages and /messages (the App shell hides it there — Messages already
 // has Loco as a conversation). Lazy-loaded from App.tsx so it never
 // bloats first paint.
-// Chats stay on this device only (localStorage); nothing about the
-// signed-in user is ever sent — just the typed message + recent chat
-// history. The server answers via Gemini, with Groq as fallback.
+// Chats stay on this device only (localStorage), and the history is
+// PERSONAL: the storage key is scoped to the signed-in account, so
+// two users on the same browser — attendee, organizer or admin —
+// never see each other's chats (owner rule, 2026-11-06). The account
+// identity is used only as the local key; nothing about the user is
+// ever sent — just the typed message + recent chat history. The
+// server answers via Gemini, with Groq as fallback, and stores
+// nothing server-side.
 
 type ChatMsg = { role: 'user' | 'assistant'; text: string; ts: number };
 
@@ -21,9 +27,18 @@ const AUTH_PATHS = ['/login', '/signup', '/forgot-password', '/reset-password', 
 const STORAGE_KEY = 'locora_chat_history';
 const MAX_STORED = 20;
 
-function loadStored(): ChatMsg[] {
+function chatIdentityOf(user: { id?: string; email?: string } | null): string {
+  const raw = (user?.id || user?.email || '').trim().toLowerCase();
+  return raw ? encodeURIComponent(raw) : 'guest';
+}
+
+function storageKeyFor(identity: string): string {
+  return `${STORAGE_KEY}:${identity}`;
+}
+
+function loadStored(key: string): ChatMsg[] {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -38,22 +53,49 @@ function loadStored(): ChatMsg[] {
 export function ChatWidget() {
   const { pathname } = useLocation();
   const [open, setOpen] = useState(false);
-  const [messages, setMessages] = useState<ChatMsg[]>(() => loadStored());
+  const [user, setUser] = useState(() => authService.getCurrentUser());
+  const identity = chatIdentityOf(user);
+  const storageKey = storageKeyFor(identity);
+  const firstName = (user?.name || '').trim().split(' ')[0];
+  const [messages, setMessages] = useState<ChatMsg[]>(() => loadStored(storageKeyFor(chatIdentityOf(authService.getCurrentUser()))));
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const hydratedFor = useRef(storageKey);
 
   // Auth pages get no widget.
   const isAuthPage = AUTH_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`));
 
+  // Track the signed-in account; drop the old unscoped shared history
+  // key once — it belonged to no account in particular.
   useEffect(() => {
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(messages.slice(-MAX_STORED)));
+      window.localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // Storage unavailable — nothing to clean up.
+    }
+    return authService.subscribe(() => setUser(authService.getCurrentUser()));
+  }, []);
+
+  // When the account changes, swap in that account's own history.
+  // Declared before the persist effect so a switch never writes one
+  // account's messages under another account's key.
+  useEffect(() => {
+    if (hydratedFor.current === storageKey) return;
+    hydratedFor.current = storageKey;
+    setMessages(loadStored(storageKey));
+  }, [storageKey]);
+
+  // Persist — only ever under the current account's own key.
+  useEffect(() => {
+    if (hydratedFor.current !== storageKey) return;
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(messages.slice(-MAX_STORED)));
     } catch {
       // Storage full or unavailable — chat still works for the session.
     }
-  }, [messages]);
+  }, [messages, storageKey]);
 
   useEffect(() => {
     const el = listRef.current;
@@ -124,7 +166,7 @@ export function ChatWidget() {
           <div ref={listRef} className="flex-1 space-y-2 overflow-y-auto bg-[#FAF8F5] p-3">
             {messages.length === 0 && (
               <div className="rounded-2xl border border-[#E7E3DB] bg-white p-5">
-                <p className="font-editorial text-base text-[#1E2320]">Hi, I&apos;m Loco</p>
+                <p className="font-editorial text-base text-[#1E2320]">Hi{firstName ? ` ${firstName}` : ''}, I&apos;m Loco</p>
                 <p className="mt-1 text-sm leading-relaxed text-[#5F635D]">
                   Ask me anything about Locora — finding events, creating one, teams, refunds, or your bookings.
                 </p>

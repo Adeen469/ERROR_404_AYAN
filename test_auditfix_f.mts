@@ -307,6 +307,11 @@ check("covers: saved-events and organizer-events API reads are cover-migrated",
   read("src/services/organizers-service.ts").includes("events.map((e) => withMigratedCover(e))"));
 check("covers: the pending-events overlay is cover-migrated after it is applied",
   eventsServiceTs.includes("overlaidPage.data.map((e) => withMigratedCover(e))"));
+check("loco: assistant history is scoped per signed-in account in both surfaces",
+  read("src/components/ChatWidget.tsx").includes("`${STORAGE_KEY}:${identity}`") &&
+  read("src/components/ChatWidget.tsx").includes("loadStored(storageKey)") &&
+  read("src/pages/MessagesPage.tsx").includes("aiHistoryKeyFor(currentUser)") &&
+  read("src/pages/MessagesPage.tsx").includes("loadAiHistory(aiStorageKey)"));
 check("registrations: a registration whose event has ended lands in Cancelled & Past, not Upcoming",
   read("src/pages/RegistrationsPage.tsx").includes("const eventHasEnded") &&
   read("src/pages/RegistrationsPage.tsx").includes("ev.endDate || ev.startDate") &&

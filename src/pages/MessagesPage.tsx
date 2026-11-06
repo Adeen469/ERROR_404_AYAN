@@ -86,9 +86,18 @@ const AI_MAX_STORED = 50;
 
 type AiChatMsg = { role: 'user' | 'assistant'; text: string; ts: number };
 
-function loadAiHistory(): AiChatMsg[] {
+// The Loco thread is personal: its history key is scoped to the
+// signed-in account (owner rule, 2026-11-06), exactly like the
+// floating ChatWidget — two users on one browser, whatever their
+// role, never see each other's Loco chat.
+function aiHistoryKeyFor(user: { id?: string; email?: string } | null): string {
+  const raw = (user?.id || user?.email || '').trim().toLowerCase();
+  return `${AI_HISTORY_KEY}:${raw ? encodeURIComponent(raw) : 'guest'}`;
+}
+
+function loadAiHistory(key: string): AiChatMsg[] {
   try {
-    const raw = window.localStorage.getItem(AI_HISTORY_KEY);
+    const raw = window.localStorage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -290,9 +299,12 @@ export function MessagesPage() {
   // Conversation-list prefs (pin / delete / clear): local only,
   // localStorage-backed — the server never sees them.
   const [prefs, setPrefs] = useState<ThreadPrefs>(() => loadPrefs());
-  // Loco AI chat (inside Messages): history lives on this device.
-  const [aiMessages, setAiMessages] = useState<AiChatMsg[]>(() => loadAiHistory());
+  // Loco AI chat (inside Messages): history lives on this device,
+  // scoped to the signed-in account's own storage key.
+  const [aiMessages, setAiMessages] = useState<AiChatMsg[]>(() => loadAiHistory(aiHistoryKeyFor(authService.getCurrentUser())));
   const [aiSending, setAiSending] = useState(false);
+  const aiStorageKey = aiHistoryKeyFor(currentUser);
+  const aiHydratedFor = useRef(aiStorageKey);
   // Right-click / long-press menu on a conversation row.
   const [threadMenu, setThreadMenu] = useState<{ x: number; y: number; key: string } | null>(null);
   // These four effects used to sit at the top of the component,
@@ -305,14 +317,33 @@ export function MessagesPage() {
   useEffect(() => {
     savePrefs(prefs);
   }, [prefs]);
-  // AI chat history persists on this device only.
+  // Drop the old unscoped shared Loco history key once — it belonged
+  // to no account in particular.
   useEffect(() => {
     try {
-      window.localStorage.setItem(AI_HISTORY_KEY, JSON.stringify(aiMessages.slice(-AI_MAX_STORED)));
+      window.localStorage.removeItem(AI_HISTORY_KEY);
+    } catch {
+      // Storage unavailable — nothing to clean up.
+    }
+  }, []);
+  // When the account changes, swap in that account's own Loco
+  // history. Declared before the persist effect so a switch never
+  // writes one account's messages under another account's key.
+  useEffect(() => {
+    if (aiHydratedFor.current === aiStorageKey) return;
+    aiHydratedFor.current = aiStorageKey;
+    setAiMessages(loadAiHistory(aiStorageKey));
+  }, [aiStorageKey]);
+  // AI chat history persists on this device only — under the current
+  // account's own key.
+  useEffect(() => {
+    if (aiHydratedFor.current !== aiStorageKey) return;
+    try {
+      window.localStorage.setItem(aiStorageKey, JSON.stringify(aiMessages.slice(-AI_MAX_STORED)));
     } catch {
       // Storage full or unavailable — the chat still works for the session.
     }
-  }, [aiMessages]);
+  }, [aiMessages, aiStorageKey]);
   // (AI auto-scroll lives with the other scroll effects below —
   // it scrolls the window, so it must sit under the state it reads.)
   // Escape closes the conversation menu.
