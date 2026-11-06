@@ -335,5 +335,17 @@ check("google avatar: existing rows are healed when the stored avatar differs",
 check("google avatar: /me serves the stored row avatar",
   read("api/auth.ts").includes("avatar: profile.avatar || d.avatar"));
 
+// --- SmartMatch live mode (owner fix, 2026-11-06) ---
+// Live mode called a /smart-match/recommendations endpoint that was
+// never built (404), so the page always showed Top Matches (0). The
+// deterministic scorer now runs client-side in both modes.
+const smartMatchTs = read("src/services/smart-match-service.ts");
+check("smartmatch: no call to the never-built server endpoint remains",
+  !smartMatchTs.includes("apiClient.get") &&
+  !smartMatchTs.includes("smart-match/recommendations',"));
+check("smartmatch: recommendations are scored from the events list locally",
+  smartMatchTs.includes("eventsService.getEvents(") &&
+  smartMatchTs.includes("let score = 30; // Baseline score"));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

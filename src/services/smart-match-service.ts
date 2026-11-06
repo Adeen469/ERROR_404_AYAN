@@ -1,7 +1,7 @@
 import { EventItem, SmartMatchResult } from '../types';
 import { eventsService } from './events-service';
 import { authService } from './auth-service';
-import { isDemoMode, apiClient } from './api-client';
+import { isDemoMode } from './api-client';
 import { formatEventLocation, getEventNeighborhood } from '../utils/formatters';
 
 export interface SmartMatchOptions {
@@ -15,15 +15,16 @@ export interface SmartMatchOptions {
 
 export const smartMatchService = {
   async getRecommendations(options?: SmartMatchOptions): Promise<SmartMatchResult[]> {
-    if (!isDemoMode()) {
-      return apiClient.get<SmartMatchResult[]>('/smart-match/recommendations', {
-        interests: options?.userInterests?.join(','),
-        city: options?.preferredCity,
-        freeOnly: options?.preferFreeOnly,
-      });
+    // Recommendations are scored HERE, in both live and demo mode.
+    // Live mode used to call GET /smart-match/recommendations — an
+    // endpoint that was never built on the server (it answers 404),
+    // so the page silently showed "Top Matches (0)" for every user
+    // even when events matched. The scorer is deterministic and the
+    // events already come from the API, so there is nothing for a
+    // server round-trip to add. (Owner fix, 2026-11-06.)
+    if (isDemoMode()) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
     }
-
-    await new Promise((resolve) => setTimeout(resolve, 200));
 
     const user = authService.getCurrentUser();
     const interests = options?.userInterests || user?.interests || ['Food & Community', 'Live Music & Culture'];
