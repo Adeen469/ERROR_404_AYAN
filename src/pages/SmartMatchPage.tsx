@@ -20,6 +20,11 @@ export function SmartMatchPage() {
   // It comes from Profile's Location Settings, not a separate control here.
   const homeCity = currentUser?.state ? (currentUser?.city || '') : '';
   const [preferFreeOnly, setPreferFreeOnly] = useState(false);
+  // Home City on/off (owner request, 2026-11-06): OFF (the default)
+  // the home city plays no part at all — matches come from
+  // everywhere; ON, Top Matches shows ONLY events in the home city.
+  // Session-only, like the free-admission toggle below.
+  const [homeCityEnabled, setHomeCityEnabled] = useState(false);
 
   const [results, setResults] = useState<SmartMatchResult[]>([]);
   const [loading, setLoading] = useState(true);
@@ -37,7 +42,8 @@ export function SmartMatchPage() {
       try {
         const matches = await smartMatchService.getRecommendations({
           userInterests: selectedInterests,
-          preferredCity: homeCity,
+          preferredCity: homeCityEnabled ? homeCity : '',
+          homeCityOnly: homeCityEnabled,
           preferFreeOnly,
         });
         if (active) {
@@ -53,7 +59,7 @@ export function SmartMatchPage() {
     return () => {
       active = false;
     };
-  }, [selectedInterests, homeCity, preferFreeOnly]);
+  }, [selectedInterests, homeCity, preferFreeOnly, homeCityEnabled]);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-10">
@@ -112,12 +118,35 @@ export function SmartMatchPage() {
         {/* Home city & Free admission toggle */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
           <div>
-            <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
-              Home City
-            </label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-semibold text-[#1E2320]">
+                Home City
+              </label>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={homeCityEnabled}
+                aria-label="Home city filter on or off"
+                disabled={!homeCity}
+                onClick={() => setHomeCityEnabled((v) => !v)}
+                className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                  homeCity ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'
+                } ${homeCityEnabled ? 'bg-[#1E3F35]' : 'bg-[#E2DFD8]'}`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                    homeCityEnabled ? 'translate-x-4' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+            </div>
             <p className="text-xs text-[#5F635D] bg-white border border-[#E2DFD8] rounded-lg p-2.5">
               {homeCity ? (
-                <>{homeCity} — events here rank higher</>
+                homeCityEnabled ? (
+                  <>{homeCity} — only events in this city are shown</>
+                ) : (
+                  <>{homeCity} — off: events from everywhere are shown</>
+                )
               ) : (
                 <>
                   Not set —{' '}

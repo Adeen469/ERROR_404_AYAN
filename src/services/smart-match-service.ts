@@ -8,8 +8,12 @@ export interface SmartMatchOptions {
   userInterests?: string[];
   // The user's home city (which, under the location rule, is their
   // neighborhood when a state is selected). No separate neighborhood
-  // preference exists anymore.
+  // preference exists anymore. An explicitly passed '' means "home
+  // city OFF — ignore it entirely"; only an absent option falls
+  // back to the saved profile city.
   preferredCity?: string;
+  // Home City switch ON: list ONLY events in the home city.
+  homeCityOnly?: boolean;
   preferFreeOnly?: boolean;
 }
 
@@ -30,7 +34,9 @@ export const smartMatchService = {
     const interests = options?.userInterests || user?.interests || ['Food & Community', 'Live Music & Culture'];
     // Home city from the saved location: the city is the neighborhood
     // only when a state is selected, otherwise there is no target city.
-    const homeCity = options?.preferredCity || (user?.state ? (user?.city || '') : '');
+    // An explicitly passed preferredCity always wins — including '',
+    // which is how the page says the Home City switch is OFF.
+    const homeCity = options?.preferredCity !== undefined ? options.preferredCity : (user?.state ? (user?.city || '') : '');
     const preferFree = options?.preferFreeOnly ?? false;
 
     const { data: events } = await eventsService.getEvents({}, 1, 50);
@@ -94,6 +100,13 @@ export const smartMatchService = {
       // numbers but never the events. (Owner fix, 2026-11-06.)
       const interestMatched = categoryMatched || matchingTags.length > 0;
       if (!interestMatched) return null;
+
+      // Home City switched ON: only events in the home city list —
+      // an event anywhere else is not a match for this user right
+      // now, whatever its score. OFF passes preferredCity '' above,
+      // so no city scoring or filtering happens at all: the two
+      // modes are exact opposites, as the owner asked.
+      if (options?.homeCityOnly && homeCity && eventNeighborhood !== homeCity) return null;
 
       return {
         event,

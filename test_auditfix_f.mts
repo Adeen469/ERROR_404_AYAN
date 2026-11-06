@@ -349,6 +349,12 @@ check("smartmatch: recommendations are scored from the events list locally",
 check("smartmatch: only interest-matching events are listed as Top Matches",
   smartMatchTs.includes("const interestMatched = categoryMatched || matchingTags.length > 0;") &&
   smartMatchTs.includes("if (!interestMatched) return null;"));
+check("smartmatch: Home City switch — ON lists only home-city events, OFF ignores the city",
+  smartMatchTs.includes("homeCityOnly?: boolean") &&
+  smartMatchTs.includes("if (options?.homeCityOnly && homeCity && eventNeighborhood !== homeCity) return null;") &&
+  smartMatchTs.includes("options?.preferredCity !== undefined ? options.preferredCity") &&
+  read("src/pages/SmartMatchPage.tsx").includes("homeCityEnabled") &&
+  read("src/pages/SmartMatchPage.tsx").includes('role="switch"'));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
