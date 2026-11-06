@@ -2514,6 +2514,14 @@ export default async function handler(req: any, res: any): Promise<void> {
         msg.replyToId = replyToId;
         msg.replySnapshot = replySnapshot;
       }
+      // Fan-out prep is independent of the store: start the member
+      // session-version read now so it overlaps the write instead of
+      // adding a full round trip between the store and the broadcast
+      // (the receiver cannot be delivered to before the broadcast,
+      // so every serial step in between is user-visible delay).
+      const fanoutMembers = isGlobalSend ? [] : communityMemberEmails(event, regs);
+      const fanoutVersionsPromise =
+        !isGlobalSend && fanoutMembers.length <= 200 ? loadSessionVersions(fanoutMembers) : null;
       try {
         await storeMessage(msg);
       } catch {
@@ -2534,7 +2542,7 @@ export default async function handler(req: any, res: any): Promise<void> {
             payload: { id: msg.id },
           }]);
         } else {
-          const members = communityMemberEmails(event, regs);
+          const members = fanoutMembers;
           if (members.length > 200) {
             await broadcastRealtimeSoon([{
               topic: `community:${eventId}`,
@@ -2542,7 +2550,7 @@ export default async function handler(req: any, res: any): Promise<void> {
               payload: { id: msg.id },
             }]);
           } else {
-            const sendVersions = await loadSessionVersions(members);
+            const sendVersions = fanoutVersionsPromise ? await fanoutVersionsPromise : new Map<string, number>();
             const entries: { topic: string; event: string; payload: any }[] = [];
             for (const email of members) {
               const channel = await privateChannelName(email, sendVersions.get(norm(email)) ?? 0);
@@ -2753,6 +2761,12 @@ export default async function handler(req: any, res: any): Promise<void> {
         msg.replyToId = replyToId;
         msg.replySnapshot = replySnapshot;
       }
+      // The recipient's channel-version read is independent of the
+      // store — start it now so it overlaps the write instead of
+      // adding a full round trip between the store and the broadcast
+      // (every serial step before the broadcast is delivery delay
+      // the receiver can feel).
+      const recipientVersionPromise = loadSessionVersion(String(recipient || ""));
       try {
         await storeMessage(msg);
       } catch {
@@ -2767,7 +2781,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         const entries: { topic: string; event: string; payload: any }[] = [];
         // The sender is me: my version is in the verified session.
         // The recipient's stored version is loaded (one read).
-        const recipientVersion = await loadSessionVersion(String(recipient || ""));
+        const recipientVersion = await recipientVersionPromise;
         for (const email of [recipient, sender]) {
           const v = norm(String(email || "")) === norm(sender || "") ? (session.sessionVersion ?? 0) : recipientVersion;
           const channel = await privateChannelName(String(email || ""), v);

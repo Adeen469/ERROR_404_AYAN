@@ -450,5 +450,29 @@ check("reconcile: failed bubble going away clears the composer error line",
   page.includes("if (!next.some((p) => p.failed)) setSendError('')") &&
   community.includes("if (!next.some((p) => p.failed)) setSendError('')"));
 
+// --- Send-path latency: the channel-version read must overlap the
+// store, not sit serially between the store and the broadcast (the
+// receiver cannot be delivered to before the broadcast fires, so a
+// serial read there is delivery delay on every send) ---
+const commSlice = messages.slice(
+  messages.indexOf("POST: send a COMMUNITY message"),
+  messages.indexOf("POST: send a message ----"),
+);
+const dmSlice = messages.slice(
+  messages.indexOf("POST: send a message ----"),
+  messages.indexOf("---- PATCH:"),
+);
+check("speed: community send starts the fan-out version read before storing the row",
+  commSlice.includes("loadSessionVersions(fanoutMembers)") &&
+  commSlice.indexOf("loadSessionVersions(fanoutMembers)") < commSlice.indexOf("await storeMessage(msg)"));
+check("speed: community fan-out awaits the overlapped read (no second fetch after the store)",
+  commSlice.includes("await fanoutVersionsPromise") && !commSlice.includes("await loadSessionVersions("));
+check("speed: DM send starts the recipient version read before storing the row",
+  dmSlice.includes("const recipientVersionPromise = loadSessionVersion(") &&
+  dmSlice.indexOf("const recipientVersionPromise = loadSessionVersion(") < dmSlice.indexOf("await storeMessage(msg)"));
+check("speed: DM send awaits the overlapped read (no second fetch after the store)",
+  dmSlice.includes("const recipientVersion = await recipientVersionPromise;") &&
+  !dmSlice.includes("await loadSessionVersion("));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
