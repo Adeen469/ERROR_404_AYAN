@@ -441,6 +441,14 @@ function stripMessageForViewer(m: any, viewerEmail: string): any {
   delete out.hiddenFor;
   delete out.idempotencyKey;
   if (m.senderEmail !== viewerEmail) delete out.editHistory;
+  // readBy is a list of member EMAILS — it must never reach a
+  // viewer (names only, everywhere). Collapse it to a count plus
+  // whether THIS viewer has seen it; the row itself keeps the list.
+  if (Array.isArray(m.readBy)) {
+    out.seenCount = m.readBy.length;
+    out.seenByMe = m.readBy.some((e: any) => norm(e) === norm(viewerEmail));
+    delete out.readBy;
+  }
   // replySnapshot is rebuilt from a whitelist, never passed through
   // verbatim: a stored row must not be able to smuggle extra fields
   // (e.g. a forged snapshot carrying hidden data) to the viewer.
@@ -456,6 +464,180 @@ function stripMessageForViewer(m: any, viewerEmail: string): any {
     };
   }
   return out;
+}
+
+// ---- Instant delivery: full-payload private channels (2026-11-06) ----
+// Supersedes the ping-only design for private + event-community
+// chats (ping-only remains for the GLOBAL room, §below). Why not
+// broadcast full messages on the old channels? `inbox:<email>` is
+// guessable from an email alone and `community:<eventId>` is public,
+// so anyone could subscribe and read live message text + attachment
+// URLs — audit finding DB-H1. The ping-only design fixed that leak
+// by sending id-only pings, but a ping still forces a ~2s refetch,
+// so delivery was never instant.
+//
+// NEW design: one private channel PER USER, named by an HMAC the
+// client cannot compute:
+//
+//   privateChannelName(email) = "inbox:" + hex(HMAC-SHA256(
+//       SESSION_SECRET, "locora-inbox:" + lowercase(email)))
+//
+// Deterministic per user, unguessable without SESSION_SECRET (which
+// never leaves the server). NO new table, NO new storage: the server
+// derives the name on demand, and the client learns ONLY ITS OWN
+// channel name from GET ?action=channel (session-authenticated).
+// A client never learns another user's channel name, so it cannot
+// subscribe to anyone else's live messages.
+//
+// Delivery: the server broadcasts the FULL message payload over
+// Supabase Realtime's REST endpoint (POST /realtime/v1/api/broadcast
+// with the service-role key — server-to-Realtime only, no browser
+// involvement) to the recipient's private channel (and the sender's
+// own channel, for their other tabs). The receiver renders the
+// payload immediately — no refetch. Polling stays as fallback (3s
+// while Realtime is down, 30s safety net while SUBSCRIBED).
+//
+// GLOBAL room: fan-out to "every signed-in user" is unbounded, so
+// there is no member list to derive channels from. Global stays
+// PING-ONLY on the public `community:global` channel (a ping carries
+// no content) + a fast refetch — see the GET pagination work below.
+// Typing on global is likewise ping-style (a name only, no content).
+//
+// Payloads carry NAMES only — never emails or phones. The broadcast
+// payload is built by buildRealtimePayload, a whitelist (not the raw
+// row): senderEmail/recipientEmail/recipientName are dropped, the
+// reply snapshot drops its senderEmail, and readBy is collapsed to
+// seenCount. `own` is computed per recipient so the receiver knows
+// whether the message is theirs without seeing any email.
+async function privateChannelName(email: string): Promise<string | null> {
+  const secret = getEnv("SESSION_SECRET");
+  if (!secret || !isEmail(email || "")) return null;
+  try {
+    const sig = await hmacB64url(secret, "locora-inbox:" + norm(email));
+    return "inbox:" + bytesToHex(b64urlToBytes(sig));
+  } catch {
+    return null;
+  }
+}
+
+// Server -> Supabase Realtime broadcast (REST). `entries` may carry
+// several topics in ONE request, which is how community fan-out
+// stays a single round trip. Fire-and-forget safe: never throws,
+// never blocks the caller — callers that need delivery confidence
+// use broadcastRealtimeSoon (bounded wait) instead.
+async function broadcastRealtime(entries: { topic: string; event: string; payload: any }[]): Promise<void> {
+  const base = supabaseBase();
+  const key = getEnv("SUPABASE_SERVICE_ROLE_KEY");
+  if (!base || !key || !entries.length) return;
+  try {
+    await fetchJson(`${base}/realtime/v1/api/broadcast`, {
+      method: "POST",
+      headers: { apikey: key, Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: entries.map((e) => ({ topic: e.topic, event: e.event, payload: e.payload, private: false })),
+      }),
+    });
+  } catch {
+    // Broadcast is speed only; the poll picks everything up anyway.
+  }
+}
+
+// Bounded wait for a broadcast: the sender's POST waits at most
+// ~1.2s for the realtime round trip (typically ~250ms, same host as
+// the other Supabase calls), then responds anyway. The sender has
+// optimistic UI, so this delay is invisible to them — but it makes
+// the receiver's instant delivery near-certain instead of
+// best-effort-after-response (Vercel may freeze the function once
+// the response is sent, which would drop a fire-and-forget fetch).
+async function broadcastRealtimeSoon(entries: { topic: string; event: string; payload: any }[]): Promise<void> {
+  if (!entries.length) return;
+  await Promise.race([
+    broadcastRealtime(entries),
+    new Promise((resolve) => setTimeout(resolve, 1200)),
+  ]);
+}
+
+// Whitelisted broadcast payload for one message, as seen by one
+// viewer. `own` is true when the viewer IS the sender (their other
+// tabs/devices receive their own messages with own:true).
+// Opaque thread routing key (cyrb53 — a small deterministic hash,
+// NOT cryptographic, and it does not need to be: the key only files
+// a payload into a thread inside an already-private channel).
+// The payload must never carry raw emails (DB-H1), so the thread
+// key is `eventId|hash(sorted pair)` instead of `eventId|a|b`.
+// The client computes the same key with the identical function in
+// src/services/messages-service.ts — keep the two in sync.
+function cyrb53(str: string, seed = 0): number {
+  let h1 = 0xdeadbeef ^ seed;
+  let h2 = 0x41c6ce57 ^ seed;
+  for (let i = 0, ch; i < str.length; i++) {
+    ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+}
+
+function threadKeyHash(eventId: string, emailA: string, emailB: string): string {
+  const pair = [norm(emailA), norm(emailB)].sort().join("|");
+  return `${eventId}|${cyrb53(pair).toString(16)}`;
+}
+
+function buildRealtimePayload(m: any, viewerEmail: string): any {
+  const v = stripMessageForViewer(m, viewerEmail);
+  const snap = v.replySnapshot && typeof v.replySnapshot === "object"
+    ? {
+        id: String(v.replySnapshot.id || ""),
+        senderName: String(v.replySnapshot.senderName || "").slice(0, 80),
+        text: String(v.replySnapshot.text || "").slice(0, 200),
+        ...(v.replySnapshot.attachmentName ? { attachmentName: String(v.replySnapshot.attachmentName).slice(0, 200) } : {}),
+        deleted: v.replySnapshot.deleted === true,
+      }
+    : undefined;
+  const out: any = {
+    id: String(v.id || ""),
+    type: v.type,
+    eventId: String(v.eventId || ""),
+    eventTitle: String(v.eventTitle || ""),
+    senderName: String(v.senderName || v.senderEmail || "").slice(0, 80),
+    text: String(v.text || ""),
+    attachment: v.attachment || null,
+    read: v.read === true,
+    edited: v.edited === true,
+    editedAt: v.editedAt || undefined,
+    deletedForEveryone: v.deletedForEveryone === true,
+    deletedAt: v.deletedAt || undefined,
+    replyToId: v.replyToId || undefined,
+    replySnapshot: snap,
+    createdAt: v.createdAt || "",
+    own: norm(v.senderEmail || "") === norm(viewerEmail || ""),
+    seenCount: typeof v.seenCount === "number" ? v.seenCount : undefined,
+  };
+  // Private chats only: the thread key lets the receiver file the
+  // message into the right thread without any email in the payload
+  // (the key is a hash of the pair, not the pair itself).
+  if (!isCommunityMessage(v) && v.senderEmail && v.recipientEmail) {
+    out.threadKey = threadKeyHash(v.eventId, v.senderEmail, v.recipientEmail);
+  }
+  return out;
+}
+
+// Member emails for one event's community fan-out: confirmed
+// registrants + the organizer + admins. The sender is included
+// (their other tabs get the payload with own:true). Capped at 200
+// members — beyond that the send falls back to a ping on the public
+// community channel + polling (see the community send branch).
+function communityMemberEmails(event: any, regs: any[]): string[] {
+  const out = new Set<string>();
+  const org = organizerEmailOf(event || {});
+  if (org) out.add(norm(org));
+  for (const r of regs || []) {
+    if (r?.status === "confirmed" && isEmail(r?.userEmail || "")) out.add(norm(r.userEmail));
+  }
+  for (const a of ADMIN_EMAILS) out.add(norm(a));
+  return [...out];
 }
 
 // ---- Replies (ported 2026-11-05 onto main@e1848d4; PR #4 is parked,
@@ -621,6 +803,95 @@ async function loadCommunityMessages(eventId: string): Promise<any[]> {
   return all.filter((m: any) => isCommunityMessage(m) && String(m.eventId || "") === String(eventId || ""));
 }
 
+// Paginated reads for the chat GETs (2026-11-06): the old GETs
+// re-downloaded the whole history (up to 1000 rows) every 3s poll,
+// so polls got slower as conversations grew. These variants take
+// {limit, before, since} and return one page + hasMore; the
+// unpaginated loaders above are untouched (internal callers —
+// authorize, idempotency, blocks — still need the full list).
+//   limit  — page size (clamped 1..100, default 50)
+//   before — exclusive cursor: only rows older than this createdAt
+//   since  — inclusive floor: rows with createdAt >= since (the
+//            client dedupes by id, so the boundary row is safe)
+// No opts (or limit omitted) still returns the full list, so the
+// old no-param GET behaviour is unchanged.
+async function loadMessagesForPage(
+  email: string,
+  opts: { limit?: number; before?: string; since?: string },
+): Promise<{ messages: any[]; hasMore: boolean }> {
+  const limit = Math.min(Math.max(Number(opts.limit) || 50, 1), 100);
+  const extra =
+    (opts.before ? `&data->>createdAt=lt.${encodeURIComponent(opts.before)}` : "") +
+    (opts.since ? `&data->>createdAt=gte.${encodeURIComponent(opts.since)}` : "");
+  const out = new Map<string, any>();
+  try {
+    for (const field of ["senderEmail", "recipientEmail"]) {
+      const { ok, body } = await fetchJson(
+        `${supabaseBase()}/rest/v1/messages?select=id,data&data->>${field}=eq.${encodeURIComponent(norm(email))}${extra}&order=data->>createdAt.desc&limit=${limit + 1}`,
+        { headers: supabaseHeaders() },
+      );
+      if (!ok) throw new Error("filtered messages read failed");
+      if (Array.isArray(body)) for (const row of body) if (row.data?.id) out.set(row.data.id, row.data);
+    }
+  } catch {
+    // Fall back to the full read + slice in memory: slower, but a
+    // paginated GET must never 503 just because the filtered query
+    // was rejected.
+    const all = await loadMessagesFor(email);
+    const mine = all.filter(
+      (m: any) => norm(m.senderEmail || "") === norm(email) || norm(m.recipientEmail || "") === norm(email),
+    );
+    const sorted = mine.sort((a: any, b: any) =>
+      (b.createdAt || "").localeCompare(a.createdAt || "") ||
+      (b.id || "").localeCompare(a.id || ""),
+    );
+    const page = sorted.filter((m: any) =>
+      (!opts.before || (m.createdAt || "") < opts.before) &&
+      (!opts.since || (m.createdAt || "") >= opts.since),
+    );
+    return { messages: page.slice(0, limit).reverse(), hasMore: page.length > limit };
+  }
+  const merged = [...out.values()].sort((a: any, b: any) =>
+    (b.createdAt || "").localeCompare(a.createdAt || "") ||
+    (b.id || "").localeCompare(a.id || ""),
+  );
+  return { messages: merged.slice(0, limit).reverse(), hasMore: merged.length > limit };
+}
+
+async function loadCommunityMessagesPage(
+  eventId: string,
+  opts: { limit?: number; before?: string; since?: string },
+): Promise<{ messages: any[]; hasMore: boolean }> {
+  const limit = Math.min(Math.max(Number(opts.limit) || 50, 1), 100);
+  const extra =
+    (opts.before ? `&data->>createdAt=lt.${encodeURIComponent(opts.before)}` : "") +
+    (opts.since ? `&data->>createdAt=gte.${encodeURIComponent(opts.since)}` : "");
+  try {
+    const { ok, body } = await fetchJson(
+      `${supabaseBase()}/rest/v1/messages?select=id,data&data->>type=eq.community&data->>eventId=eq.${encodeURIComponent(eventId)}${extra}&order=data->>createdAt.desc&limit=${limit + 1}`,
+      { headers: supabaseHeaders() },
+    );
+    if (ok && Array.isArray(body)) {
+      const rows = body.map((row: any) => row.data).filter(Boolean);
+      rows.sort((a: any, b: any) =>
+        (b.createdAt || "").localeCompare(a.createdAt || "") ||
+        (b.id || "").localeCompare(a.id || ""),
+      );
+      return { messages: rows.slice(0, limit).reverse(), hasMore: rows.length > limit };
+    }
+  } catch { /* fall through to the in-memory slice */ }
+  const all = await loadCommunityMessages(eventId);
+  const sorted = all.sort((a: any, b: any) =>
+    (b.createdAt || "").localeCompare(a.createdAt || "") ||
+    (b.id || "").localeCompare(a.id || ""),
+  );
+  const page = sorted.filter((m: any) =>
+    (!opts.before || (m.createdAt || "") < opts.before) &&
+    (!opts.since || (m.createdAt || "") >= opts.since),
+  );
+  return { messages: page.slice(0, limit).reverse(), hasMore: page.length > limit };
+}
+
 // Extension -> expected MIME family. The server checks the extension
 // (the client also checks File.type); a mismatch is rejected.
 const ALLOWED_EXTENSIONS: Record<string, string[]> = {
@@ -696,11 +967,31 @@ async function deleteAttachmentObject(path: string): Promise<void> {
 // bytes against the extension, plus the stored total size. Returns an
 // error string, or null when the attachment checks out. A mismatched
 // object is deleted so it does not linger publicly.
+// Pure MP4/MOV check (unit-testable, see test_chat_realtime.mts):
+// `ftyp` is usually at offset 4, but some encoders put a
+// `free`/`wide` box first. Walk the top-level boxes (size + type,
+// 8-byte headers) until `ftyp` is found or the head runs out —
+// rejecting a real video for a leading free box was the false
+// negative.
+function mp4HasFtyp(head: Uint8Array): boolean {
+  let pos = 0;
+  while (pos + 8 <= head.length) {
+    const size = (head[pos] << 24) | (head[pos + 1] << 16) | (head[pos + 2] << 8) | head[pos + 3];
+    const type = String.fromCharCode(head[pos + 4], head[pos + 5], head[pos + 6], head[pos + 7]);
+    if (type === "ftyp") return true;
+    if (!Number.isFinite(size) || size < 8) return false;
+    pos += size;
+  }
+  return false;
+}
+
 async function verifyAttachment(path: string, ext: string): Promise<string | null> {
   const url = `${supabaseBase()}/storage/v1/object/public/${BUCKET}/${path}`;
   let res: any;
   try {
-    res = await fetch(url, { headers: { Range: "bytes=0-15" } });
+    // 64 bytes, not 16: an MP4 may start with a `free`/`wide` box
+    // before `ftyp`, and the box-walk below needs room to skip it.
+    res = await fetch(url, { headers: { Range: "bytes=0-63" } });
   } catch {
     return "Could not verify the attachment — please try again";
   }
@@ -736,7 +1027,11 @@ async function verifyAttachment(path: string, ext: string): Promise<string | nul
   else if (ext === "pdf") ok = starts(0x25, 0x50, 0x44, 0x46);
   else if (ext === "docx" || ext === "xlsx" || ext === "xlsm") ok = starts(0x50, 0x4b, 0x03, 0x04);
   else if (ext === "doc" || ext === "xls") ok = starts(0xd0, 0xcf, 0x11, 0xe0);
-  else if (ext === "mp4" || ext === "mov") ok = at(4, 0x66, 0x74, 0x79, 0x70);
+  else if (ext === "mp4" || ext === "mov") {
+    // MP4/MOV: `ftyp` is usually at offset 4, but some encoders
+    // put a `free`/`wide` box first — see mp4HasFtyp above.
+    ok = mp4HasFtyp(head);
+  }
   else if (ext === "webm") ok = starts(0x1a, 0x45, 0xdf, 0xa3);
   else {
     const ct = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
@@ -930,6 +1225,18 @@ async function sendMail(
   }
 }
 
+// Pagination params for the chat GETs (?limit=&before=&since=).
+// Returns null when none are present, so a no-param GET behaves
+// exactly as before (full list, no hasMore in the response).
+function pageOptsFromQuery(q: any): { limit?: number; before?: string; since?: string } | null {
+  if (!q || (q.limit === undefined && q.before === undefined && q.since === undefined)) return null;
+  return {
+    limit: Number(q.limit) || 50,
+    before: String(q.before || ""),
+    since: String(q.since || ""),
+  };
+}
+
 export default async function handler(req: any, res: any): Promise<void> {
   try {
     if (
@@ -953,6 +1260,19 @@ export default async function handler(req: any, res: any): Promise<void> {
     }
     const me = session.email;
 
+    // ---- GET: my private Realtime channel name (?action=channel) ----
+    // The client learns ONLY its own channel name here (session-
+    // authenticated; the HMAC needs SESSION_SECRET, which never
+    // leaves the server). The Navbar, inbox and community chats all
+    // read it through messagesService.getRealtimeChannel() (cached).
+    // Null when SESSION_SECRET is missing — Realtime then stays
+    // polling-only, exactly as before.
+    if (req.method === "GET" && req.query?.action === "channel") {
+      const channel = await privateChannelName(me);
+      sendJson(res, 200, { realtimeChannel: channel });
+      return;
+    }
+
     // ---- GET: community chat (?community=1&eventId=x) ----
     // Membership-gated: only confirmed registrants, the organizer
     // and admins see anything. Everyone else gets 403 with
@@ -974,9 +1294,17 @@ export default async function handler(req: any, res: any): Promise<void> {
       // Returns ONLY global rows; event-community rows are excluded
       // by loadCommunityMessages("global") + the eventId filter.
       if (eventId === GLOBAL_EVENT_ID) {
+        const pageOpts = pageOptsFromQuery(req.query);
         let rows: any[];
+        let hasMore = false;
         try {
-          rows = await loadCommunityMessages(GLOBAL_EVENT_ID);
+          if (pageOpts) {
+            const page = await loadCommunityMessagesPage(GLOBAL_EVENT_ID, pageOpts);
+            rows = page.messages;
+            hasMore = page.hasMore;
+          } else {
+            rows = await loadCommunityMessages(GLOBAL_EVENT_ID);
+          }
         } catch {
           sendJson(res, 503, { message: "Messages are not set up yet" });
           return;
@@ -995,6 +1323,7 @@ export default async function handler(req: any, res: any): Promise<void> {
           // Moderator flag for the client (delete-any buttons):
           // admins + approved organizers moderate the global room.
           isOrganizer: await isApprovedOrganizer(me),
+          ...(pageOpts ? { hasMore } : {}),
         });
         return;
       }
@@ -1014,9 +1343,17 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 403, { message: "Register to join the community chat", member: false, canPost: false });
         return;
       }
+      const pageOpts = pageOptsFromQuery(req.query);
       let rows: any[];
+      let hasMore = false;
       try {
-        rows = await loadCommunityMessages(eventId);
+        if (pageOpts) {
+          const page = await loadCommunityMessagesPage(eventId, pageOpts);
+          rows = page.messages;
+          hasMore = page.hasMore;
+        } else {
+          rows = await loadCommunityMessages(eventId);
+        }
       } catch {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
@@ -1036,6 +1373,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         member: true,
         canPost: true,
         isOrganizer: mayManageEvent(event, me),
+        ...(pageOpts ? { hasMore } : {}),
       });
       return;
     }
@@ -1050,8 +1388,16 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       let all: any[];
+      let hasMore = false;
+      const pageOpts = pageOptsFromQuery(req.query);
       try {
-        all = await loadMessagesFor(userEmail);
+        if (pageOpts) {
+          const page = await loadMessagesForPage(userEmail, pageOpts);
+          all = page.messages;
+          hasMore = page.hasMore;
+        } else {
+          all = await loadMessagesFor(userEmail);
+        }
       } catch {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
@@ -1085,11 +1431,163 @@ export default async function handler(req: any, res: any): Promise<void> {
         (a.createdAt || "").localeCompare(b.createdAt || "") ||
         (a.id || "").localeCompare(b.id || ""),
       );
-      sendJson(res, 200, { messages: mine });
+      sendJson(res, 200, { messages: mine, ...(pageOpts ? { hasMore } : {}) });
       return;
     }
 
     const body = await readBody(req);
+
+    // ---- POST: typing indicator (ephemeral, nothing is stored) ----
+    // The client sends this (throttled ~2s) while typing; the server
+    // broadcasts {type:'typing', name} to the other side's private
+    // channel (private/event community) or to the public
+    // `community:global` channel (global — a name only, no content,
+    // and global names are public to signed-in members anyway).
+    // Validation mirrors the send gates, so a stranger cannot make
+    // "X is typing…" appear in a conversation they are not part of.
+    // Rate-limited like the other write actions; the payload is
+    // broadcast with a bounded wait, like a send.
+    if (req.method === "POST" && body.action === "typing") {
+      const rlType = await checkRateLimit(`msg:typing:${me}`, 90, 10 * 60 * 1000);
+      if (!rlType.allowed && !rlType.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlType.retryAfter) });
+        return;
+      }
+      const eventId = String(body.eventId || "");
+      if (!eventId) {
+        sendJson(res, 400, { message: "eventId is required" });
+        return;
+      }
+      let senderName = me;
+      try {
+        const profile = await loadUserByEmail(me);
+        if (profile && typeof profile.data?.name === "string" && profile.data.name.trim()) {
+          senderName = profile.data.name.trim().slice(0, 80);
+        }
+      } catch { /* fall back to the email address */ }
+      const isCommunityTyping = body.community === true;
+      if (isCommunityTyping && eventId === GLOBAL_EVENT_ID) {
+        await broadcastRealtimeSoon([{
+          topic: `community:${GLOBAL_EVENT_ID}`,
+          event: "typing",
+          payload: { name: senderName },
+        }]);
+        sendJson(res, 200, { typing: true });
+        return;
+      }
+      if (isCommunityTyping) {
+        const [event, regs] = await Promise.all([
+          loadEvent(eventId),
+          loadRegistrationsForEvent(eventId).catch(() => null),
+        ]);
+        if (!event || !regs || !isCommunityMember(event, me, regs)) {
+          sendJson(res, 403, { message: "Register to join the community chat" });
+          return;
+        }
+        const members = communityMemberEmails(event, regs).filter((e) => norm(e) !== norm(me));
+        const entries: { topic: string; event: string; payload: any }[] = [];
+        for (const email of members.slice(0, 200)) {
+          const channel = await privateChannelName(email);
+          if (channel) entries.push({ topic: channel, event: "typing", payload: { name: senderName, eventId } });
+        }
+        await broadcastRealtimeSoon(entries);
+        sendJson(res, 200, { typing: true });
+        return;
+      }
+      const recipient = norm(body.recipientEmail || "");
+      if (!isEmail(recipient) || recipient === norm(me)) {
+        sendJson(res, 400, { message: "A valid recipient is required" });
+        return;
+      }
+      const [event, existing] = await Promise.all([
+        loadEvent(eventId),
+        loadMessagesFor(me).catch(() => null),
+      ]);
+      if (!event || !existing) {
+        sendJson(res, 404, { message: "Event not found" });
+        return;
+      }
+      const denied = authorizeContact(event, me, recipient, existing);
+      if (denied) {
+        sendJson(res, 403, { message: denied });
+        return;
+      }
+      const channel = await privateChannelName(recipient);
+      if (channel) {
+        await broadcastRealtimeSoon([{
+          topic: channel,
+          event: "typing",
+          payload: { name: senderName, threadKey: threadKeyHash(eventId, me, recipient) },
+        }]);
+      }
+      sendJson(res, 200, { typing: true });
+      return;
+    }
+
+    // ---- POST: batch mark-as-read (no new polling call) ----
+    // One call marks many messages read (the old client PATCHed each
+    // unread message individually, then reloaded). Private rows set
+    // read:true (recipient-only, as before); community rows append
+    // the viewer to readBy (capped at 200) and report seenCount /
+    // seenByMe through stripMessageForViewer. After marking, a
+    // {type:'read'} event goes to each message's SENDER channel so
+    // their ✓ flips to ✓✓ live (fire-and-forget: if it drops, the
+    // next poll shows the same state).
+    if (req.method === "POST" && body.action === "mark-read") {
+      const rlMark = await checkRateLimit(`msg:markread:${me}`, 120, 10 * 60 * 1000);
+      if (!rlMark.allowed && !rlMark.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlMark.retryAfter) });
+        return;
+      }
+      const ids: string[] = Array.isArray(body.ids)
+        ? body.ids.map((x: any) => String(x || "")).filter(Boolean).slice(0, 100)
+        : [];
+      if (!ids.length) {
+        sendJson(res, 400, { message: "ids are required" });
+        return;
+      }
+      let marked = 0;
+      const readEntries: { topic: string; event: string; payload: any }[] = [];
+      for (const id of ids) {
+        let msg: any = null;
+        try { msg = await loadMessage(id); } catch { msg = null; }
+        if (!msg) continue;
+        if (isCommunityMessage(msg)) {
+          if (msg.eventId === GLOBAL_EVENT_ID) {
+            if (!isGlobalMember(me)) continue;
+          } else {
+            const event = await loadEvent(msg.eventId);
+            if (!event) continue;
+            let regs: any[] = [];
+            try { regs = await loadRegistrationsForEvent(msg.eventId); } catch { continue; }
+            if (!isCommunityMember(event, me, regs)) continue;
+          }
+          const readBy: string[] = Array.isArray(msg.readBy) ? msg.readBy : [];
+          if (readBy.some((e: any) => norm(e) === norm(me))) continue;
+          readBy.push(me);
+          msg.readBy = readBy.slice(0, 200);
+          try {
+            await updateMessageData(msg);
+            marked++;
+            const channel = await privateChannelName(String(msg.senderEmail || ""));
+            if (channel) readEntries.push({ topic: channel, event: "read", payload: { id, seenCount: msg.readBy.length } });
+          } catch { /* best-effort */ }
+        } else {
+          if (norm(msg.recipientEmail || "") !== norm(me)) continue;
+          if (msg.read === true) continue;
+          msg.read = true;
+          try {
+            await updateMessageData(msg);
+            marked++;
+            const channel = await privateChannelName(String(msg.senderEmail || ""));
+            if (channel) readEntries.push({ topic: channel, event: "read", payload: { id } });
+          } catch { /* best-effort */ }
+        }
+      }
+      if (readEntries.length) broadcastRealtime(readEntries).catch(() => {});
+      sendJson(res, 200, { marked });
+      return;
+    }
 
     // ---- DELETE: delete for everyone (sender only) ----
     if (req.method === "DELETE") {
@@ -1188,6 +1686,38 @@ export default async function handler(req: any, res: any): Promise<void> {
           }
         }
       } catch { /* best-effort */ }
+      // Instant tombstone: private → both participants' channels;
+      // event community → fan-out to members (same list as send);
+      // global → ping-only on the public channel (no content).
+      try {
+        if (isGlobalMessage(tombstoned)) {
+          await broadcastRealtimeSoon([{
+            topic: `community:${GLOBAL_EVENT_ID}`,
+            event: "deleted",
+            payload: { id: tombstoned.id },
+          }]);
+        } else if (isCommunityMessage(tombstoned)) {
+          const [event, regs] = await Promise.all([
+            loadEvent(tombstoned.eventId),
+            loadRegistrationsForEvent(tombstoned.eventId).catch(() => null),
+          ]);
+          const members = event && regs ? communityMemberEmails(event, regs) : [];
+          const entries: { topic: string; event: string; payload: any }[] = [];
+          for (const email of members.slice(0, 200)) {
+            const channel = await privateChannelName(email);
+            if (channel) entries.push({ topic: channel, event: "deleted", payload: buildRealtimePayload(tombstoned, email) });
+          }
+          if (entries.length) await broadcastRealtimeSoon(entries);
+          else await broadcastRealtimeSoon([{ topic: `community:${tombstoned.eventId}`, event: "deleted", payload: { id: tombstoned.id } }]);
+        } else {
+          const entries: { topic: string; event: string; payload: any }[] = [];
+          for (const email of [tombstoned.senderEmail, tombstoned.recipientEmail]) {
+            const channel = await privateChannelName(String(email || ""));
+            if (channel) entries.push({ topic: channel, event: "deleted", payload: buildRealtimePayload(tombstoned, email) });
+          }
+          await broadcastRealtimeSoon(entries);
+        }
+      } catch { /* broadcast is speed only; polling is the fallback */ }
       sendJson(res, 200, { deleted: true, message: tombstoned });
       return;
     }
@@ -1367,16 +1897,25 @@ export default async function handler(req: any, res: any): Promise<void> {
       // member by definition, so use a stand-in event row instead
       // of 404ing on loadEvent("global").
       const isGlobalUpload = isCommunityUpload && eventId === GLOBAL_EVENT_ID;
+      // The event was already loaded above (eventForRecipient) —
+      // load it once, not twice. The history + registration reads
+      // are independent, so they run in parallel.
       const event = isGlobalUpload
         ? { id: GLOBAL_EVENT_ID, title: "Community" }
-        : await loadEvent(eventId);
+        : eventForRecipient;
       if (!event) {
         sendJson(res, 404, { message: "Event not found" });
         return;
       }
       let existing: any[] = [];
+      let regs: any[] | null = null;
       try {
-        existing = await loadMessagesFor(sender);
+        const [history, registrations] = await Promise.all([
+          loadMessagesFor(sender),
+          isCommunityUpload && !isGlobalUpload ? loadRegistrationsForEvent(eventId) : Promise.resolve(null),
+        ]);
+        existing = history;
+        regs = registrations;
       } catch {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
@@ -1385,14 +1924,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         // Global room: any session user is a member — no
         // registration check. Event rooms keep the check below.
         if (!isGlobalUpload) {
-          let regs: any[];
-          try {
-            regs = await loadRegistrationsForEvent(eventId);
-          } catch {
-            sendJson(res, 503, { message: "Messages are not set up yet" });
-            return;
-          }
-          if (!isCommunityMember(event, sender, regs)) {
+          if (!regs || !isCommunityMember(event, sender, regs)) {
             sendJson(res, 403, { message: "Register to join the community chat" });
             return;
           }
@@ -1472,44 +2004,44 @@ export default async function handler(req: any, res: any): Promise<void> {
       }
       const eventId = String(body.eventId || "");
       const sender = me;
-      let senderName = sender;
-      try {
-        const profile = await loadUserByEmail(sender);
-        if (profile && typeof profile.data?.name === "string" && profile.data.name.trim()) {
-          senderName = profile.data.name.trim().slice(0, 80);
-        }
-      } catch { /* fall back to the email address */ }
       const text = String(body.text || "").trim().slice(0, MAX_TEXT_CHARS);
       const attachment = body.attachment || null;
       if (!eventId) {
         sendJson(res, 400, { message: "eventId is required" });
         return;
       }
-      // Global room has no stored event: use a stand-in row
-      // (title is stored as the message's eventTitle). Any
-      // session user is a member — see the check below.
+      // SEND-PATH SPEED (2026-11-06): the profile, event and
+      // registration reads are independent — run them in parallel
+      // instead of one after another (~3 sequential round trips
+      // saved before the row even exists).
       const isGlobalSend = eventId === GLOBAL_EVENT_ID;
-      const event = isGlobalSend
-        ? { id: GLOBAL_EVENT_ID, title: "Community" }
-        : await loadEvent(eventId);
+      let senderName = sender;
+      let event: any = null;
+      let regs: any[] = [];
+      try {
+        const [profile, loadedEvent, loadedRegs] = await Promise.all([
+          loadUserByEmail(sender).catch(() => null),
+          isGlobalSend ? Promise.resolve({ id: GLOBAL_EVENT_ID, title: "Community" }) : loadEvent(eventId),
+          isGlobalSend ? Promise.resolve([]) : loadRegistrationsForEvent(eventId),
+        ]);
+        if (profile && typeof profile.data?.name === "string" && profile.data.name.trim()) {
+          senderName = profile.data.name.trim().slice(0, 80);
+        }
+        event = loadedEvent;
+        regs = loadedRegs || [];
+      } catch {
+        sendJson(res, 503, { message: "Messages are not set up yet" });
+        return;
+      }
       if (!event) {
         sendJson(res, 404, { message: "Event not found" });
         return;
       }
-      let regs: any[];
       // Global room: no registrations to check — any session
       // user is a member (isGlobalMember). Event rooms keep it.
-      if (!isGlobalSend) {
-        try {
-          regs = await loadRegistrationsForEvent(eventId);
-        } catch {
-          sendJson(res, 503, { message: "Messages are not set up yet" });
-          return;
-        }
-        if (!isCommunityMember(event, sender, regs)) {
-          sendJson(res, 403, { message: "Register to join the community chat" });
-          return;
-        }
+      if (!isGlobalSend && !isCommunityMember(event, sender, regs)) {
+        sendJson(res, 403, { message: "Register to join the community chat" });
+        return;
       }
       if (!text && !attachment) {
         sendJson(res, 400, { message: "Write a message or attach a file" });
@@ -1548,31 +2080,37 @@ export default async function handler(req: any, res: any): Promise<void> {
       // Community replies: the quoted message must be a COMMUNITY
       // message in this same event. A private message's id is refused
       // even for the same event (see communityReplyTargetError).
+      // The quote lookup and the idempotency lookup are independent
+      // — run them together, not one after another.
+      const idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.slice(0, 100) : "";
+      const wantsReply = body.replyToId !== undefined && body.replyToId !== null && String(body.replyToId).trim() !== "";
       let replyToId = "";
       let replySnapshot: any = null;
-      if (body.replyToId !== undefined && body.replyToId !== null && String(body.replyToId).trim() !== "") {
-        replyToId = String(body.replyToId).trim().slice(0, 200);
-        let quoted: any = null;
-        try { quoted = await loadMessage(replyToId); } catch { quoted = null; }
-        if (!quoted) {
-          sendJson(res, 400, { message: "Quoted message not found" });
-          return;
+      let prior: any = null;
+      {
+        const [quoted, communityRows] = await Promise.all([
+          wantsReply ? loadMessage(String(body.replyToId).trim().slice(0, 200)).catch(() => null) : Promise.resolve(null),
+          idempotencyKey ? loadCommunityMessages(eventId).catch(() => []) : Promise.resolve([]),
+        ]);
+        if (wantsReply) {
+          replyToId = String(body.replyToId).trim().slice(0, 200);
+          if (!quoted) {
+            sendJson(res, 400, { message: "Quoted message not found" });
+            return;
+          }
+          const replyError = communityReplyTargetError(quoted, eventId);
+          if (replyError) {
+            sendJson(res, 400, { message: replyError });
+            return;
+          }
+          replySnapshot = buildReplySnapshot(quoted);
         }
-        const replyError = communityReplyTargetError(quoted, eventId);
-        if (replyError) {
-          sendJson(res, 400, { message: replyError });
-          return;
-        }
-        replySnapshot = buildReplySnapshot(quoted);
-      }
-      const idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.slice(0, 100) : "";
-      if (idempotencyKey) {
-        let communityRows: any[] = [];
-        try { communityRows = await loadCommunityMessages(eventId); } catch { communityRows = []; }
-        const prior = communityRows.find((m: any) => m.idempotencyKey === idempotencyKey && m.senderEmail === sender);
-        if (prior) {
-          sendJson(res, 200, { message: stripMessageForViewer(prior, sender), idempotent: true });
-          return;
+        if (idempotencyKey) {
+          prior = (communityRows || []).find((m: any) => m.idempotencyKey === idempotencyKey && m.senderEmail === sender);
+          if (prior) {
+            sendJson(res, 200, { message: stripMessageForViewer(prior, sender), idempotent: true });
+            return;
+          }
         }
       }
       if (cleanAttachment) {
@@ -1607,7 +2145,37 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
       }
+      // Instant delivery: event rooms fan the FULL payload out to
+      // every member's private channel (one batched REST call);
+      // rooms over 200 members fall back to a ping on the public
+      // community channel + polling. The global room is ping-only
+      // by design (unbounded audience — see the header above).
       // No email alert for community messages, by design.
+      try {
+        if (isGlobalSend) {
+          await broadcastRealtimeSoon([{
+            topic: `community:${GLOBAL_EVENT_ID}`,
+            event: "message",
+            payload: { id: msg.id },
+          }]);
+        } else {
+          const members = communityMemberEmails(event, regs);
+          if (members.length > 200) {
+            await broadcastRealtimeSoon([{
+              topic: `community:${eventId}`,
+              event: "message",
+              payload: { id: msg.id },
+            }]);
+          } else {
+            const entries: { topic: string; event: string; payload: any }[] = [];
+            for (const email of members) {
+              const channel = await privateChannelName(email);
+              if (channel) entries.push({ topic: channel, event: "message", payload: buildRealtimePayload(msg, email) });
+            }
+            await broadcastRealtimeSoon(entries);
+          }
+        }
+      } catch { /* broadcast is speed only; polling is the fallback */ }
       sendJson(res, 200, { message: stripMessageForViewer(msg, sender) });
       return;
     }
@@ -1621,27 +2189,39 @@ export default async function handler(req: any, res: any): Promise<void> {
       }
       const eventId = String(body.eventId || "");
       const sender = me;
-      // Display names are server-derived, never caller-supplied: the
-      // old code stored body.senderName verbatim (spoofable, and the
-      // same spoofed name went out in the email alert).
-      let senderName = sender;
-      try {
-        const profile = await loadUserByEmail(sender);
-        if (profile && typeof profile.data?.name === "string" && profile.data.name.trim()) {
-          senderName = profile.data.name.trim().slice(0, 80);
-        }
-      } catch { /* fall back to the email address */ }
       const text = String(body.text || "").trim().slice(0, MAX_TEXT_CHARS);
       const attachment = body.attachment || null;
       if (!eventId) {
         sendJson(res, 400, { message: "eventId is required" });
         return;
       }
+      // SEND-PATH SPEED (2026-11-06): the sender profile, the event
+      // and the sender's history are independent — run them in
+      // parallel, and load the event ONCE (it used to load twice).
+      // Display names stay server-derived, never caller-supplied:
+      // the old code stored body.senderName verbatim (spoofable).
+      let senderName = sender;
+      let eventForRecipient: any = null;
+      let existing: any[] = [];
+      try {
+        const [profile, loadedEvent, history] = await Promise.all([
+          loadUserByEmail(sender).catch(() => null),
+          loadEvent(eventId),
+          loadMessagesFor(sender),
+        ]);
+        if (profile && typeof profile.data?.name === "string" && profile.data.name.trim()) {
+          senderName = profile.data.name.trim().slice(0, 80);
+        }
+        eventForRecipient = loadedEvent;
+        existing = history;
+      } catch {
+        sendJson(res, 503, { message: "Messages are not set up yet" });
+        return;
+      }
       // Recipient resolution (P2-4): organizerId -> stored event's
       // organiser email. A caller-supplied recipientEmail is only used
       // when no organizerId is given, and authorizeContact() below
       // still validates it against the stored event.
-      const eventForRecipient = await loadEvent(eventId);
       if (!eventForRecipient) {
         sendJson(res, 404, { message: "Event not found" });
         return;
@@ -1691,18 +2271,9 @@ export default async function handler(req: any, res: any): Promise<void> {
           url: `${supabaseBase()}/storage/v1/object/public/${BUCKET}/${path}`,
         };
       }
-      const event = await loadEvent(eventId);
-      if (!event) {
-        sendJson(res, 404, { message: "Event not found" });
-        return;
-      }
-      let existing: any[] = [];
-      try {
-        existing = await loadMessagesFor(sender);
-      } catch {
-        sendJson(res, 503, { message: "Messages are not set up yet" });
-        return;
-      }
+      // The event + history were already loaded above, in parallel —
+      // no second loadEvent, no second history read.
+      const event = eventForRecipient;
       const denied = authorizeContact(event, sender, recipient, existing);
       if (denied) {
         sendJson(res, 403, { message: denied });
@@ -1751,28 +2322,32 @@ export default async function handler(req: any, res: any): Promise<void> {
       // Attachments are verified against their real bytes here (see
       // verifyAttachment): declared size/type/extension alone were
       // bypassable, because the browser uploads straight to Storage.
-      if (cleanAttachment) {
-        const sniffError = await verifyAttachment(cleanAttachment.path, extensionOf(cleanAttachment.name));
-        if (sniffError) {
-          sendJson(res, 400, { message: sniffError });
-          return;
-        }
+      // The recipient-profile read is independent — run it with the
+      // sniff instead of after it.
+      let recipientName = recipient;
+      const [sniffError, recipientProfile] = await Promise.all([
+        cleanAttachment
+          ? verifyAttachment(cleanAttachment.path, extensionOf(cleanAttachment.name))
+          : Promise.resolve(null),
+        recipient === organizerEmailOf(event)
+          ? Promise.resolve(null)
+          : loadUserByEmail(recipient).catch(() => null),
+      ]);
+      if (sniffError) {
+        sendJson(res, 400, { message: sniffError });
+        return;
       }
       // Recipient display name (the old thread list showed the viewer's
       // OWN name for sender-side threads, because no recipient name was
       // ever stored): the organizer's name from the stored event, or
       // the attendee's profile name.
-      let recipientName = recipient;
       try {
         if (recipient === organizerEmailOf(event)) {
           if (event.organizer && typeof event.organizer.name === "string" && event.organizer.name.trim()) {
             recipientName = event.organizer.name.trim().slice(0, 80);
           }
-        } else {
-          const profile = await loadUserByEmail(recipient);
-          if (profile && typeof profile.data?.name === "string" && profile.data.name.trim()) {
-            recipientName = profile.data.name.trim().slice(0, 80);
-          }
+        } else if (recipientProfile && typeof recipientProfile.data?.name === "string" && recipientProfile.data.name.trim()) {
+          recipientName = recipientProfile.data.name.trim().slice(0, 80);
         }
       } catch { /* fall back to the email address */ }
       const msg: any = {
@@ -1800,9 +2375,26 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
       }
-      // Best-effort alert; a mail failure must never unsend the message.
-      const mailed = await sendMail(buildMessageEmail(msg, event));
-      sendJson(res, 200, { message: stripMessageForViewer(msg, sender), mailed });
+      // Instant delivery: the FULL payload goes to the recipient's
+      // private channel (and the sender's own, for their other tabs)
+      // — the receiver renders it with no refetch. Bounded wait so
+      // the sender's POST never stalls on Realtime.
+      try {
+        const entries: { topic: string; event: string; payload: any }[] = [];
+        for (const email of [recipient, sender]) {
+          const channel = await privateChannelName(String(email || ""));
+          if (channel) entries.push({ topic: channel, event: "message", payload: buildRealtimePayload(msg, email) });
+        }
+        await broadcastRealtimeSoon(entries);
+      } catch { /* broadcast is speed only; polling is the fallback */ }
+      // Best-effort alert, FIRE-AND-FORGET: awaiting Gmail used to
+      // push the POST past the client's 15s timeout on a slow SMTP
+      // day, so the sender saw "Failed to send" for a message that
+      // WAS stored. The mail still goes out; the response does not
+      // wait for it. `mailed` reports false here because delivery is
+      // no longer awaited — the client never depended on it.
+      sendMail(buildMessageEmail(msg, event)).catch(() => {});
+      sendJson(res, 200, { message: stripMessageForViewer(msg, sender), mailed: false });
       return;
     }
 
@@ -1879,6 +2471,34 @@ export default async function handler(req: any, res: any): Promise<void> {
           sendJson(res, 503, { message: "Messages are not set up yet" });
           return;
         }
+        // Instant edit: the other side updates in place from the
+        // full payload (private: both channels; event community:
+        // fan-out; global: ping-only, no content).
+        try {
+          if (isGlobalMessage(msg)) {
+            await broadcastRealtimeSoon([{ topic: `community:${GLOBAL_EVENT_ID}`, event: "edited", payload: { id: msg.id } }]);
+          } else if (isCommunityMessage(msg)) {
+            const [event, regs] = await Promise.all([
+              loadEvent(msg.eventId),
+              loadRegistrationsForEvent(msg.eventId).catch(() => null),
+            ]);
+            const members = event && regs ? communityMemberEmails(event, regs) : [];
+            const entries: { topic: string; event: string; payload: any }[] = [];
+            for (const email of members.slice(0, 200)) {
+              const channel = await privateChannelName(email);
+              if (channel) entries.push({ topic: channel, event: "edited", payload: buildRealtimePayload(msg, email) });
+            }
+            if (entries.length) await broadcastRealtimeSoon(entries);
+            else await broadcastRealtimeSoon([{ topic: `community:${msg.eventId}`, event: "edited", payload: { id: msg.id } }]);
+          } else {
+            const entries: { topic: string; event: string; payload: any }[] = [];
+            for (const email of [msg.senderEmail, msg.recipientEmail]) {
+              const channel = await privateChannelName(String(email || ""));
+              if (channel) entries.push({ topic: channel, event: "edited", payload: buildRealtimePayload(msg, email) });
+            }
+            await broadcastRealtimeSoon(entries);
+          }
+        } catch { /* broadcast is speed only; polling is the fallback */ }
         sendJson(res, 200, { message: stripMessageForViewer(msg, me) });
         return;
       }
@@ -1903,6 +2523,13 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
       }
+      // Read receipt, live: the sender's ✓ flips to ✓✓ without
+      // waiting for a poll. Fire-and-forget — if it drops, the next
+      // poll shows the same state.
+      try {
+        const channel = await privateChannelName(String(msg.senderEmail || ""));
+        if (channel) broadcastRealtime([{ topic: channel, event: "read", payload: { id: msg.id } }]).catch(() => {});
+      } catch { /* broadcast is speed only */ }
       sendJson(res, 200, { message: stripMessageForViewer(msg, recipient) });
       return;
     }

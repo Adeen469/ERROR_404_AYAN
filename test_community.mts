@@ -198,8 +198,9 @@ check("client: CommunityChat shows names only (never renders senderEmail)",
   chat.includes("m.senderName") && !chat.includes("{m.senderEmail}"));
 check("client: CommunityChat subscribes to community pings",
   chat.includes("subscribeToCommunity("));
-check("client: CommunityChat broadcasts pings after send/edit/delete",
-  (chat.match(/broadcastToCommunity/g) || []).length >= 3);
+check("client: CommunityChat no longer broadcasts after send/edit/delete (server fans out)",
+  !chat.includes("broadcastToCommunity") &&
+  messages.includes("communityMemberEmails(event, regs)"));
 check("client: CommunityChat has Reply + quote bar",
   chat.includes("Reply") && chat.includes("Replying to"));
 check("client: CommunityChat polls 3s, 30s when Realtime is live",

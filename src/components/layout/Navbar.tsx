@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Menu, X, PlusCircle, User, LogOut, Sparkles, ChevronDown } from 'lucide-react';
 import { authService } from '../../services/auth-service';
 import { messagesService } from '../../services/messages-service';
+import { subscribeToPrivateChannel } from '../../services/realtime-service';
 import { UserProfile } from '../../types';
 import { isDemoMode } from '../../services/api-client';
 import {
@@ -93,6 +94,30 @@ export function Navbar() {
       clearInterval(timer);
     };
   }, [currentUser?.email, location.pathname]);
+
+  // Realtime badge: a new message on my private channel refreshes
+  // the unread count AT ONCE instead of waiting for the 30s interval
+  // above (or a route change). The 30s interval stays as fallback.
+  // Silent no-op while Realtime is not configured.
+  useEffect(() => {
+    if (!currentUser?.email) return;
+    let unsubscribe = () => {};
+    let cancelled = false;
+    messagesService.getRealtimeChannel().then((channel) => {
+      if (cancelled || !channel) return;
+      unsubscribe = subscribeToPrivateChannel(channel, (ev) => {
+        if (ev.type === 'message') {
+          messagesService.getUnreadCount(currentUser.email).then((count) => {
+            if (!cancelled && count !== null) setUnreadCount(count);
+          });
+        }
+      });
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [currentUser?.email]);
 
   const canPost =
     accessRole === 'admin' ||

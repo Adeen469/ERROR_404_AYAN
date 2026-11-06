@@ -45,23 +45,18 @@ import {
   formatFileSize,
   messagesService,
   validateAttachment,
+  dayLabel,
+  fmtChatTime,
+  isNearBottom,
+  reconcileFailedPending,
 } from '../../services/messages-service';
-import { broadcastToCommunity, subscribeToCommunity } from '../../services/realtime-service';
+import {
+  subscribeToPrivateChannel,
+  subscribeToCommunity,
+  type RealtimeFullEvent,
+  type RealtimeMessage,
+} from '../../services/realtime-service';
 import { ApiError } from '../../services/api-client';
-
-function fmtTime(iso: string): string {
-  if (!iso) return '';
-  try {
-    return new Date(iso).toLocaleString([], {
-      day: 'numeric',
-      month: 'short',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch {
-    return '';
-  }
-}
 
 function quoteText(m: EventMessage): string {
   if (m.deletedForEveryone) return 'This message was deleted';
@@ -151,7 +146,64 @@ function AttachmentView({ m }: { m: EventMessage }) {
   );
 }
 
-type ChatMessage = EventMessage & { pending?: boolean };
+type ChatMessage = EventMessage & {
+  pending?: boolean;
+  failed?: boolean;
+  localFile?: File;
+  localPreview?: string;
+  // 0..1 while the attachment Storage PUT is running (XHR progress).
+  uploadProgress?: number;
+  // Stable per draft: retries reuse it so the server dedupes instead
+  // of creating a second message.
+  idempotencyKey?: string;
+};
+
+// A bubble still on its way out (or failed): local preview for
+// images, name-only line for files, a real upload progress bar —
+// NEVER an empty-src img or empty-href anchor (the old code ran
+// the normal AttachmentView on a pending bubble whose url was '').
+// Failed bubbles keep a Retry button, like the private inbox.
+function PendingAttachment({ m, onRetry }: { m: ChatMessage; onRetry: () => void }) {
+  const progress = typeof m.uploadProgress === 'number' ? m.uploadProgress : undefined;
+  return (
+    <span className="block mt-1 space-y-1">
+      {m.localPreview ? (
+        <img
+          src={m.localPreview}
+          alt={m.attachment?.name || 'Uploading image'}
+          className="max-h-64 max-w-full rounded-lg object-contain bg-[#F4F1EA]"
+        />
+      ) : m.attachment ? (
+        <span className="block text-sm text-[#1E2320]">
+          {m.attachment.name} · {formatFileSize(m.attachment.size)}
+        </span>
+      ) : null}
+      {progress !== undefined && progress < 1 && (
+        <span className="block">
+          <span className="block h-1 bg-[#E2DFD8] rounded-full overflow-hidden">
+            <span
+              className="block h-full bg-[#1E3F35] rounded-full"
+              style={{ width: `${Math.round(progress * 100)}%` }}
+            />
+          </span>
+          <span className="text-[11px] text-[#8C887E]">Uploading… {Math.round(progress * 100)}%</span>
+        </span>
+      )}
+      {m.failed && (
+        <span className="flex items-center gap-2">
+          <span className="text-[11px] font-semibold text-rose-600">Failed to send</span>
+          <button
+            type="button"
+            onClick={onRetry}
+            className="text-[11px] font-semibold text-[#1E3F35] underline"
+          >
+            Retry
+          </button>
+        </span>
+      )}
+    </span>
+  );
+}
 
 export function CommunityChat({
   eventId,
@@ -188,6 +240,26 @@ export function CommunityChat({
   const [editDraft, setEditDraft] = useState('');
   const [confirmDelete, setConfirmDelete] = useState<EventMessage | null>(null);
   const [realtimeLive, setRealtimeLive] = useState(false);
+  // Typing indicators (names only, ephemeral): several members may
+  // type at once in a group chat, so this is a set, not one name.
+  const [typingNames, setTypingNames] = useState<string[]>([]);
+  const typingTimers = useRef(new Map<string, number>());
+  const typingThrottle = useRef(0);
+  // Pagination: first page is the newest 50; "Load older" pages
+  // backwards. Polls fetch only rows newer than the newest loaded.
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  // Scroll guard: auto-scroll only when already near the bottom;
+  // otherwise a "New messages" pill appears instead of yanking the
+  // reader away from older history.
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const nearBottomRef = useRef(true);
+  const [newCount, setNewCount] = useState(0);
+  const messagesRef = useRef<EventMessage[]>([]);
+  messagesRef.current = messages;
+  const pendingRef = useRef<ChatMessage[]>([]);
+  pendingRef.current = pending;
+  const pollCountRef = useRef(0);
   const pollInFlight = useRef(false);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const messageRefs = useRef(new Map<string, HTMLDivElement>());
@@ -196,6 +268,24 @@ export function CommunityChat({
 
   const meEmail = (currentUser?.email || '').toLowerCase();
 
+  // Drop failed bubbles whose real copy has since arrived (see
+  // reconcileFailedPending in messages-service.ts): a send can be
+  // stored while its response is lost, leaving a failed bubble next
+  // to the real message. When the last failed bubble goes, the red
+  // composer error line goes with it.
+  const reconcilePending = useCallback(
+    (serverRows: EventMessage[]) => {
+      const next = reconcileFailedPending(pendingRef.current, serverRows, meEmail);
+      if (next.length !== pendingRef.current.length) {
+        setPending(next);
+        if (!next.some((p) => p.failed)) setSendError('');
+      }
+    },
+    [meEmail],
+  );
+
+  // First page (newest 50) or a manual reload. Polls use pollNew
+  // below instead — a reload here replaces the whole list.
   const load = useCallback(
     async (silent = false) => {
       if (!currentUser?.email) {
@@ -203,10 +293,10 @@ export function CommunityChat({
         return;
       }
       try {
-        const data = isGlobal
-          ? await messagesService.getGlobalCommunityMessages()
-          : await messagesService.getCommunityMessages(eventId);
+        const data = await messagesService.getCommunityMessagesPage(eventId, { limit: 50 });
         setMessages(data.messages);
+        reconcilePending(data.messages);
+        setHasMore(data.hasMore);
         setIsOrganizer(data.isOrganizer);
         setStatus(data.member ? 'member' : 'locked');
         if (!silent) setLoadError('');
@@ -220,45 +310,279 @@ export function CommunityChat({
         if (!silent) setLoadError(err?.message || 'Could not load the community chat.');
       }
     },
-    [currentUser?.email, eventId, isGlobal],
+    [currentUser?.email, eventId, reconcilePending],
   );
+
+  // Poll tick: fetch only rows newer than the newest loaded one and
+  // merge them (dedupe by id). Every 10th tick does a full paged
+  // reload instead, so edits / deletes / seen counts still arrive
+  // when Realtime is off.
+  const pollNew = useCallback(async () => {
+    if (!currentUser?.email) return;
+    pollCountRef.current += 1;
+    if (pollCountRef.current % 10 === 0) {
+      await load(true);
+      return;
+    }
+    const loaded = messagesRef.current;
+    if (loaded.length === 0) {
+      await load(true);
+      return;
+    }
+    const since = loaded.reduce(
+      (max, m) => ((m.createdAt || '') > max ? (m.createdAt as string) : max),
+      '',
+    );
+    try {
+      const page = await messagesService.getCommunityMessagesPage(eventId, { since });
+      if (page.messages.length > 0) {
+        setMessages((prev) => {
+          const ids = new Set(prev.map((m) => m.id));
+          const fresh = page.messages.filter((m) => !ids.has(m.id));
+          if (fresh.length === 0) return prev;
+          return [...prev, ...fresh].sort(
+            (a, b) =>
+              (a.createdAt || '').localeCompare(b.createdAt || '') ||
+              (a.id || '').localeCompare(b.id || ''),
+          );
+        });
+        reconcilePending(page.messages);
+      }
+    } catch {
+      // Silent poll failure: keep the last loaded list on screen.
+    }
+  }, [currentUser?.email, eventId, load, reconcilePending]);
 
   useEffect(() => {
     load();
+    // Poll interval depends on Realtime: 3s while polling is the only
+    // delivery path, 30s safety net once a channel is live. Each poll
+    // now fetches only new rows (pollNew), not the whole history.
     const intervalMs = realtimeLive ? 30000 : 3000;
     const timer = setInterval(() => {
       if (pollInFlight.current) return;
       pollInFlight.current = true;
-      load(true).finally(() => {
+      pollNew().finally(() => {
         pollInFlight.current = false;
       });
     }, intervalMs);
     return () => clearInterval(timer);
-  }, [load, realtimeLive]);
+  }, [load, pollNew, realtimeLive]);
 
-  // Community pings (content-free, see realtime-service.ts): a ping
-  // means "something changed in this event's chat" — refetch via the
-  // session-authenticated, membership-gated API. Never trust a ping
-  // as data. Without VITE_SUPABASE_* this is a silent no-op and
-  // polling above stays at 3s.
+  // Apply one full-payload Realtime event to the local list (no
+  // refetch). The payload carries no emails (names only): a message
+  // from someone else keeps senderEmail '' (rendering uses the name,
+  // and `own` decides mine/edit/delete) — the full row, with emails,
+  // arrives on the next paged reload.
+  const applyRealtimeMessage = useCallback(
+    (data: RealtimeMessage) => {
+      const quoted = data.replyToId
+        ? messagesRef.current.find((m) => m.id === data.replyToId)
+        : undefined;
+      const merged: EventMessage = {
+        type: 'community',
+        id: data.id,
+        eventId: data.eventId,
+        eventTitle: data.eventTitle || eventTitle,
+        senderEmail: data.own ? meEmail : '',
+        senderName: data.senderName,
+        recipientEmail: `community:${data.eventId}`,
+        text: data.text,
+        attachment: data.attachment,
+        read: data.read,
+        edited: data.edited,
+        editedAt: data.editedAt,
+        deletedForEveryone: data.deletedForEveryone,
+        deletedAt: data.deletedAt,
+        replyToId: data.replyToId,
+        replySnapshot: data.replySnapshot
+          ? { ...data.replySnapshot, senderEmail: quoted ? quoted.senderEmail : '' }
+          : undefined,
+        createdAt: data.createdAt,
+        seenCount: data.seenCount,
+      };
+      setMessages((prev) => {
+        const idx = prev.findIndex((m) => m.id === merged.id);
+        if (idx >= 0) {
+          const next = [...prev];
+          next[idx] = { ...prev[idx], ...merged };
+          return next;
+        }
+        return [...prev, merged];
+      });
+      // A live copy of my own message means the send DID store even
+      // if its POST response was lost — drop the failed bubble.
+      // (Others' payloads carry senderEmail '', so they can never
+      // match — the helper only drops my own failed bubbles.)
+      reconcilePending([merged]);
+    },
+    [meEmail, eventTitle, reconcilePending],
+  );
+
+  // Realtime on my PRIVATE channel (event rooms only — full payload,
+  // see realtime-service.ts): member messages render the moment they
+  // arrive, with no refetch. Read receipts update seen counts live.
+  // Typing arrives here too. Without VITE_SUPABASE_* this is a
+  // silent no-op and polling above stays at 3s.
+  useEffect(() => {
+    if (isGlobal || !eventId || status !== 'member' || !meEmail) return;
+    let unsubscribe = () => {};
+    let cancelled = false;
+    messagesService.getRealtimeChannel().then((channel) => {
+      if (cancelled || !channel) return;
+      unsubscribe = subscribeToPrivateChannel(
+        channel,
+        (ev: RealtimeFullEvent) => {
+          if (ev.type === 'message' || ev.type === 'edited' || ev.type === 'deleted') {
+            // Only this room's community payloads — private inbox
+            // messages share the same channel and belong to the
+            // Messages page, not this chat.
+            if (ev.data.type === 'community' && ev.data.eventId === eventId) {
+              applyRealtimeMessage(ev.data);
+            }
+          } else if (ev.type === 'read') {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === ev.id
+                  ? { ...m, seenCount: typeof ev.seenCount === 'number' ? ev.seenCount : m.seenCount }
+                  : m,
+              ),
+            );
+          } else if (ev.type === 'typing') {
+            if (ev.eventId === eventId && ev.name) showTyping(ev.name);
+          }
+        },
+        (s) => setRealtimeLive(s === 'SUBSCRIBED'),
+      );
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isGlobal, eventId, status, meEmail, applyRealtimeMessage]);
+
+  // Community pings (content-free, see realtime-service.ts): the
+  // GLOBAL room's delivery path (ping-only by design — a ping
+  // carries no content, so it is safe on the public channel) and
+  // the fallback for event rooms over 200 members, where the server
+  // fans out a ping instead of a full payload. A ping fetches only
+  // new rows (pollNew). Global typing arrives here too (name only).
+  // Without VITE_SUPABASE_* this is a silent no-op and polling
+  // above stays at 3s.
   useEffect(() => {
     if (!eventId || status !== 'member') return;
     const unsubscribe = subscribeToCommunity(
       eventId,
       () => {
-        load(true);
+        pollNew();
       },
       (s) => setRealtimeLive(s === 'SUBSCRIBED'),
+      (t) => {
+        if (isGlobal && t.name) showTyping(t.name);
+      },
     );
     return unsubscribe;
-  }, [eventId, status, load]);
+  }, [eventId, status, isGlobal, pollNew]);
 
+  // Auto-scroll only when already near the bottom; otherwise count
+  // the arrivals for the "New messages" pill.
   useEffect(() => {
+    if (nearBottomRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    } else {
+      setNewCount((c) => c + 1);
+    }
+  }, [messages.length, pending.length]);
+
+  function jumpToBottom() {
+    nearBottomRef.current = true;
+    setNewCount(0);
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [messages.length]);
+  }
+
+  function onListScroll() {
+    const near = isNearBottom(listRef.current);
+    nearBottomRef.current = near;
+    if (near) setNewCount(0);
+  }
+
+  function showTyping(name: string) {
+    if (!name) return;
+    setTypingNames((prev) => (prev.includes(name) ? prev : [...prev, name]));
+    const old = typingTimers.current.get(name);
+    if (old !== undefined) window.clearTimeout(old);
+    typingTimers.current.set(
+      name,
+      window.setTimeout(() => {
+        typingTimers.current.delete(name);
+        setTypingNames((prev) => prev.filter((n) => n !== name));
+      }, 3000),
+    );
+  }
+
+  // Typing indicator (throttled ~2s): the server broadcasts it to
+  // the room's members. One call per 2s of typing, not per keystroke.
+  function sendTyping() {
+    if (!currentUser?.email || status !== 'member') return;
+    const now = Date.now();
+    if (now - typingThrottle.current < 2000) return;
+    typingThrottle.current = now;
+    messagesService.sendTyping({ eventId, community: true });
+  }
+
+  // "Load older messages": one more page (50) before the oldest
+  // loaded row, prepended.
+  async function loadOlder() {
+    if (loadingOlder || !hasMore || messages.length === 0) return;
+    setLoadingOlder(true);
+    try {
+      const oldest = messages.reduce(
+        (min, m) => ((m.createdAt || '') < min ? (m.createdAt as string) : min),
+        messages[0].createdAt || '',
+      );
+      const page = await messagesService.getCommunityMessagesPage(eventId, { limit: 50, before: oldest });
+      setMessages((prev) => {
+        const ids = new Set(prev.map((m) => m.id));
+        const fresh = page.messages.filter((m) => !ids.has(m.id));
+        return [...fresh, ...prev].sort(
+          (a, b) =>
+            (a.createdAt || '').localeCompare(b.createdAt || '') ||
+            (a.id || '').localeCompare(b.id || ''),
+        );
+      });
+      setHasMore(page.hasMore);
+    } catch {
+      // Loading older is best-effort; the button stays for a retry.
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
+
+  // Marking this room read: one batched call for every message I
+  // have not seen yet (not my own, not deleted). The server appends
+  // me to readBy, so the sender's "Seen by N" updates live.
+  useEffect(() => {
+    if (status !== 'member' || !currentUser?.email) return;
+    const unread = messages.filter(
+      (m) => !m.seenByMe && m.senderEmail.toLowerCase() !== meEmail && !m.deletedForEveryone,
+    );
+    if (unread.length === 0) return;
+    const ids = unread.map((m) => m.id);
+    messagesService.markMessagesRead(ids).then(() => {
+      setMessages((prev) =>
+        prev.map((m) =>
+          ids.includes(m.id) ? { ...m, seenByMe: true, seenCount: (m.seenCount || 0) + 1 } : m,
+        ),
+      );
+    });
+  }, [status, messages, currentUser?.email, meEmail]);
 
   function startReply(m: EventMessage) {
     if (m.deletedForEveryone) return;
+    // In-flight bubbles are not on the server yet: nothing to quote
+    // there (failed ones get an inline Retry instead).
+    if ((m as ChatMessage).pending || (m as ChatMessage).failed) return;
     setReplyTo(m);
     composerRef.current?.focus();
   }
@@ -313,6 +637,13 @@ export function CommunityChat({
       read: false,
       createdAt: new Date().toISOString(),
       pending: true,
+      uploadProgress: sendingFile ? 0 : undefined,
+      localFile: sendingFile || undefined,
+      localPreview:
+        sendingFile && sendingFile.type.startsWith('image/')
+          ? URL.createObjectURL(sendingFile)
+          : undefined,
+      idempotencyKey: `community-${eventId}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
       ...(replyingTo
         ? {
             replyToId: replyingTo.id,
@@ -330,6 +661,19 @@ export function CommunityChat({
         : {}),
     };
     setPending((prev) => [...prev, temp]);
+    // My own send always scrolls into view (the scroll guard only
+    // holds back OTHER people's arrivals while reading history).
+    nearBottomRef.current = true;
+    setNewCount(0);
+    // The composer clears INSTANTLY on send tap — BEFORE the upload +
+    // POST run (they take ~3s). The text / file / reply live on in
+    // the optimistic bubble, which carries them for Retry if the send
+    // fails, so clearing early can never lose them — and the box (and
+    // the attachment chip) must never hold content that is already
+    // showing as sent.
+    setDraft('');
+    setFile(null);
+    setReplyTo(null);
     setSendError('');
     try {
       let attachmentMeta: { name: string; size: number; type: string; path: string } | undefined;
@@ -349,7 +693,11 @@ export function CommunityChat({
               fileType: sendingFile.type,
             });
         try {
-          await messagesService.uploadFile(uploadUrl, sendingFile);
+          await messagesService.uploadFile(uploadUrl, sendingFile, (f) =>
+            setPending((prev) =>
+              prev.map((p) => (p.id === temp.id ? { ...p, uploadProgress: f } : p)),
+            ),
+          );
         } catch (err) {
           throw err;
         }
@@ -361,14 +709,14 @@ export function CommunityChat({
           ? await messagesService.sendGlobalCommunityMessage({
               text,
               attachment: attachmentMeta,
-              idempotencyKey: `community-global-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+              idempotencyKey: temp.idempotencyKey,
               replyToId: replyingTo?.id,
             })
           : await messagesService.sendCommunityMessage({
               eventId,
               text,
               attachment: attachmentMeta,
-              idempotencyKey: `community-${eventId}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+              idempotencyKey: temp.idempotencyKey,
               replyToId: replyingTo?.id,
             });
       } catch (err) {
@@ -383,15 +731,93 @@ export function CommunityChat({
       }
       setPending((prev) => prev.filter((p) => p.id !== temp.id));
       setMessages((prev) => (prev.some((m) => m.id === created.id) ? prev : [...prev, created]));
-      setDraft('');
-      setFile(null);
-      setReplyTo(null);
-      // Realtime ping (id only) so every member refetches at once;
-      // polling is the fallback if this is missed.
-      broadcastToCommunity(eventId, { type: 'message', id: created.id }).catch(() => {});
+      // The server already fanned the full payload out to every
+      // member's private channel (global: ping + refetch) — no
+      // client broadcast is needed anymore.
       await load(true);
     } catch (err: any) {
+      // A failed send STAYS visible with a Retry button — it used to
+      // vanish silently, which is why attachments looked like they
+      // never delivered. The composer error line stays too.
+      setPending((prev) =>
+        prev.map((p) => (p.id === temp.id ? { ...p, pending: false, failed: true } : p)),
+      );
+      setSendError(err?.message || 'Could not send message. Please try again.');
+    }
+  }
+
+  // Retry a failed bubble: same draft, same idempotency key (the
+  // server dedupes instead of creating a second message), same file.
+  async function retrySend(temp: ChatMessage) {
+    if (!currentUser?.email) return;
+    setPending((prev) =>
+      prev.map((p) => (p.id === temp.id ? { ...p, failed: false, pending: true, uploadProgress: temp.localFile ? 0 : undefined } : p)),
+    );
+    // Same instant-clear rule as handleSend: the composer is already
+    // empty (it cleared on the first tap), but clear again so a
+    // retry can never leave a stale draft/file behind.
+    setDraft('');
+    setFile(null);
+    setReplyTo(null);
+    setSendError('');
+    try {
+      const sendingFile = temp.localFile || null;
+      let attachmentMeta: { name: string; size: number; type: string; path: string } | undefined;
+      if (sendingFile) {
+        const validationError = validateAttachment(sendingFile);
+        if (validationError) throw new Error(validationError);
+        const { uploadUrl, path } = isGlobal
+          ? await messagesService.requestGlobalCommunityUploadUrl({
+              fileName: sendingFile.name,
+              fileSize: sendingFile.size,
+              fileType: sendingFile.type,
+            })
+          : await messagesService.requestCommunityUploadUrl({
+              eventId,
+              fileName: sendingFile.name,
+              fileSize: sendingFile.size,
+              fileType: sendingFile.type,
+            });
+        await messagesService.uploadFile(uploadUrl, sendingFile, (f) =>
+          setPending((prev) =>
+            prev.map((p) => (p.id === temp.id ? { ...p, uploadProgress: f } : p)),
+          ),
+        );
+        attachmentMeta = { name: sendingFile.name, size: sendingFile.size, type: sendingFile.type, path };
+      }
+      let created: EventMessage;
+      try {
+        created = isGlobal
+          ? await messagesService.sendGlobalCommunityMessage({
+              text: temp.text || '',
+              attachment: attachmentMeta,
+              idempotencyKey: temp.idempotencyKey,
+              replyToId: temp.replyToId,
+            })
+          : await messagesService.sendCommunityMessage({
+              eventId,
+              text: temp.text || '',
+              attachment: attachmentMeta,
+              idempotencyKey: temp.idempotencyKey,
+              replyToId: temp.replyToId,
+            });
+      } catch (err) {
+        if (attachmentMeta) {
+          try {
+            await messagesService.deleteUpload(attachmentMeta.path);
+          } catch {
+            /* best effort */
+          }
+        }
+        throw err;
+      }
       setPending((prev) => prev.filter((p) => p.id !== temp.id));
+      setMessages((prev) => (prev.some((m) => m.id === created.id) ? prev : [...prev, created]));
+      await load(true);
+    } catch (err: any) {
+      setPending((prev) =>
+        prev.map((p) => (p.id === temp.id ? { ...p, pending: false, failed: true } : p)),
+      );
       setSendError(err?.message || 'Could not send message. Please try again.');
     }
   }
@@ -404,7 +830,8 @@ export function CommunityChat({
       setMessages((prev) => prev.map((x) => (x.id === m.id ? updated : x)));
       setEditingId(null);
       setEditDraft('');
-      broadcastToCommunity(eventId, { type: 'edited', id: m.id }).catch(() => {});
+      // The server broadcasts the edited payload live; the optimistic
+      // update above is already showing, so no reload is needed.
     } catch (err: any) {
       setSendError(err?.message || 'Could not edit message.');
     }
@@ -421,14 +848,32 @@ export function CommunityChat({
           x.id === target.id ? { ...x, text: '', attachment: null, deletedForEveryone: true } : x,
         ),
       );
-      broadcastToCommunity(eventId, { type: 'deleted', id: target.id }).catch(() => {});
+      // The server broadcasts the tombstone live to every member.
       await load(true);
     } catch (err: any) {
       setSendError(err?.message || 'Could not delete message.');
     }
   }
 
-  const visible = [...messages, ...pending].sort(
+  // Server messages plus in-flight ones, oldest first. A pending
+  // bubble is dropped once its server copy shows up (a poll or a
+  // Realtime event can beat the post's own response by a hair); the
+  // createdAt guard keeps a genuinely repeated message from
+  // collapsing into the first copy.
+  const visible: ChatMessage[] = [
+    ...messages,
+    ...pending.filter(
+      (p) =>
+        !messages.some(
+          (s) =>
+            s.senderEmail === p.senderEmail &&
+            (s.text || '') === (p.text || '') &&
+            (s.attachment?.name || null) === (p.attachment?.name || null) &&
+            Date.parse(s.createdAt) >= Date.parse(p.createdAt) &&
+            Date.parse(s.createdAt) - Date.parse(p.createdAt) < 30000,
+        ),
+    ),
+  ].sort(
     (a, b) => (a.createdAt || '').localeCompare(b.createdAt || '') || (a.id || '').localeCompare(b.id || ''),
   );
 
@@ -445,7 +890,17 @@ export function CommunityChat({
       </p>
 
       {status === 'loading' && (
-        <p className="text-sm text-[#5F635D]">Loading the community chat…</p>
+        <div className="space-y-3" aria-label="Loading the community chat">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="animate-pulse flex gap-2.5">
+              <div className="w-8 h-8 rounded-full bg-[#EBE7DF] shrink-0" />
+              <div className="flex-1 space-y-2">
+                <div className="h-3 w-1/4 bg-[#EBE7DF] rounded" />
+                <div className="h-3 w-3/4 bg-[#F4F1EA] rounded" />
+              </div>
+            </div>
+          ))}
+        </div>
       )}
 
       {status === 'locked' && (
@@ -479,25 +934,51 @@ export function CommunityChat({
       {status === 'member' && (
         <>
           {loadError && <p className="text-xs text-rose-600">{loadError}</p>}
-          <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
+          <div
+            ref={listRef}
+            onScroll={onListScroll}
+            className="space-y-3 max-h-[60vh] overflow-y-auto pr-1"
+          >
+            {hasMore && (
+              <div className="flex justify-center pb-1">
+                <button
+                  type="button"
+                  onClick={loadOlder}
+                  disabled={loadingOlder}
+                  className="px-3 py-1.5 text-[11px] font-semibold text-[#1E3F35] bg-[#F4F1EA] hover:bg-[#EBE7DF] border border-[#E2DFD8] rounded-full disabled:opacity-60"
+                >
+                  {loadingOlder ? 'Loading…' : 'Load older messages'}
+                </button>
+              </div>
+            )}
             {visible.length === 0 && (
               <p className="text-sm text-[#5F635D]">
                 No messages yet — say hello to your fellow attendees.
               </p>
             )}
-            {visible.map((m) => {
+            {visible.map((m, idx) => {
               const mine = m.senderEmail.toLowerCase() === meEmail;
               const deleted = m.deletedForEveryone === true;
+              const prev = idx > 0 ? visible[idx - 1] : null;
+              const showDay = !prev || dayLabel(prev.createdAt) !== dayLabel(m.createdAt);
+              const chatMsg = m as ChatMessage;
               return (
+                <React.Fragment key={m.id}>
+                  {showDay && (
+                    <div className="flex justify-center pt-1">
+                      <span className="text-[10px] font-semibold text-[#8C887E] bg-[#F4F1EA] rounded-full px-3 py-1">
+                        {dayLabel(m.createdAt)}
+                      </span>
+                    </div>
+                  )}
                 <div
-                  key={m.id}
                   ref={(el) => {
                     if (el) messageRefs.current.set(m.id, el);
                     else messageRefs.current.delete(m.id);
                   }}
                   onDoubleClick={() => startReply(m)}
                   className={`flex gap-2.5 ${highlightId === m.id ? 'bg-amber-50 rounded-lg p-1 -m-1' : ''} ${
-                    (m as ChatMessage).pending ? 'opacity-70' : ''
+                    chatMsg.pending ? 'opacity-70' : ''
                   }`}
                 >
                   <Avatar
@@ -511,9 +992,14 @@ export function CommunityChat({
                       <span className="text-xs font-bold text-[#1E2320] truncate">
                         {mine ? 'You' : m.senderName || 'Attendee'}
                       </span>
-                      <span className="text-[11px] text-[#8C887E]">{fmtTime(m.createdAt)}</span>
+                      <span className="text-[11px] text-[#8C887E]">{fmtChatTime(m.createdAt)}</span>
                       {m.edited && !deleted && (
                         <span className="text-[11px] text-[#8C887E]">edited</span>
+                      )}
+                      {mine && !deleted && !chatMsg.pending && !chatMsg.failed && (
+                        <span className="text-[11px] text-[#8C887E]">
+                          {(m.seenCount || 0) > 0 ? `✓✓ Seen by ${m.seenCount}` : '✓ Sent'}
+                        </span>
                       )}
                     </div>
                     {!deleted && <QuoteView m={m} meEmail={meEmail} onJump={jumpToQuoted} />}
@@ -551,8 +1037,12 @@ export function CommunityChat({
                         {deleted ? 'This message was deleted' : m.text || ''}
                       </p>
                     )}
-                    {!deleted && <AttachmentView m={m} />}
-                    {!deleted && (
+                    {!deleted && chatMsg.pending ? (
+                      <PendingAttachment m={chatMsg} onRetry={() => retrySend(chatMsg)} />
+                    ) : (
+                      !deleted && <AttachmentView m={m} />
+                    )}
+                    {!deleted && !chatMsg.pending && !chatMsg.failed && (
                       <div className="flex gap-3 mt-1">
                         <button
                           type="button"
@@ -587,8 +1077,20 @@ export function CommunityChat({
                     )}
                   </div>
                 </div>
+                </React.Fragment>
               );
             })}
+            {newCount > 0 && (
+              <div className="sticky bottom-2 flex justify-center">
+                <button
+                  type="button"
+                  onClick={jumpToBottom}
+                  className="px-3 py-1.5 text-[11px] font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-full shadow-lg"
+                >
+                  {newCount} new message{newCount === 1 ? '' : 's'} ↓
+                </button>
+              </div>
+            )}
             <div ref={bottomRef} />
           </div>
 
@@ -629,6 +1131,11 @@ export function CommunityChat({
                 </button>
               </div>
             )}
+            {typingNames.length > 0 && (
+              <p className="text-[11px] text-[#5F635D] italic">
+                {typingNames.join(', ')} {typingNames.length === 1 ? 'is' : 'are'} typing…
+              </p>
+            )}
             <div className="flex items-end gap-2">
               <label className="shrink-0 p-2 text-[#1E3F35] hover:bg-[#F4F1EA] rounded-lg cursor-pointer transition-colors">
                 <Paperclip className="w-4 h-4" />
@@ -636,6 +1143,7 @@ export function CommunityChat({
                 <input
                   type="file"
                   className="hidden"
+                  accept=".jpg,.jpeg,.png,.gif,.webp,.mp4,.webm,.mov,.pdf,.doc,.docx,.xls,.xlsx,.xlsm"
                   onChange={(e) => {
                     const f = e.target.files?.[0];
                     if (f) {
@@ -653,7 +1161,10 @@ export function CommunityChat({
               <textarea
                 ref={composerRef}
                 value={draft}
-                onChange={(e) => setDraft(e.target.value)}
+                onChange={(e) => {
+                  setDraft(e.target.value);
+                  sendTyping();
+                }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();

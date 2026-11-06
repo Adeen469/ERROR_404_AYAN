@@ -118,11 +118,12 @@ one exception — see the hard gate above. Do not add them yet.)
 - **Attachments** reuse the private upload-url + magic-byte path
   (`community: true` on the upload-url call). Same 20MB / type
   limits, same verification at send time.
-- **Realtime:** per-event ping channel `community:<eventId>`,
-  id-only pings (`{ type, id }`), same design as the inbox. The
-  event id is public (Discover lists it), so the channel name leaks
-  nothing new; a non-member subscriber learns only WHEN a message
-  was posted — the refetch is membership-gated. Polling is 3s while
+- **Realtime:** full-payload fan-out to every member's private
+  channel (one batched server broadcast; rooms over 200 members
+  fall back to a ping on `community:<eventId>`). The event id is
+  public (Discover lists it), so the channel name leaks nothing
+  new; a non-member subscriber learns only WHEN a message was
+  posted — the refetch is membership-gated. Polling is 3s while
   the section is open, 30s once SUBSCRIBED; without
   `VITE_SUPABASE_*` it stays polling-only (same hard gate as above).
 - **Privacy:** the chat shows sender NAMES only, never emails or
@@ -164,43 +165,60 @@ one exception — see the hard gate above. Do not add them yet.)
   within 1h (no membership to lose in the global room).
   `isOrganizer` in the global GET response is the moderator flag
   (it drives the client's delete-any buttons).
-- **Realtime:** ping channel `community:global`, id-only pings,
-  same design as the event rooms. Polling is 3s while open, 30s
+- **Realtime:** ping channel `community:global`, id-only pings —
+  ping-only BY DESIGN for the global room (fan-out to "every
+  signed-in user" is unbounded, so there is no member list to
+  derive private channels from). Polling is 3s while open, 30s
   once SUBSCRIBED; without `VITE_SUPABASE_*` it stays
   polling-only (same hard gate as above).
 - **Privacy / no email alerts:** same as event community — names
   only, never emails or phones, and no email alerts for global
   messages.
 
-## Realtime (ping-only — fixes DB-H1)
+## Realtime (full-payload private channels — fixes DB-H1, 2026-11-06)
 
-- `src/services/realtime-service.ts` broadcasts **only a content-free
-  ping** — `{ type: 'message' | 'edited' | 'deleted', id }` — on the
-  recipient's `inbox:<email>` channel after a send/edit/delete
-  succeeds. No text, sender, event, or attachment URL ever goes on
-  the channel. The recipient refetches through the session-
-  authenticated GET `/api/messages`, which enforces participant
-  checks. If a ping is missed, polling picks the message up.
-- Why a ping, not a per-user secret channel token: a token would need
-  a new Supabase table/migration plus a server-issued distribution
-  flow, and a client-minted token would be guessable/leakable the same
-  way the old channel was. The ping needs no server change and cannot
-  leak content even if a stranger subscribes to the channel.
-- **Residual risk (honest):** the channel name is still derived from
-  the email, so anyone who knows the email can subscribe and learn
-  *when* a message event happened (activity timing) plus the opaque
-  message id. The id is useless without a participant session. If
-  timing metadata ever becomes unacceptable, the fix is a
-  server-issued per-user channel token — not a client-side tweak.
-- Wiring: `MessagesPage` subscribes on mount; while SUBSCRIBED,
-  polling slows from 3s to a 30s safety net, and every ping triggers
-  an immediate silent reload. When `VITE_SUPABASE_URL` /
-  `VITE_SUPABASE_ANON_KEY` are absent, `getRealtimeClient()` returns
-  null and everything degrades silently to 3s polling.
+- Private + event-community chats now use **full-payload delivery on
+  a private channel per user**: the channel name is
+  `inbox:<hex(HMAC-SHA256(SESSION_SECRET, "locora-inbox:" + email))>`,
+  computed server-side (`privateChannelName` in `api/messages.ts`);
+  the client learns ONLY its own channel from GET
+  `/api/messages?action=channel`. A client never learns another
+  user's channel, so it cannot subscribe to anyone else's live
+  messages — no new table, no token distribution. The server
+  broadcasts the full message over Supabase Realtime's REST endpoint
+  (POST `/realtime/v1/api/broadcast`, service-role key) after storing
+  the row: private messages to the recipient's + sender's channels,
+  event-community messages fanned out to every member's channel in
+  one batched call (rooms over 200 members fall back to a ping).
+  The receiver renders the payload immediately — no refetch.
+  Payloads carry NAMES only (see `buildRealtimePayload`): no emails
+  or phones, reply snapshots drop their senderEmail, readBy collapses
+  to seenCount.
+- **Global room stays ping-only** on the public `community:global`
+  channel (a ping carries no content): fan-out to "every signed-in
+  user" is unbounded, so there is no member list to derive channels
+  from. Global delivery is ping + fast refetch via the paginated GET.
+- Typing indicators are ephemeral broadcasts on the same private
+  channels (name only); global typing is a name-only ping on
+  `community:global`. Read receipts broadcast `{type:'read', id}` to
+  the sender's channel (private) or update seenCount (community).
+- The old ping-only layer (`broadcastPing`, `subscribeToInbox`,
+  `subscribeToCommunity`, `broadcastToInbox`,
+  `broadcastToCommunity`) is KEPT for the global room + fallback.
+  If a full-payload event is missed, polling picks the message up.
+- Wiring: pages subscribe on mount; while SUBSCRIBED, polling slows
+  from 3s to a 30s safety net, and polls fetch only rows newer than
+  the newest loaded (`since`) — the first page is the newest 50,
+  "Load older messages" pages backwards (`before`). When
+  `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` are absent,
+  `getRealtimeClient()` returns null and everything degrades
+  silently to 3s polling.
 - Old design (DO NOT restore): broadcasting the full message object
   on `inbox:<email>` let anyone who knew an email read that inbox
-  live. `broadcastToInbox` now builds its payload from the id alone
-  and drops any `message` property a caller passes.
+  live. The new channel name is unguessable without SESSION_SECRET;
+  if the secret ever rotates, all channel names change at once and
+  clients re-learn theirs from `?action=channel` (polling covers
+  the gap).
 
 ## How it works
 

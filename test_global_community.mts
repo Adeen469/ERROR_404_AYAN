@@ -114,7 +114,7 @@ check("leak: private inbox client filters community rows too",
 
 // --- Global send / upload skip the registration check ---
 check("global send: skips the registration check",
-  messages.includes("if (!isGlobalSend)"));
+  messages.includes("if (!isGlobalSend && !isCommunityMember(event, sender, regs))"));
 check("global send: stand-in event row instead of 404",
   messages.includes('? { id: GLOBAL_EVENT_ID, title: "Community" }'));
 check("global upload: skips the registration check",
@@ -171,8 +171,8 @@ check("component: mode prop exists (event | global)",
   chat.includes("mode?: 'event' | 'global'"));
 check("component: global mode renders its own subtitle",
   chat.includes("Chat with everyone on Locora"));
-check("component: global mode loads via the global wrapper",
-  chat.includes("getGlobalCommunityMessages()"));
+check("component: global mode loads via the paged loader (2026-11-06: getGlobalCommunityMessages kept for compat, load uses the paged GET)",
+  chat.includes("getCommunityMessagesPage(eventId, { limit: 50 })"));
 check("component: global mode sends via the global wrapper",
   chat.includes("sendGlobalCommunityMessage("));
 check("component: global mode never shows the event register hint",

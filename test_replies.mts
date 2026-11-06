@@ -134,11 +134,13 @@ check("realtime: client null without VITE vars",
 check("realtime: DB-H1 fix documented",
   realtime.includes("DB-H1") && realtime.includes("content-free"));
 
-// --- MessagesPage wiring ---
-check("page: subscribes to inbox pings",
-  page.includes("subscribeToInbox("));
-check("page: broadcasts after send/edit/delete",
-  (page.match(/broadcastToInbox|notifyOther\(/g) || []).length >= 3);
+// --- MessagesPage wiring (updated 2026-11-06: full-payload
+// private channels replace inbox pings — see test_chat_realtime.mts) ---
+check("page: subscribes to its private channel",
+  page.includes("subscribeToPrivateChannel(") && page.includes("getRealtimeChannel()"));
+check("page: no client broadcast after send/edit/delete (server fans out)",
+  !page.includes("broadcastToInbox(") && !page.includes("notifyOther(") &&
+  messages.includes("broadcastRealtimeSoon"));
 check("page: polling slows to 30s when Realtime is live",
   page.includes("realtimeLive ? 30000 : 3000"));
 check("page: swipe-to-reply handler present",

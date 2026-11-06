@@ -19,10 +19,19 @@ import {
   messagesService,
   groupThreads,
   threadKey,
+  threadKeyHash,
   validateAttachment,
   formatFileSize,
+  dayLabel,
+  fmtChatTime,
+  isNearBottom,
+  reconcileFailedPending,
 } from '../services/messages-service';
-import { subscribeToInbox, broadcastToInbox } from '../services/realtime-service';
+import {
+  subscribeToPrivateChannel,
+  type RealtimeFullEvent,
+  type RealtimeMessage,
+} from '../services/realtime-service';
 
 function fmtTime(iso: string): string {
   if (!iso) return '';
@@ -55,6 +64,8 @@ type ChatMessage = EventMessage & {
   failed?: boolean;
   localFile?: File;
   localPreview?: string;
+  // 0..1 while the attachment Storage PUT is running (XHR progress).
+  uploadProgress?: number;
   // Stable per draft: retries reuse it so the server dedupes instead
   // of creating a second message.
   idempotencyKey?: string;
@@ -198,13 +209,33 @@ export function MessagesPage() {
   const pollInFlight = useRef(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   // Reply state: the message being quoted in the composer. The quote
-  // bar above the composer shows it; handleSend clears it on success.
+  // bar above the composer shows it; handleSend clears it instantly
+  // on send tap (see below).
   const [replyTo, setReplyTo] = useState<EventMessage | null>(null);
   // Quote jump: the message id to highlight after jumpToQuoted.
   const [highlightId, setHighlightId] = useState<string | null>(null);
   // Realtime: true once the ping channel is SUBSCRIBED — polling then
   // drops to a 30s safety net (see the polling effect below).
   const [realtimeLive, setRealtimeLive] = useState(false);
+  // Typing indicator from the other side of the open thread.
+  const [typing, setTyping] = useState<{ name: string; threadKey: string } | null>(null);
+  const typingTimer = useRef<number | null>(null);
+  const typingThrottle = useRef(0);
+  // Pagination: the first page is the newest 50; "Load older" pages
+  // backwards. Polls fetch only rows newer than the newest loaded.
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  // Scroll guard: auto-scroll only when already near the bottom;
+  // otherwise a "New messages" pill appears instead of yanking the
+  // reader away from older history.
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const nearBottomRef = useRef(true);
+  const [newCount, setNewCount] = useState(0);
+  const messagesRef = useRef<EventMessage[]>([]);
+  messagesRef.current = messages;
+  const pendingRef = useRef<ChatMessage[]>([]);
+  pendingRef.current = pending;
+  const pollCountRef = useRef(0);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   // Bubble elements by message id, for quote jumps (jumpToQuoted).
   const messageRefs = useRef(new Map<string, HTMLDivElement>());
@@ -221,13 +252,33 @@ export function MessagesPage() {
   // deliberately ignored, so an organiser email can never leak via URL.
   const queryTo = searchParams.get('to') || '';
 
+  // Drop failed bubbles whose real copy has since arrived (see
+  // reconcileFailedPending in messages-service.ts): a send can be
+  // stored while its response is lost, leaving a failed bubble next
+  // to the real message. When the last failed bubble goes, the red
+  // composer error line goes with it.
+  const reconcilePending = useCallback(
+    (serverRows: EventMessage[]) => {
+      const next = reconcileFailedPending(pendingRef.current, serverRows, meEmail);
+      if (next.length !== pendingRef.current.length) {
+        setPending(next);
+        if (!next.some((p) => p.failed)) setSendError('');
+      }
+    },
+    [meEmail],
+  );
+
+  // First page (newest 50) or a manual reload. Polls use pollNew
+  // below instead — a reload here replaces the whole list.
   const loadMessages = useCallback(
     async (silent = false) => {
       if (!currentUser?.email) return;
       if (!silent) setLoading(true);
       try {
-        const list = await messagesService.getMessages(currentUser.email);
-        setMessages(list);
+        const page = await messagesService.getMessagesPage({ limit: 50 });
+        setMessages(page.messages);
+        reconcilePending(page.messages);
+        setHasMore(page.hasMore);
         setLoadError('');
       } catch (err: any) {
         // Silent polls must never raise the red banner: a transient
@@ -238,45 +289,171 @@ export function MessagesPage() {
         if (!silent) setLoading(false);
       }
     },
-    [currentUser?.email],
+    [currentUser?.email, reconcilePending],
   );
+
+  // Poll tick: fetch only rows newer than the newest loaded one and
+  // merge them (dedupe by id). Every 10th tick does a full paged
+  // reload instead, so edits / deletes / read flags from the other
+  // side still arrive when Realtime is off.
+  const pollNew = useCallback(async () => {
+    if (!currentUser?.email) return;
+    pollCountRef.current += 1;
+    if (pollCountRef.current % 10 === 0) {
+      await loadMessages(true);
+      return;
+    }
+    const loaded = messagesRef.current;
+    if (loaded.length === 0) {
+      await loadMessages(true);
+      return;
+    }
+    const since = loaded.reduce(
+      (max, m) => ((m.createdAt || '') > max ? (m.createdAt as string) : max),
+      '',
+    );
+    try {
+      const page = await messagesService.getMessagesPage({ since });
+      if (page.messages.length > 0) {
+        setMessages((prev) => {
+          const ids = new Set(prev.map((m) => m.id));
+          const fresh = page.messages.filter((m) => !ids.has(m.id));
+          if (fresh.length === 0) return prev;
+          return [...prev, ...fresh].sort(
+            (a, b) =>
+              (a.createdAt || '').localeCompare(b.createdAt || '') ||
+              (a.id || '').localeCompare(b.id || ''),
+          );
+        });
+        reconcilePending(page.messages);
+      }
+    } catch {
+      // Silent poll failure: keep the last loaded list on screen.
+    }
+  }, [currentUser?.email, loadMessages, reconcilePending]);
 
   useEffect(() => {
     loadMessages();
     // Poll interval depends on Realtime: 3s while polling is the only
-    // delivery path, 30s safety net once the ping channel is live
-    // (pings trigger an immediate silent reload — see the subscribe
-    // effect below). Each poll costs one ~2s server call, so polling
-    // faster than this would mostly overlap requests without fresher
-    // data — the in-flight guard skips a tick when the previous poll
-    // is still running.
+    // delivery path, 30s safety net once the private channel is live
+    // (full-payload events render immediately — see the subscribe
+    // effect below). Each poll now fetches only new rows (pollNew),
+    // not the whole history.
     const intervalMs = realtimeLive ? 30000 : 3000;
     const timer = setInterval(() => {
       if (pollInFlight.current) return;
       pollInFlight.current = true;
-      loadMessages(true).finally(() => {
+      pollNew().finally(() => {
         pollInFlight.current = false;
       });
     }, intervalMs);
     return () => clearInterval(timer);
-  }, [loadMessages, realtimeLive]);
+  }, [loadMessages, pollNew, realtimeLive]);
 
-  // Realtime pings (content-free, see realtime-service.ts): a ping
-  // means "something changed for this inbox" — refetch via the
-  // session-authenticated API. Never trust a ping as data. When the
-  // client is null (VITE_SUPABASE_* not set) subscribeToInbox is a
+  // Apply one full-payload Realtime event to the local list (no
+  // refetch). The payload carries no emails (names only), so a
+  // message is filed into its thread via threadKey + a known
+  // message from that thread (which supplies the emails). A
+  // message for a thread we have never loaded falls back to a
+  // paged reload, which creates the thread properly.
+  const applyRealtimeMessage = useCallback(
+    (data: RealtimeMessage) => {
+      const key = data.threadKey || '';
+      const known = key
+        ? messagesRef.current.find((m) => threadKeyHash(m.eventId, m.senderEmail, m.recipientEmail) === key)
+        : undefined;
+      if (!known) {
+        // New thread (or a message we cannot file): reload the page.
+        loadMessages(true);
+        return;
+      }
+      const otherEmail =
+        known.senderEmail.toLowerCase() === meEmail ? known.recipientEmail : known.senderEmail;
+      // The quote's sender is whoever wrote the quoted message, not
+      // necessarily this message's sender — look it up when loaded.
+      const quoted = data.replyToId
+        ? messagesRef.current.find((m) => m.id === data.replyToId)
+        : undefined;
+      const merged: EventMessage = {
+        ...known,
+        id: data.id,
+        eventId: data.eventId,
+        eventTitle: data.eventTitle || known.eventTitle,
+        senderEmail: data.own ? meEmail : otherEmail,
+        senderName: data.senderName,
+        recipientEmail: data.own ? otherEmail : meEmail,
+        recipientName: known.recipientName,
+        text: data.text,
+        attachment: data.attachment,
+        read: data.read,
+        edited: data.edited,
+        editedAt: data.editedAt,
+        deletedForEveryone: data.deletedForEveryone,
+        deletedAt: data.deletedAt,
+        replyToId: data.replyToId,
+        replySnapshot: data.replySnapshot
+          ? {
+              ...data.replySnapshot,
+              senderEmail: quoted
+                ? quoted.senderEmail
+                : data.own
+                  ? meEmail
+                  : otherEmail,
+            }
+          : undefined,
+        createdAt: data.createdAt,
+        type: data.type,
+      };
+      setMessages((prev) => {
+        const idx = prev.findIndex((m) => m.id === merged.id);
+        if (idx >= 0) {
+          const next = [...prev];
+          next[idx] = { ...prev[idx], ...merged };
+          return next;
+        }
+        return [...prev, merged];
+      });
+      // A live copy of my own message means the send DID store even
+      // if its POST response was lost — drop the failed bubble.
+      reconcilePending([merged]);
+    },
+    [meEmail, loadMessages, reconcilePending],
+  );
+
+  // Realtime on my PRIVATE channel (full payload, see
+  // realtime-service.ts): messages render the moment they arrive,
+  // with no refetch. Read receipts flip ✓ to ✓✓ live. Typing shows
+  // in the open thread only. Without VITE_SUPABASE_* this is a
   // silent no-op and polling above stays at 3s.
   useEffect(() => {
     if (!meEmail) return;
-    const unsubscribe = subscribeToInbox(
-      meEmail,
-      () => {
-        loadMessages(true);
-      },
-      (status) => setRealtimeLive(status === 'SUBSCRIBED'),
-    );
-    return unsubscribe;
-  }, [meEmail, loadMessages]);
+    let unsubscribe = () => {};
+    let cancelled = false;
+    messagesService.getRealtimeChannel().then((channel) => {
+      if (cancelled || !channel) return;
+      unsubscribe = subscribeToPrivateChannel(
+        channel,
+        (ev: RealtimeFullEvent) => {
+          if (ev.type === 'message' || ev.type === 'edited' || ev.type === 'deleted') {
+            applyRealtimeMessage(ev.data);
+          } else if (ev.type === 'read') {
+            setMessages((prev) => prev.map((m) => (m.id === ev.id ? { ...m, read: true } : m)));
+          } else if (ev.type === 'typing') {
+            if (!ev.threadKey) return;
+            setTyping({ name: ev.name, threadKey: ev.threadKey });
+            if (typingTimer.current !== null) window.clearTimeout(typingTimer.current);
+            typingTimer.current = window.setTimeout(() => setTyping(null), 3000);
+          }
+        },
+        (status) => setRealtimeLive(status === 'SUBSCRIBED'),
+      );
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+      if (typingTimer.current !== null) window.clearTimeout(typingTimer.current);
+    };
+  }, [meEmail, applyRealtimeMessage]);
 
   // Leaving the page inside an undo window must not resurrect a
   // confirmed delete: flush any still-pending deletes immediately.
@@ -400,17 +577,22 @@ export function MessagesPage() {
     !!menuMessage.text &&
     Date.now() - Date.parse(menuMessage.createdAt || '') < 60 * 60 * 1000;
 
-  // Opening a thread marks its unread messages (addressed to me) read.
+  // Opening a thread marks its unread messages (addressed to me)
+  // read — one batched call, then a local flag flip (no reload:
+  // the server broadcasts the receipt to the sender live).
   useEffect(() => {
     if (!selected || !currentUser?.email) return;
     const unread = selected.messages.filter(
       (m) => m.recipientEmail.toLowerCase() === meEmail && !m.read,
     );
     if (unread.length === 0) return;
-    Promise.all(unread.map((m) => messagesService.markAsRead(m.id, currentUser.email))).then(
-      () => loadMessages(true),
-    );
-  }, [selectedKey, messages, currentUser?.email, meEmail, loadMessages]);
+    const ids = unread.map((m) => m.id);
+    messagesService.markMessagesRead(ids).then(() => {
+      setMessages((prev) =>
+        prev.map((m) => (ids.includes(m.id) ? { ...m, read: true } : m)),
+      );
+    });
+  }, [selectedKey, messages, currentUser?.email, meEmail]);
 
   // Deep-link repair: the event page opens a dead pending key
   // (`<eventId>|organizer`) when no thread exists yet. As soon as the
@@ -448,9 +630,64 @@ export function MessagesPage() {
     }
   }, [draft, selectedKey]);
 
+  // Auto-scroll only when already near the bottom; otherwise count
+  // the arrivals for the "New messages" pill instead of yanking the
+  // reader away from older history.
   useEffect(() => {
+    if (nearBottomRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    } else {
+      setNewCount((c) => c + 1);
+    }
+  }, [visibleMessages.length]);
+
+  // Switching threads always lands at the bottom, pill cleared.
+  useEffect(() => {
+    nearBottomRef.current = true;
+    setNewCount(0);
+    bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
+  }, [selectedKey]);
+
+  function jumpToBottom() {
+    nearBottomRef.current = true;
+    setNewCount(0);
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [visibleMessages.length, selectedKey]);
+  }
+
+  function onListScroll() {
+    const near = isNearBottom(listRef.current);
+    nearBottomRef.current = near;
+    if (near) setNewCount(0);
+  }
+
+  // "Load older messages": one more page (50) before the oldest
+  // loaded row, prepended. The scroll position stays roughly where
+  // it was (the list grows upwards, the reader keeps reading).
+  async function loadOlder() {
+    if (loadingOlder || !hasMore || messages.length === 0) return;
+    setLoadingOlder(true);
+    try {
+      const oldest = messages.reduce(
+        (min, m) => ((m.createdAt || '') < min ? (m.createdAt as string) : min),
+        messages[0].createdAt || '',
+      );
+      const page = await messagesService.getMessagesPage({ limit: 50, before: oldest });
+      setMessages((prev) => {
+        const ids = new Set(prev.map((m) => m.id));
+        const fresh = page.messages.filter((m) => !ids.has(m.id));
+        return [...fresh, ...prev].sort(
+          (a, b) =>
+            (a.createdAt || '').localeCompare(b.createdAt || '') ||
+            (a.id || '').localeCompare(b.id || ''),
+        );
+      });
+      setHasMore(page.hasMore);
+    } catch {
+      // Loading older is best-effort; the button stays for a retry.
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
 
   function selectThread(key: string) {
     setSelectedKey(key);
@@ -459,18 +696,19 @@ export function MessagesPage() {
   }
 
   // ---- Replies ----
-  // The other participant of a message, for Realtime pings after a
-  // send/edit/delete. A ping carries only the message id (see
-  // realtime-service.ts) — the recipient refetches the real message
-  // through the session-authenticated API.
-  function otherEmailFor(m: EventMessage): string {
-    return m.senderEmail.toLowerCase() === meEmail ? m.recipientEmail : m.senderEmail;
-  }
-
-  function notifyOther(m: EventMessage, type: 'message' | 'edited' | 'deleted'): void {
-    const other = otherEmailFor(m);
-    if (!other) return;
-    broadcastToInbox(other, { type, id: m.id }).catch(() => {});
+  // Typing indicator (throttled ~2s): the server broadcasts it to
+  // the other side's private channel. Sending it on every keystroke
+  // would spam the endpoint; the throttle keeps it to one call
+  // per 2s of typing.
+  function sendTyping() {
+    if (!selected?.otherEmail || !currentUser?.email) return;
+    const now = Date.now();
+    if (now - typingThrottle.current < 2000) return;
+    typingThrottle.current = now;
+    messagesService.sendTyping({
+      eventId: selected.eventId,
+      recipientEmail: selected.otherEmail,
+    });
   }
 
   function startReply(m: EventMessage) {
@@ -496,11 +734,19 @@ export function MessagesPage() {
       return true;
     };
     if (highlight(messageRefs.current.get(id))) return;
-    loadMessages(true).finally(() => {
-      window.setTimeout(() => {
-        highlight(messageRefs.current.get(id));
-      }, 300);
-    });
+    // The quote may be older than the loaded page: fetch the full
+    // list once (rare path) and retry the jump.
+    if (!currentUser?.email) return;
+    messagesService
+      .getMessages(currentUser.email)
+      .then((list) => {
+        setMessages(list);
+        setHasMore(false);
+        window.setTimeout(() => {
+          highlight(messageRefs.current.get(id));
+        }, 300);
+      })
+      .catch(() => {});
   }
 
   // Block state is per-session: the server does not expose blocks on
@@ -541,6 +787,8 @@ export function MessagesPage() {
     file?: File | null;
     idempotencyKey?: string;
     replyToId?: string;
+    // Upload progress (0..1) for the pending bubble's progress bar.
+    onProgress?: (fraction: number) => void;
   }): Promise<EventMessage> {
     if (!currentUser?.email) throw new Error('Sign in to send messages.');
     let attachmentMeta: { name: string; size: number; type: string; path: string } | undefined;
@@ -557,7 +805,7 @@ export function MessagesPage() {
         fileType: input.file.type,
       });
       try {
-        await messagesService.uploadFile(uploadUrl, input.file);
+        await messagesService.uploadFile(uploadUrl, input.file, input.onProgress);
       } catch (err) {
         // Upload itself failed: nothing was stored, nothing to clean.
         throw err;
@@ -620,6 +868,7 @@ export function MessagesPage() {
       createdAt: new Date().toISOString(),
       threadKey: selected.key,
       pending: true,
+      uploadProgress: sendingFile ? 0 : undefined,
       localFile: sendingFile || undefined,
       localPreview:
         sendingFile && sendingFile.type.startsWith('image/')
@@ -646,9 +895,18 @@ export function MessagesPage() {
         : {}),
     };
     setPending((prev) => [...prev, temp]);
-    // The draft is cleared only on success now: clearing it before the
-    // send completed meant a failed send lost the text, and a retry
-    // could duplicate it. The idempotency key covers the retry.
+    // My own send always scrolls into view (the scroll guard only
+    // holds back OTHER people's arrivals while reading history).
+    nearBottomRef.current = true;
+    setNewCount(0);
+    // The composer clears INSTANTLY on send tap — BEFORE the POST
+    // runs (it takes ~3s). The text / file / reply live on in the
+    // optimistic bubble, which carries them for Retry if the send
+    // fails, so clearing early can never lose them — and the box
+    // must never hold text that is already showing as sent.
+    setDraft('');
+    setFile(null);
+    setReplyTo(null);
     setSendError('');
     try {
       const created = await deliver({
@@ -659,6 +917,10 @@ export function MessagesPage() {
         file: sendingFile,
         idempotencyKey: temp.idempotencyKey,
         replyToId: replyingTo?.id,
+        onProgress: (f) =>
+          setPending((prev) =>
+            prev.map((p) => (p.id === temp.id ? { ...p, uploadProgress: f } : p)),
+          ),
       });
       setPending((prev) => prev.filter((p) => p.id !== temp.id));
       // Dedupe by id: the 3s poll can already have fetched this very
@@ -666,17 +928,12 @@ export function MessagesPage() {
       // blindly showed it twice until the next poll.
       setMessages((prev) => (prev.some((m) => m.id === created.id) ? prev : [...prev, created]));
       setPendingThread(null);
-      setDraft('');
-      setFile(null);
-      setReplyTo(null);
-      // Realtime ping (id only) so the recipient's inbox refetches
-      // immediately; polling is the fallback if this is missed.
-      notifyOther(created, 'message');
+      // The server already broadcast the full payload to the other
+      // side's private channel — no client ping is needed anymore.
       // Switch to the real thread key at once (the deep-link effect
       // also does this on the next poll, but waiting for it left the
       // pane blank after the first send).
       setSelectedKey(threadKey(created.eventId, created.senderEmail, created.recipientEmail));
-      await loadMessages(true);
     } catch (err: any) {
       setPending((prev) =>
         prev.map((p) => (p.id === temp.id ? { ...p, pending: false, failed: true } : p)),
@@ -690,6 +947,12 @@ export function MessagesPage() {
     setPending((prev) =>
       prev.map((p) => (p.id === temp.id ? { ...p, failed: false, pending: true } : p)),
     );
+    // Same instant-clear rule as handleSend: the composer is already
+    // empty (it cleared on the first tap), but clear again so a
+    // retry can never leave a stale draft/file behind.
+    setDraft('');
+    setFile(null);
+    setReplyTo(null);
     setSendError('');
     try {
       const created = await deliver({
@@ -699,15 +962,14 @@ export function MessagesPage() {
         file: temp.localFile || null,
         idempotencyKey: temp.idempotencyKey,
         replyToId: temp.replyToId,
+        onProgress: (f) =>
+          setPending((prev) =>
+            prev.map((p) => (p.id === temp.id ? { ...p, uploadProgress: f } : p)),
+          ),
       });
       setPending((prev) => prev.filter((p) => p.id !== temp.id));
       setMessages((prev) => (prev.some((m) => m.id === created.id) ? prev : [...prev, created]));
-      setDraft('');
-      setFile(null);
-      setReplyTo(null);
-      notifyOther(created, 'message');
       setSelectedKey(threadKey(created.eventId, created.senderEmail, created.recipientEmail));
-      await loadMessages(true);
     } catch (err: any) {
       setPending((prev) =>
         prev.map((p) => (p.id === temp.id ? { ...p, pending: false, failed: true } : p)),
@@ -803,13 +1065,10 @@ export function MessagesPage() {
         } else {
           await messagesService.hideMessage(message.id, meEmail);
         }
-        // Remove locally at once; the reload below is just consistency.
+        // Remove locally at once; the other side gets the tombstone
+        // live via the server broadcast — no reload needed.
         setMessages((prev) => prev.filter((m) => m.id !== message.id));
-        // Delete-for-everyone also tombstones the other side's copy:
-        // ping them (id only) so their inbox refetches at once.
-        // Delete-for-me is local only and needs no ping.
-        if (scope === 'everyone') notifyOther(message, 'deleted');
-        await loadMessages(true);
+        // Delete-for-me is local only and needs no broadcast.
       } catch (err: any) {
         // Server delete failed: the filter drops below, so the message
         // comes back and the failure is shown — never a silent
@@ -851,8 +1110,8 @@ export function MessagesPage() {
     setEditDraft('');
     try {
       await messagesService.editMessage(id, currentUser.email, text);
-      if (original) notifyOther(original, 'edited');
-      await loadMessages(true);
+      // The server broadcasts the edited payload live; the optimistic
+      // text above is already showing, so no reload is needed.
     } catch (err: any) {
       if (original) {
         setMessages((prev) => prev.map((m) => (m.id === id ? original : m)));
@@ -909,7 +1168,14 @@ export function MessagesPage() {
           }`}
         >
           {loading ? (
-            <p className="p-6 text-xs text-[#5F635D]">Loading conversations…</p>
+            <div className="p-4 space-y-3" aria-label="Loading conversations">
+              {[0, 1, 2].map((i) => (
+                <div key={i} className="animate-pulse space-y-2">
+                  <div className="h-3 w-2/3 bg-[#EBE7DF] rounded" />
+                  <div className="h-2.5 w-1/2 bg-[#F4F1EA] rounded" />
+                </div>
+              ))}
+            </div>
           ) : allThreads.length === 0 ? (
             <div className="p-6 text-center space-y-2">
               <p className="text-xs font-semibold text-[#1E2320]">No messages yet</p>
@@ -995,17 +1261,43 @@ export function MessagesPage() {
                 )}
               </div>
 
-              <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-[300px] max-h-[60vh]">
+              <div
+                ref={listRef}
+                onScroll={onListScroll}
+                className="flex-1 overflow-y-auto p-4 space-y-3 min-h-[300px] max-h-[60vh]"
+              >
+                {hasMore && (
+                  <div className="flex justify-center pb-1">
+                    <button
+                      type="button"
+                      onClick={loadOlder}
+                      disabled={loadingOlder}
+                      className="px-3 py-1.5 text-[11px] font-semibold text-[#1E3F35] bg-[#F4F1EA] hover:bg-[#EBE7DF] border border-[#E2DFD8] rounded-full disabled:opacity-60"
+                    >
+                      {loadingOlder ? 'Loading…' : 'Load older messages'}
+                    </button>
+                  </div>
+                )}
                 {visibleMessages.length === 0 ? (
                   <p className="text-xs text-[#5F635D] text-center pt-8">
                     No messages yet. Say hello — the organizer will get an email alert.
                   </p>
                 ) : (
-                  visibleMessages.map((m) => {
+                  visibleMessages.map((m, idx) => {
                     const mine = m.senderEmail.toLowerCase() === meEmail;
                     const isEditing = editingId === m.id;
+                    const prev = idx > 0 ? visibleMessages[idx - 1] : null;
+                    const showDay = !prev || dayLabel(prev.createdAt) !== dayLabel(m.createdAt);
                     return (
-                      <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
+                      <React.Fragment key={m.id}>
+                        {showDay && (
+                          <div className="flex justify-center pt-1">
+                            <span className="text-[10px] font-semibold text-[#8C887E] bg-[#F4F1EA] rounded-full px-3 py-1">
+                              {dayLabel(m.createdAt)}
+                            </span>
+                          </div>
+                        )}
+                      <div className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
                         <div
                           ref={(el) => {
                             if (el) messageRefs.current.set(m.id, el);
@@ -1079,9 +1371,25 @@ export function MessagesPage() {
                               ) : (
                                 <AttachmentView m={m} />
                               )}
+                              {m.pending && typeof m.uploadProgress === 'number' && m.uploadProgress < 1 && (
+                                <span className="block">
+                                  <span className="block h-1 bg-white/20 rounded-full overflow-hidden">
+                                    <span
+                                      className="block h-full bg-white/80 rounded-full"
+                                      style={{ width: `${Math.round(m.uploadProgress * 100)}%` }}
+                                    />
+                                  </span>
+                                  <span className="text-[10px] opacity-80">
+                                    Uploading… {Math.round(m.uploadProgress * 100)}%
+                                  </span>
+                                </span>
+                              )}
                               <p className={`text-[10px] ${mine ? 'text-white/70' : 'text-[#8C887E]'}`}>
-                                {fmtTime(m.createdAt)}
+                                {fmtChatTime(m.createdAt)}
                                 {m.edited ? ' · edited' : ''}
+                                {mine && !m.pending && !m.failed && (
+                                  <span> · {m.read ? '✓✓ Seen' : '✓ Sent'}</span>
+                                )}
                               </p>
                               {m.failed && (
                                 <span className="flex items-center gap-2">
@@ -1099,13 +1407,28 @@ export function MessagesPage() {
                           )}
                         </div>
                       </div>
+                      </React.Fragment>
                     );
                   })
+                )}
+                {newCount > 0 && (
+                  <div className="sticky bottom-2 flex justify-center">
+                    <button
+                      type="button"
+                      onClick={jumpToBottom}
+                      className="px-3 py-1.5 text-[11px] font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-full shadow-lg"
+                    >
+                      {newCount} new message{newCount === 1 ? '' : 's'} ↓
+                    </button>
+                  </div>
                 )}
                 <div ref={bottomRef} />
               </div>
 
               <div className="p-3 border-t border-[#EBE7DF] space-y-2">
+                {typing && typing.threadKey === selected.key && (
+                  <p className="text-[11px] text-[#5F635D] italic">{typing.name} is typing…</p>
+                )}
                 {/* Reply quote bar (WhatsApp-style): shows the message
                     being quoted, X cancels it. Cleared on send, on
                     thread switch, and when the quoted message is gone. */}
@@ -1175,7 +1498,10 @@ export function MessagesPage() {
                   <textarea
                     ref={composerRef}
                     value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
+                    onChange={(e) => {
+                      setDraft(e.target.value);
+                      sendTyping();
+                    }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();

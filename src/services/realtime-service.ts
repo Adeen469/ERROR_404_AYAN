@@ -1,49 +1,72 @@
-// Instant inbox delivery over Supabase Realtime broadcast channels.
+// Instant chat delivery over Supabase Realtime broadcast channels.
 //
-// DESIGN (rebuilt 2026-11-05 — fixes DB-H1, the old design's leak):
+// DESIGN (2026-11-06 — full-payload private channels; supersedes the
+// 2026-11-05 ping-only design for private + event-community chats):
 //
-// The OLD design broadcast the FULL message (text, sender, event,
-// attachment URL) on a channel named `inbox:<email>`. That channel
-// name is predictable from the email alone, so anyone who knew an
-// email could subscribe and read that person's messages live —
-// Supabase broadcast channels have no per-user auth by default, and
-// the anon key is public by design. That design is NOT shipped.
+// The OLD ping-only design broadcast ONLY {type, id} on guessable
+// channels (`inbox:<email>`, `community:<eventId>`). It fixed audit
+// finding DB-H1 (no message content on a channel anyone could join),
+// but a ping still forced a ~2s refetch, so delivery was never
+// instant — and the send path itself took ~2-4s. The ping layer is
+// KEPT below (broadcastPing / subscribeToInbox / subscribeToCommunity
+// / broadcastToInbox / broadcastToCommunity) for the GLOBAL room,
+// which has no bounded member list to fan out to.
 //
-// The NEW design broadcasts ONLY a content-free ping:
+// The NEW design broadcasts the FULL message payload — but only on
+// a PRIVATE channel per user:
 //
-//   { type: 'message' | 'edited' | 'deleted', id: '<message id>' }
+//   channel = "inbox:" + hex(HMAC-SHA256(SESSION_SECRET,
+//       "locora-inbox:" + lowercase(email)))
 //
-// No text, no sender, no event, no attachment name or URL, no names.
-// The recipient's inbox treats a ping as "something changed, refetch
-// now" and loads the real message through the normal session-
-// authenticated GET /api/messages, which enforces participant checks
-// server-side. Broadcast is speed, never the only path: if a ping is
-// missed (offline, Realtime not configured, send failure), the
-// regular poll still picks the message up.
+// The HMAC is computed SERVER-side (api/messages.ts
+// privateChannelName). The client learns ONLY ITS OWN channel name
+// from GET /api/messages?action=channel (session-authenticated) via
+// messagesService.getRealtimeChannel(). A client never learns
+// another user's channel name, so it cannot subscribe to anyone
+// else's live messages — the DB-H1 leak stays fixed, with no new
+// table and no token distribution. If SESSION_SECRET ever rotates,
+// every channel name changes at once (old subscribers just stop
+// receiving — polling is the fallback).
 //
-// Why a ping and not a per-user unguessable channel token? A token
-// channel would need the server to issue and store a 128-bit token
-// per user — a new table/migration plus a token-distribution flow —
-// and a token minted client-side would be guessable or leakable in
-// exactly the way the old channel was. The ping needs no server
-// change, no new table, and no token distribution, and it cannot leak
-// message content even if the channel is subscribed by a stranger.
+// The server broadcasts over Supabase Realtime's REST endpoint
+// (POST /realtime/v1/api/broadcast, service-role key) AFTER storing
+// the row: private messages to the recipient's + sender's channels,
+// event-community messages fanned out to every member's channel in
+// ONE batched REST call (rooms over 200 members fall back to a ping
+// on the public community channel). The receiver renders the payload
+// IMMEDIATELY — no refetch. Polling stays as fallback (3s while
+// Realtime is down, 30s safety net while SUBSCRIBED).
 //
-// RESIDUAL RISK (honest): the channel name is still
-// `inbox:<email>`, so anyone who knows the email can subscribe and
-// learn WHEN a message event happened for that inbox (activity
-// timing) and the opaque message id. The id is useless on its own:
-// the message API requires a valid locora_session for a participant,
-// and the id reveals no content. If even timing metadata is
-// unacceptable later, the fix is a server-issued per-user channel
-// token (new table + endpoint) — not a client-side tweak.
+// Payloads carry NAMES only — never emails or phones (see
+// buildRealtimePayload in api/messages.ts): senderEmail /
+// recipientEmail are dropped, the reply snapshot drops its
+// senderEmail, readBy collapses to seenCount, and a per-recipient
+// `own` flag + `threadKey` replace the emails the client used to
+// need for thread grouping.
+//
+// GLOBAL room (/community): any signed-in user may read it, but an
+// anonymous stranger must not — and fan-out to "every signed-in
+// user" is unbounded. Global therefore stays PING-ONLY on the public
+// `community:global` channel (a ping carries no content) + a fast
+// refetch via the paginated GET. Typing on global is likewise a
+// name-only ping on that channel.
+//
+// Typing indicators are ephemeral broadcasts on the same private
+// channels (private/event community) — sender emits while typing
+// (throttled ~2s via POST /api/messages?action=typing), receiver
+// shows "X is typing…" and clears after ~3s of silence.
+//
+// Read receipts: the `read` flag already exists server-side. A
+// mark-as-read broadcasts {type:'read', id} to the sender's
+// channel, so their ✓ flips to ✓✓ live.
 //
 // Setup (user, in Vercel Production — both are frontend-safe values,
 // NOT secrets like the service-role key):
 //   VITE_SUPABASE_URL      = the same Supabase project URL
 //   VITE_SUPABASE_ANON_KEY = Project Settings -> API -> anon public key
+//   (the dashboard now calls this the "Publishable key")
 // Without both, getRealtimeClient() returns null and everything below
-// is a silent no-op: the inbox keeps working on polling alone.
+// is a silent no-op: the chats keep working on polling alone.
 //
 // HARD GATE: do NOT set VITE_SUPABASE_* in Vercel until
 // supabase-setup.sql has been run in Supabase AND the V-1–V-11
@@ -61,6 +84,51 @@ export type RealtimeEvent =
   | { type: 'message'; id: string }
   | { type: 'edited'; id: string }
   | { type: 'deleted'; id: string };
+
+// Full-payload events on a user's PRIVATE channel (see header).
+// `data` is the whitelisted broadcast payload built server-side by
+// buildRealtimePayload: names only, no emails/phones. `own` says
+// whether the viewer is the sender; `threadKey` files a private
+// message into its thread without any email in the payload.
+export interface RealtimeMessage {
+  id: string;
+  type?: string;
+  eventId: string;
+  eventTitle?: string;
+  senderName: string;
+  text: string;
+  attachment: { name: string; size: number; type: string; url: string; path: string } | null;
+  read: boolean;
+  edited: boolean;
+  editedAt?: string;
+  deletedForEveryone: boolean;
+  deletedAt?: string;
+  replyToId?: string;
+  replySnapshot?: {
+    id: string;
+    senderName: string;
+    text: string;
+    attachmentName?: string;
+    deleted: boolean;
+  };
+  createdAt: string;
+  own: boolean;
+  threadKey?: string;
+  seenCount?: number;
+}
+
+export type RealtimeFullEvent =
+  | { type: 'message'; data: RealtimeMessage }
+  | { type: 'edited'; data: RealtimeMessage }
+  | { type: 'deleted'; data: RealtimeMessage }
+  | { type: 'read'; id: string; seenCount?: number }
+  | { type: 'typing'; name: string; eventId?: string; threadKey?: string };
+
+export interface TypingEvent {
+  name: string;
+  eventId?: string;
+  threadKey?: string;
+}
 
 let client: SupabaseClient | null | undefined;
 
@@ -82,10 +150,14 @@ function channelName(email: string): string {
 // Subscribe to content-free pings on one channel. Shared by the
 // inbox and community channels below; onEvent receives pings only,
 // the caller must refetch via the session-authenticated API.
+// onTyping (optional) receives name-only typing pings on the same
+// channel — used by the global room, where typing carries no
+// content and the channel is public by design.
 function subscribePing(
   channelName: string,
   onEvent: (event: RealtimeEvent) => void,
   onStatus?: (status: string) => void,
+  onTyping?: (event: TypingEvent) => void,
 ): () => void {
   const sb = getRealtimeClient();
   if (!sb) return () => {};
@@ -97,6 +169,64 @@ function subscribePing(
     .on('broadcast', { event: 'message' }, handlePing('message'))
     .on('broadcast', { event: 'edited' }, handlePing('edited'))
     .on('broadcast', { event: 'deleted' }, handlePing('deleted'))
+    .on('broadcast', { event: 'typing' }, ({ payload }: { payload?: { name?: unknown; eventId?: unknown; threadKey?: unknown } }) => {
+      if (onTyping && typeof payload?.name === 'string' && payload.name) {
+        onTyping({
+          name: payload.name,
+          eventId: typeof payload.eventId === 'string' ? payload.eventId : undefined,
+          threadKey: typeof payload.threadKey === 'string' ? payload.threadKey : undefined,
+        });
+      }
+    })
+    .subscribe((status) => onStatus?.(status));
+  return () => {
+    sb.removeChannel(channel);
+  };
+}
+
+// Subscribe to FULL-payload events on one PRIVATE channel (the
+// caller's own, learned from the server — see header). The payload
+// is rendered immediately by the caller; no refetch. onEvent
+// receives message/edited/deleted payloads, read receipts and
+// typing indicators. Returns an unsubscribe function. When the
+// client is null (VITE_SUPABASE_* not set) this is a silent no-op
+// and the caller keeps polling.
+export function subscribeToPrivateChannel(
+  privateChannel: string,
+  onEvent: (event: RealtimeFullEvent) => void,
+  onStatus?: (status: string) => void,
+): () => void {
+  const sb = getRealtimeClient();
+  if (!sb || !privateChannel) return () => {};
+  const channel: RealtimeChannel = sb.channel(privateChannel);
+  const handleFull = (type: 'message' | 'edited' | 'deleted') => ({ payload }: { payload?: unknown }) => {
+    if (payload && typeof payload === 'object' && typeof (payload as { id?: unknown }).id === 'string') {
+      onEvent({ type, data: payload as RealtimeMessage } as RealtimeFullEvent);
+    }
+  };
+  channel
+    .on('broadcast', { event: 'message' }, handleFull('message'))
+    .on('broadcast', { event: 'edited' }, handleFull('edited'))
+    .on('broadcast', { event: 'deleted' }, handleFull('deleted'))
+    .on('broadcast', { event: 'read' }, ({ payload }: { payload?: { id?: unknown; seenCount?: unknown } }) => {
+      if (payload && typeof payload.id === 'string') {
+        onEvent({
+          type: 'read',
+          id: payload.id,
+          seenCount: typeof payload.seenCount === 'number' ? payload.seenCount : undefined,
+        });
+      }
+    })
+    .on('broadcast', { event: 'typing' }, ({ payload }: { payload?: { name?: unknown; eventId?: unknown; threadKey?: unknown } }) => {
+      if (payload && typeof payload.name === 'string' && payload.name) {
+        onEvent({
+          type: 'typing',
+          name: payload.name,
+          eventId: typeof payload.eventId === 'string' ? payload.eventId : undefined,
+          threadKey: typeof payload.threadKey === 'string' ? payload.threadKey : undefined,
+        });
+      }
+    })
     .subscribe((status) => onStatus?.(status));
   return () => {
     sb.removeChannel(channel);
@@ -141,6 +271,10 @@ async function broadcastPing(channelName: string, event: RealtimeEvent): Promise
 // page uses it to slow polling to a 30s safety net while Realtime
 // works. onEvent receives pings only; the caller must refetch via the
 // session-authenticated API — never trust a ping's payload as data.
+// NOTE: the inbox now primarily uses subscribeToPrivateChannel
+// (full payload, see above); this ping subscription is retained for
+// the global-room fallback path and for clients whose channel name
+// has not loaded yet.
 export function subscribeToInbox(
   email: string,
   onEvent: (event: RealtimeEvent) => void,
@@ -159,13 +293,18 @@ export function subscribeToInbox(
 // which enforces membership server-side. Same hard gate as the
 // inbox: without VITE_SUPABASE_* this is a silent no-op and the
 // community chat keeps working on 3s polling.
+// This is now the GLOBAL room's delivery path (ping-only by design)
+// plus the fallback for event rooms over 200 members; event rooms
+// primarily use the private-channel fan-out (see header). onTyping
+// receives name-only typing pings on the same channel.
 export function subscribeToCommunity(
   eventId: string,
   onEvent: (event: RealtimeEvent) => void,
   onStatus?: (status: string) => void,
+  onTyping?: (event: TypingEvent) => void,
 ): () => void {
   if (!eventId) return () => {};
-  return subscribePing(`community:${eventId}`, onEvent, onStatus);
+  return subscribePing(`community:${eventId}`, onEvent, onStatus, onTyping);
 }
 
 // Push one content-free ping to the recipient's inbox channel.

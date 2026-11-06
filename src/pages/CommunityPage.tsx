@@ -6,7 +6,8 @@
 // session on every community call (401 without one). Any signed-in
 // user can see and post — no event registration needed. The chat
 // itself is the shared CommunityChat component in global mode
-// (eventId "global", channel `community:global`, id-only pings).
+// (eventId "global", channel `community:global`, ping-only by
+// design — no bounded member list to fan out to).
 import React from 'react';
 import { CommunityChat } from '../components/events/CommunityChat';
 
