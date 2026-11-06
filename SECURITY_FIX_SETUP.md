@@ -204,3 +204,10 @@ needed to confirm the fix.
     email = A → 200 (mailed true/false per the existing caps).
 15. After all of the above passes, delete the Phase 2 test artefacts
     listed in step 5.
+
+## CSP note (audit #4 L1)
+- `script-src` keeps `'unsafe-inline'`: the Google OAuth callback (`api/auth/callback/google.ts`) serves inline `<script>` blocks embedding per-request dynamic JSON (signed-in profile + returnTo), so no static hash can match and `vercel.json` headers are static — no per-response nonce is possible. Removing it breaks Google sign-in.
+- `style-src` keeps `'unsafe-inline'` for the `<style>` blocks in `src/components/events/ImageUploadField.tsx`.
+- `img-src` is pinned to `images.unsplash.com`, `*.supabase.co`, `lh3.googleusercontent.com` (Google profile pictures). A legacy event with an arbitrary-`https:` cover URL will be blocked by CSP — live-test item.
+- `connect-src` keeps `api.razorpay.com`: Razorpay's `checkout.js` (loaded in-page) calls it from page context.
+- Do NOT add custom keys (e.g. `_cspNote`) to `vercel.json` — Vercel's schema validation rejects unknown top-level properties and the whole deployment fails (seen 2026-11-06: both `cfe0de8`/`8863a56` deployments Errored on exactly this).

@@ -1,6 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "_cspNote": "L1 (audit #4): CSP tightened as far as safely possible. img-src/font-src no longer carry a bare https: — every host below was verified by grepping src/ + api/ for the hosts the app actually calls. script-src still needs 'unsafe-inline': the Google OAuth callback (api/auth/callback/google.ts) serves inline <script> blocks that embed per-request dynamic JSON (the signed-in profile + returnTo), so no static hash can ever match them, and vercel.json headers are static strings — no per-response nonce can be generated. Removing 'unsafe-inline' would break Google sign-in outright. style-src keeps 'unsafe-inline' for the <style> blocks in src/components/events/ImageUploadField.tsx. connect-src keeps api.razorpay.com even though only the server calls it directly: Razorpay's checkout.js (loaded in-page) makes its own API calls from page context, and dropping it risks breaking checkout with no live way to prove otherwise. img-src keeps lh3.googleusercontent.com: Google profile pictures (googleUser.picture) are served from there and rendered as <img> avatars. Supabase hosts are wildcarded (*.supabase.co) because the project URL comes from VITE_SUPABASE_URL at runtime, not from code.",
   "headers": [
     {
       "source": "/(.*)",
