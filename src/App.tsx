@@ -31,6 +31,7 @@ const LogoutPage = lazy(() => import('./pages/LogoutPage').then((m) => ({ defaul
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage').then((m) => ({ default: m.NotFoundPage })));
 const PrivacyPage = lazy(() => import('./pages/PrivacyPage').then((m) => ({ default: m.PrivacyPage })));
 const AdminPage = lazy(() => import('./pages/AdminPage').then((m) => ({ default: m.AdminPage })));
+const ChatWidget = lazy(() => import('./components/ChatWidget').then((m) => ({ default: m.ChatWidget })));
 import { OrganizerGuard } from './components/OrganizerGuard';
 
 import { LandingPage } from './pages/LandingPage';
@@ -197,8 +198,12 @@ export default function App() {
             </PageErrorBoundary>
           </main>
           <Footer />
+          <Suspense fallback={null}>
+            <ChatWidget />
+          </Suspense>
         </div>
       </ToastProvider>
     </BrowserRouter>
   );
 }
+
