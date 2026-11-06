@@ -33,15 +33,21 @@ export function RegistrationsPage() {
     async function loadRegistrations() {
       setLoading(true);
       try {
-        const data = await registrationsService.getMyRegistrations();
+        // The registrations and the live event details are
+        // independent, so they load concurrently (they ran one after
+        // the other, ~2s each). The details are slim card fields
+        // only — this page renders title/cover/dates/venue, all in
+        // the slim shape — and a failed details fetch still leaves
+        // the snapshots rendering.
+        const [data, page] = await Promise.all([
+          registrationsService.getMyRegistrations(),
+          eventsService.getEvents({}, 1, 100, { slim: true }).catch(() => null),
+        ]);
         setRegistrations(data);
-        try {
-          const page = await eventsService.getEvents({}, 1, 100);
+        if (page) {
           const map: Record<string, EventItem> = {};
           for (const e of page.data || []) map[e.id] = e;
           setLiveById(map);
-        } catch {
-          /* live details are a nicety: snapshots still render */
         }
       } finally {
         setLoading(false);

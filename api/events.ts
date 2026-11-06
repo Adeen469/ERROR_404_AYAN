@@ -160,6 +160,143 @@ const { originAllowed, isMutationMethod } = (() => {
   return { originAllowed, isMutationMethod };
 })();
 
+// Event covers in Supabase Storage (speed: 2026-11-06).
+// A cover uploaded by an organizer used to be stored as a base64 data
+// URL inside the event row: one live cover measured 361KB, so EVERY
+// list/detail read shipped ~363KB even though the card only renders a
+// small image. Covers now live in the public `event-covers` Storage
+// bucket as files; the row stores only the short public URL.
+// Migration is lazy and safe: on read, a stored data-URL cover is
+// uploaded once, the row is updated to the URL, and the URL is served.
+// Any failure falls back to the stored value (slim mode still strips
+// oversized data URLs via slimCover below), so a Storage outage can
+// never break the read path. On write (POST/PATCH), a data-URL cover
+// is uploaded before the row is written and the URL is stored instead;
+// an upload failure there fails closed (502) so base64 never lands in
+// a row again.
+const COVER_BUCKET = "event-covers";
+const COVER_PATH_PREFIX = "covers/";
+const MAX_COVER_BYTES = 5 * 1024 * 1024;
+const COVER_MIME_TO_EXT: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/gif": "gif",
+};
+
+// Parses a `data:image/...;base64,...` cover. Returns { mime, ext,
+// bytes } or { error } (400-style message). SVG is deliberately NOT
+// allowed: an SVG data URL can carry script. Non-image and oversized
+// covers are refused the same way.
+export function parseDataCover(dataUrl: string): { mime?: string; ext?: string; bytes?: Uint8Array; error?: string } {
+  const m = /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(dataUrl || "");
+  if (!m) return { error: "Cover image must be an image upload" };
+  const mime = m[1].toLowerCase();
+  const ext = COVER_MIME_TO_EXT[mime];
+  if (!ext) return { error: "Cover image must be a JPEG, PNG, WebP or GIF upload" };
+  const b64 = m[2];
+  if (Math.floor((b64.length * 3) / 4) > MAX_COVER_BYTES) return { error: "Cover image must be 5MB or smaller" };
+  let bin = "";
+  try {
+    bin = atob(b64);
+  } catch {
+    return { error: "Cover image is not valid base64" };
+  }
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  if (bytes.length > MAX_COVER_BYTES) return { error: "Cover image must be 5MB or smaller" };
+  return { mime, ext, bytes };
+}
+
+function coverStorageUrl(path: string): string {
+  return supabaseBase() + "/storage/v1/object/public/" + COVER_BUCKET + "/" + path;
+}
+
+// The bucket is created once per warm function instance; the upload
+// itself is the real test (a bucket that already exists answers 409
+// and the upload still succeeds). A failed create is retried on the
+// next cold start; a failed upload surfaces as null to the caller.
+let coversBucketReady = false;
+async function ensureCoversBucket(): Promise<void> {
+  if (coversBucketReady) return;
+  try {
+    const r = await fetchJson(supabaseBase() + "/storage/v1/bucket", {
+      method: "POST",
+      headers: supabaseHeaders(),
+      body: JSON.stringify({ id: COVER_BUCKET, name: COVER_BUCKET, public: true }),
+    });
+    if (r.ok || r.status === 409 || r.status === 400) coversBucketReady = true;
+  } catch {
+    // Leave coversBucketReady false: the next request retries the create.
+  }
+}
+
+// Uploads a parsed data-URL cover to Storage (upsert, one file per
+// event so a re-upload overwrites). Returns the public URL, or null
+// when Storage is unavailable (caller falls back / fails closed).
+export async function uploadCoverToStorage(eventId: string, parsed: { mime: string; ext: string; bytes: Uint8Array }): Promise<string | null> {
+  try {
+    await ensureCoversBucket();
+    const path = COVER_PATH_PREFIX + String(eventId).replace(/[^A-Za-z0-9_-]/g, "_") + "." + parsed.ext;
+    const res = await fetch(supabaseBase() + "/storage/v1/object/" + COVER_BUCKET + "/" + path, {
+      method: "POST",
+      headers: { ...supabaseHeaders(), "Content-Type": parsed.mime, "x-upsert": "true" },
+      body: parsed.bytes as any,
+    });
+    if (!res.ok) return null;
+    return coverStorageUrl(path);
+  } catch {
+    return null;
+  }
+}
+
+// Persists a migrated cover URL back onto the event row (whole-record
+// write, same shape as PATCH). Best-effort: false only means the next
+// read retries the migration.
+async function persistCoverUrl(event: any, url: string): Promise<boolean> {
+  try {
+    if (!event || typeof event.id !== "string" || !event.id) return false;
+    const res = await fetch(supabaseBase() + "/rest/v1/events?id=eq." + encodeURIComponent(event.id), {
+      method: "PATCH",
+      headers: supabaseHeaders(),
+      body: JSON.stringify({ data: { ...event, coverImage: url } }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Lazy migration for one event: a stored data-URL cover is uploaded
+// once and the row is updated; the returned event carries the URL.
+// Any failure returns the event unchanged (the stored value is
+// served, and slim mode still strips oversized data URLs).
+export async function migrateEventCover(event: any): Promise<any> {
+  try {
+    if (!event || typeof event.coverImage !== "string" || !event.coverImage.startsWith("data:")) return event;
+    const parsed = parseDataCover(event.coverImage);
+    if (parsed.error || !parsed.bytes || !parsed.mime || !parsed.ext) return event;
+    const url = await uploadCoverToStorage(event.id, parsed as { mime: string; ext: string; bytes: Uint8Array });
+    if (!url) return event;
+    await persistCoverUrl(event, url);
+    return { ...event, coverImage: url };
+  } catch {
+    return event;
+  }
+}
+
+// A caller-supplied cover for POST/PATCH: a data URL is uploaded and
+// replaced with the Storage URL before validation/storage, so base64
+// never lands in a row again. Returns { url } or { error, status }.
+export async function storeIncomingCover(eventId: string, cover: unknown): Promise<{ url?: string; error?: string; status?: number }> {
+  if (typeof cover !== "string" || !cover.startsWith("data:")) return { url: typeof cover === "string" ? cover : "" };
+  const parsed = parseDataCover(cover);
+  if (parsed.error || !parsed.bytes || !parsed.mime || !parsed.ext) return { error: parsed.error || "Cover image must be an image upload", status: 400 };
+  const url = await uploadCoverToStorage(eventId, parsed as { mime: string; ext: string; bytes: Uint8Array });
+  if (!url) return { error: "Could not store cover image. Try again.", status: 502 };
+  return { url };
+}
+
 export const ADMIN_EMAILS = ["mr.adeen946@gmail.com", "ayan.work937@gmail.com"];
 
 export function getEnv(name: string): string {
@@ -280,16 +417,22 @@ export async function verifySession(req: any): Promise<SessionUser | null> {
     const payload = JSON.parse(b64urlDecode(parts[1]));
     if (!payload.email || !isEmail(payload.email) || !payload.exp || payload.exp * 1000 < Date.now()) return null;
     const email = norm(payload.email);
+    // The revocation check and the user-row lookup are independent
+    // reads, so they run concurrently: sequential awaits cost ~1s
+    // each from this function, and both are on the hot read path.
+    // The decisions below are unchanged and still run in order
+    // (revoked first, then the sessionVersion check).
+    const userRowPromise = loadUserByEmail(email).catch(() => null);
     try {
       const tokenHash = await sha256Hex(token);
-      const rev = await fetchJson(`${supabaseBase()}/rest/v1/revoked_tokens?id=eq.${encodeURIComponent(tokenHash)}&select=data`, { headers: supabaseHeaders() });
-      if (rev.ok && Array.isArray(rev.body) && rev.body.length > 0) {
+      const rev = await fetchJson(`${supabaseBase()}/rest/v1/revoked_tokens?id=eq.${encodeURIComponent(tokenHash)}&select=data`, { headers: supabaseHeaders() }).catch(() => null);
+      if (rev && rev.ok && Array.isArray(rev.body) && rev.body.length > 0) {
         const exp = rev.body[0].data?.expiresAt;
         if (!exp || new Date(exp).getTime() > Date.now()) return null;
       }
     } catch {}
     try {
-      const userRow = await loadUserByEmail(email);
+      const userRow = await userRowPromise;
       if (userRow && userRow.data && typeof userRow.data.sessionVersion === "number") {
         const stored = userRow.data.sessionVersion;
         if (payload.v === undefined) {
@@ -1015,7 +1158,10 @@ export default async function handler(req: any, res: any) {
       if (singleId) {
         const event = fetched;
         if (!event) return sendJson(res, 404, { message: "Event not found" });
-        return sendJson(res, 200, viewEvent(event));
+        // Lazy cover migration runs on the full record, before
+        // viewEvent strips owner fields, so the row update never
+        // drops stored fields.
+        return sendJson(res, 200, viewEvent(await migrateEventCover(event)));
       }
       const filtered = applyFilters(fetched, req.query || {});
       const page = Math.max(1, parseInt(String(req.query?.page || "1"), 10) || 1);
@@ -1025,7 +1171,14 @@ export default async function handler(req: any, res: any) {
       const total = filtered.length;
       const totalPages = Math.ceil(total / pageSize) || 1;
       const offset = (page - 1) * pageSize;
-      const pageItems = filtered.slice(offset, offset + pageSize).map((e: any) => viewEvent(e));
+      // Lazy cover migration runs on the page being served only (not
+      // the whole filtered set): a stored base64 cover is uploaded to
+      // Storage once and the row is updated; the URL is served. The
+      // migration runs on the full records, before viewEvent strips
+      // owner fields, so the row update never drops stored fields.
+      const pageSlice = filtered.slice(offset, offset + pageSize);
+      const migratedSlice = await Promise.all(pageSlice.map((e: any) => migrateEventCover(e)));
+      const pageItems = migratedSlice.map((e: any) => viewEvent(e));
       // Slim list mode (?slim=1): card fields only. The full list
       // response was measured at ~374KB for 100 events (descriptions,
       // organizer blobs, tags) — far more than any card grid renders.
@@ -1090,6 +1243,15 @@ export default async function handler(req: any, res: any) {
           }
           return sendJson(res, 409, { message: "An event with this id already exists" });
         }
+      }
+      // A caller-uploaded cover arrives as a base64 data URL. It is
+      // uploaded to Storage here and the URL is stored instead, so a
+      // 361KB inline image never lands in the row (and never ships
+      // in every list response again).
+      if (typeof p.coverImage === "string" && p.coverImage.startsWith("data:")) {
+        const stored = await storeIncomingCover(id, p.coverImage);
+        if (stored.error) return sendJson(res, stored.status || 400, { message: stored.error });
+        p.coverImage = stored.url || "";
       }
       // Server-side validation (previously almost none: negative
       // prices were stored and then treated as "free" instant passes,
@@ -1276,6 +1438,13 @@ export default async function handler(req: any, res: any) {
           if (!okUrl) return sendJson(res, 400, { message: "Map link must be a valid http(s) URL" });
           updates.mapUrl = m;
         }
+      }
+      // Same as POST: a caller-uploaded cover arrives as a data URL
+      // and is uploaded to Storage before validation/storage.
+      if (typeof updates.coverImage === "string" && updates.coverImage.startsWith("data:")) {
+        const stored = await storeIncomingCover(singleId, updates.coverImage);
+        if (stored.error) return sendJson(res, stored.status || 400, { message: stored.error });
+        updates.coverImage = stored.url || "";
       }
       // M8: status/category/slug/summary/coverImage allowlists on
       // edits too (only the supplied fields are checked).
