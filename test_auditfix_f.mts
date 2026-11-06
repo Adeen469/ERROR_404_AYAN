@@ -299,5 +299,20 @@ check("covers: stale hashed /assets paths resolve to the bundled cover by stripp
   eventsServiceTs.includes("withMigratedCover(e)") &&
   eventsServiceTs.includes("withMigratedCover(fetched)"));
 
+// --- Discover location: no automatic IP location (owner, 2026-11-06) ---
+// Discover must never auto-fill its location filter from the
+// visitor's IP (or silently from the saved profile location); the
+// explicit Near-me tap stays. Profile and Create Event keep their
+// IP detection — the removal is scoped to Discover only.
+const discoverPageTsx = read("src/pages/DiscoverPage.tsx");
+check("discover: no IP location detection on the Discover page",
+  !discoverPageTsx.includes("detectLocationByIp()") &&
+  !discoverPageTsx.includes("services/location-service"));
+check("discover: IP detection untouched on Profile and Create Event",
+  read("src/pages/ProfilePage.tsx").includes("detectLocationByIp") &&
+  read("src/pages/CreateEventPage.tsx").includes("detectLocationByIp"));
+check("discover: the explicit Near-me saved-location tap is still wired",
+  discoverPageTsx.includes("onSavedLocation={savedLocationLabel ? handleSavedLocation : undefined}"));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

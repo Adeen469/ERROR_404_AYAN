@@ -1,9 +1,8 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { EventItem, EventFilterOptions } from '../types';
 import { eventsService } from '../services/events-service';
 import { authService } from '../services/auth-service';
-import { detectLocationByIp } from '../services/location-service';
 import { EventCard } from '../components/events/EventCard';
 import { EventFilters } from '../components/events/EventFilters';
 import { EventListSkeleton, EmptyState } from '../components/ui/LoadingSkeleton';
@@ -41,47 +40,14 @@ export function DiscoverPage() {
     });
   };
 
-  // Auto-fill the location filter: the saved home location (Profile)
-  // first, otherwise the visitor's IP address. Only when no location
-  // filter is set (no URL params, no user pick); runs once on mount,
-  // never overwrites a choice made while the lookup runs, and fails
-  // silently (the filter stays blank) when the lookup is unreachable.
-  // The applied location shows in the filter bar and Reset clears it.
-  const filtersRef = useRef(filters);
-  useEffect(() => {
-    filtersRef.current = filters;
-  });
-  const locationAutoFilledRef = useRef(false);
-  useEffect(() => {
-    if (locationAutoFilledRef.current) return;
-    if (filters.country || filters.state || filters.city) return;
-    locationAutoFilledRef.current = true;
-    if (savedUser?.city) {
-      updateFilters({
-        ...filters,
-        country: savedUser.country || '',
-        state: savedUser.state || '',
-        city: savedUser.city,
-      });
-      return;
-    }
-    let cancelled = false;
-    void detectLocationByIp().then((loc) => {
-      if (cancelled || !loc) return;
-      const cur = filtersRef.current;
-      if (cur.country || cur.state || cur.city) return;
-      updateFilters({
-        ...cur,
-        country: loc.country,
-        state: loc.state,
-        city: loc.city,
-      });
-    });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // The location filter is NEVER auto-filled on this page (owner's
+  // call, 2026-11-06): no IP-based detection and no silent copy of
+  // the saved home location. It starts on "Anywhere" and changes
+  // only when the visitor picks a place in the picker, follows a
+  // link carrying location URL params, or taps the explicit
+  // "Near me: <saved location>" button in the filter bar.
+  // (detectLocationByIp is still used by Profile and Create Event —
+  // only Discover dropped automatic location.)
 
   const [events, setEvents] = useState<EventItem[]>([]);
   const [showingLocalOnly, setShowingLocalOnly] = useState(false);
