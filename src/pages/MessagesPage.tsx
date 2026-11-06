@@ -784,7 +784,6 @@ export function MessagesPage() {
   // Loco stays at the top even while searching — it is a built-in
   // entry, not a server conversation.
   const visibleThreads = [aiThread, ...filteredRealThreads];
-  const totalUnread = sortedRealThreads.reduce((n, t) => n + (t.unread || 0), 0);
 
   // Server messages plus in-flight ones for this thread, oldest
   // first. A pending bubble is dropped once its server copy shows up
@@ -2202,27 +2201,12 @@ export function MessagesPage() {
         </div>
       </div>
 
-      {/* Page header, below the chat in normal flow — reached by
-          scrolling the main scrollbar, like the footer under it.
-          The first viewport shows only navbar + chat. */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
-        <div className="flex items-center gap-3 mb-5">
-          <div className="w-10 h-10 rounded-full bg-[#1E3F35] text-white flex items-center justify-center shrink-0">
-            <MessageCircle className="w-5 h-5" />
-          </div>
-          <div className="min-w-0">
-            <h1 className="font-editorial text-2xl font-bold text-[#1E2320] leading-tight">Messages</h1>
-            <p className="text-xs text-[#5F635D]">Chats with event organizers, all in one place.</p>
-          </div>
-          {totalUnread > 0 && (
-            <span className="ml-auto shrink-0 px-2.5 py-1 rounded-full bg-[#1E3F35] text-white text-[11px] font-bold">
-              {totalUnread > 99 ? '99+' : totalUnread} unread
-            </span>
-          )}
-        </div>
-
-        {loadError && (
-          <div className="mb-4 bg-white rounded-xl border border-red-200 p-4 flex items-center justify-between gap-3">
+      {/* Load-error banner only — the page header was removed, so
+          nothing sits below the chat except this (when loading
+          fails) and the footer. */}
+      {loadError && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
+          <div className="bg-white rounded-xl border border-red-200 p-4 flex items-center justify-between gap-3">
             <p className="text-xs text-red-700">{loadError}</p>
             <button
               type="button"
@@ -2232,8 +2216,8 @@ export function MessagesPage() {
               Retry
             </button>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Right-click / long-press menu. The backdrop closes it on any
           tap elsewhere; Close does the same. Delete for everyone is
