@@ -220,7 +220,6 @@ export function HomePage() {
       <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-end justify-between mb-6 sm:mb-8">
           <div className="space-y-1.5">
-            <p className="text-xs font-semibold tracking-wider uppercase text-[#C25E00]">Handpicked</p>
             <h2 className="font-editorial text-2xl sm:text-3xl font-bold tracking-tight text-[#1E2320]">
               Featured Gatherings
             </h2>

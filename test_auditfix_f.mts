@@ -314,5 +314,11 @@ check("discover: IP detection untouched on Profile and Create Event",
 check("discover: the explicit Near-me saved-location tap is still wired",
   discoverPageTsx.includes("onSavedLocation={savedLocationLabel ? handleSavedLocation : undefined}"));
 
+// --- Eyebrow labels removed at the owner's call (2026-11-06) ---
+check("labels: Home has no 'Handpicked' eyebrow above Featured Gatherings",
+  !read("src/pages/HomePage.tsx").includes("Handpicked"));
+check("labels: Community has no 'Site-wide room' eyebrow above its heading",
+  !read("src/pages/CommunityPage.tsx").includes("Site-wide room"));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

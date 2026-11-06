@@ -20,7 +20,6 @@ export function CommunityPage() {
           <Users className="w-5 h-5" />
         </div>
         <div className="min-w-0">
-          <p className="text-xs font-semibold tracking-wider uppercase text-[#C25E00]">Site-wide room</p>
           <h1 className="font-editorial text-3xl font-bold text-[#1E2320] leading-tight">Community</h1>
           <p className="text-sm text-[#5F635D] mt-1">
             Chat with everyone on Locora — say hello, ask questions, share plans.
