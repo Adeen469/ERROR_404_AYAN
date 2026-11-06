@@ -112,10 +112,24 @@ export function RegistrationsPage() {
       ? `Are you sure you want to cancel your RSVP for "${cancelTarget ? liveEventOf(cancelTarget).title : ''}"? You will get an estimated full refund of ${formatPaise(cancelRefundQuote.refundAmountPaise)}. Your ticket will be cancelled immediately.`
       : `Are you sure you want to cancel your RSVP for "${cancelTarget ? liveEventOf(cancelTarget).title : ''}"? You will get an estimated ${formatPaise(cancelRefundQuote.refundAmountPaise)} back (90%). A 10% cancellation fee of ${formatPaise(cancelRefundQuote.refundFeePaise)} applies because it has been more than 24 hours since you bought the ticket. Your ticket will be cancelled immediately.`;
 
-  // Upcoming = confirmed passes plus payments awaiting Razorpay completion.
-  // Past = cancelled, rejected, and waitlisted records.
-  const upcomingList = registrations.filter((r) => r.status === 'confirmed' || r.status === 'pending');
-  const pastList = registrations.filter((r) => r.status !== 'confirmed' && r.status !== 'pending');
+  // Upcoming = confirmed passes plus payments awaiting Razorpay
+  // completion, for events that have not ended yet. Past = cancelled,
+  // rejected and waitlisted records, PLUS any record whose event has
+  // already ended (owner rule, 2026-11-06): a pass for a finished
+  // event is history, not an upcoming ticket. The split follows the
+  // event's end time (start time when no end is stored), so an event
+  // happening today stays upcoming until it ends; a record whose
+  // dates cannot be parsed stays upcoming rather than being hidden.
+  const nowMs = Date.now();
+  const eventHasEnded = (r: AttendeeRegistration): boolean => {
+    const ev = liveEventOf(r);
+    const endMs = new Date(ev.endDate || ev.startDate).getTime();
+    return Number.isFinite(endMs) && endMs < nowMs;
+  };
+  const isUpcomingReg = (r: AttendeeRegistration) =>
+    (r.status === 'confirmed' || r.status === 'pending') && !eventHasEnded(r);
+  const upcomingList = registrations.filter(isUpcomingReg);
+  const pastList = registrations.filter((r) => !isUpcomingReg(r));
   const displayedList = filterTab === 'upcoming' ? upcomingList : pastList;
 
   return (

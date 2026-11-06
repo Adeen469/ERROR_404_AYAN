@@ -307,6 +307,11 @@ check("covers: saved-events and organizer-events API reads are cover-migrated",
   read("src/services/organizers-service.ts").includes("events.map((e) => withMigratedCover(e))"));
 check("covers: the pending-events overlay is cover-migrated after it is applied",
   eventsServiceTs.includes("overlaidPage.data.map((e) => withMigratedCover(e))"));
+check("registrations: a registration whose event has ended lands in Cancelled & Past, not Upcoming",
+  read("src/pages/RegistrationsPage.tsx").includes("const eventHasEnded") &&
+  read("src/pages/RegistrationsPage.tsx").includes("ev.endDate || ev.startDate") &&
+  read("src/pages/RegistrationsPage.tsx").includes("pastList = registrations.filter((r) => !isUpcomingReg(r))") &&
+  read("src/pages/DashboardPage.tsx").includes("!eventHasEnded(r.event)"));
 
 // --- Discover location: no automatic IP location (owner, 2026-11-06) ---
 // Discover must never auto-fill its location filter from the

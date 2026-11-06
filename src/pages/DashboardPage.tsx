@@ -94,7 +94,18 @@ export function DashboardPage() {
 
   // The next ticket must be a confirmed pass: a pending payment has no
   // ticket code yet, so it must never render as the featured ticket.
-  const nextUpcoming = registrations.find((r) => r.status === 'confirmed');
+  // It must also be for an event that has not ended yet — the same
+  // rule as My Registrations (owner, 2026-11-06): a finished event's
+  // pass is history, not a "next event". Among the live passes the
+  // soonest start wins; the list order is registration order, which
+  // is not event order.
+  const eventHasEnded = (ev: EventItem): boolean => {
+    const endMs = new Date(ev.endDate || ev.startDate).getTime();
+    return Number.isFinite(endMs) && endMs < Date.now();
+  };
+  const nextUpcoming = registrations
+    .filter((r) => r.status === 'confirmed' && r.event && !eventHasEnded(r.event))
+    .sort((a, b) => new Date(a.event.startDate).getTime() - new Date(b.event.startDate).getTime())[0];
 
   // The teams this user belongs to (leader or member), for the My Teams
   // section. Individual registrations get no team card.
