@@ -162,6 +162,14 @@ check("sweep G: pendingCounts residual full load stays explicit in code",
 // --- 9: sweep G — phone-otp targeted loads + status limit ---
 check("sweep G: OTP verify uses the targeted token lookup",
   phoneOtp.includes("row = await loadRowByToken(token)"));
+// Quick API switch (2026-11-06): the dedicated otp route is closed
+// for this account (Fast2SMS support), so delivery goes on route "q"
+// with the code inside the message text — never back on route "otp"
+// without the KYC/DLT gate having cleared.
+check("quick-api: OTP delivery uses the Fast2SMS Quick API route",
+  phoneOtp.includes('route: "q"') && !phoneOtp.includes('route: "otp"'));
+check("quick-api: the message text carries the generated code",
+  phoneOtp.includes("Your Locora verification code is ${otp}"));
 check("sweep G: token lookup interpolates the real token (not a placeholder)",
   phoneOtp.includes("token=eq.${encodeURIComponent(token)}"));
 check("sweep G: OTP send uses the targeted email lookup",

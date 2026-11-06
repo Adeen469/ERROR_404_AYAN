@@ -2368,11 +2368,6 @@ export default async function handler(req: any, res: any): Promise<void> {
     // send; the only differences are the community marker recipient
     // and the membership gate in place of authorizeContact.
     if (req.method === "POST" && body.community === true) {
-      const rlCommunity = await checkRateLimit(`msg:community-send:${me}`, 60, 60 * 60 * 1000);
-      if (!rlCommunity.allowed && !rlCommunity.tableMissing) {
-        sendJson(res, 429, { message: "Too many messages. Try again shortly." }, { "Retry-After": String(rlCommunity.retryAfter) });
-        return;
-      }
       const eventId = String(body.eventId || "");
       const sender = me;
       const text = String(body.text || "").trim().slice(0, MAX_TEXT_CHARS);
@@ -2381,20 +2376,25 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 400, { message: "eventId is required" });
         return;
       }
-      // SEND-PATH SPEED (2026-11-06): the profile, event and
-      // registration reads are independent — run them in parallel
-      // instead of one after another (~3 sequential round trips
-      // saved before the row even exists).
+      // SEND-PATH SPEED (2026-11-06): the rate-limit check, profile,
+      // event and registration reads are all independent — run them
+      // in ONE parallel batch instead of one after another (each
+      // serial round trip is delay the sender watches on their
+      // pending bubble). The 429 verdict is still enforced before
+      // anything is written; a denied request just wastes the reads.
       const isGlobalSend = eventId === GLOBAL_EVENT_ID;
       let senderName = sender;
       let event: any = null;
       let regs: any[] = [];
+      let rlCommunity = { allowed: true, retryAfter: 0 } as Awaited<ReturnType<typeof checkRateLimit>>;
       try {
-        const [profile, loadedEvent, loadedRegs] = await Promise.all([
+        const [rl, profile, loadedEvent, loadedRegs] = await Promise.all([
+          checkRateLimit(`msg:community-send:${me}`, 60, 60 * 60 * 1000),
           loadUserByEmail(sender).catch(() => null),
           isGlobalSend ? Promise.resolve({ id: GLOBAL_EVENT_ID, title: "Community" }) : loadEvent(eventId),
           isGlobalSend ? Promise.resolve([]) : loadRegistrationsForEvent(eventId),
         ]);
+        rlCommunity = rl;
         if (profile && typeof profile.data?.name === "string" && profile.data.name.trim()) {
           senderName = profile.data.name.trim().slice(0, 80);
         }
@@ -2402,6 +2402,10 @@ export default async function handler(req: any, res: any): Promise<void> {
         regs = loadedRegs || [];
       } catch {
         sendJson(res, 503, { message: "Messages are not set up yet" });
+        return;
+      }
+      if (!rlCommunity.allowed && !rlCommunity.tableMissing) {
+        sendJson(res, 429, { message: "Too many messages. Try again shortly." }, { "Retry-After": String(rlCommunity.retryAfter) });
         return;
       }
       if (!event) {
@@ -2514,6 +2518,14 @@ export default async function handler(req: any, res: any): Promise<void> {
         msg.replyToId = replyToId;
         msg.replySnapshot = replySnapshot;
       }
+      // Fan-out prep is independent of the store: start the member
+      // session-version read now so it overlaps the write instead of
+      // adding a full round trip between the store and the broadcast
+      // (the receiver cannot be delivered to before the broadcast,
+      // so every serial step in between is user-visible delay).
+      const fanoutMembers = isGlobalSend ? [] : communityMemberEmails(event, regs);
+      const fanoutVersionsPromise =
+        !isGlobalSend && fanoutMembers.length <= 200 ? loadSessionVersions(fanoutMembers) : null;
       try {
         await storeMessage(msg);
       } catch {
@@ -2534,7 +2546,7 @@ export default async function handler(req: any, res: any): Promise<void> {
             payload: { id: msg.id },
           }]);
         } else {
-          const members = communityMemberEmails(event, regs);
+          const members = fanoutMembers;
           if (members.length > 200) {
             await broadcastRealtimeSoon([{
               topic: `community:${eventId}`,
@@ -2542,7 +2554,7 @@ export default async function handler(req: any, res: any): Promise<void> {
               payload: { id: msg.id },
             }]);
           } else {
-            const sendVersions = await loadSessionVersions(members);
+            const sendVersions = fanoutVersionsPromise ? await fanoutVersionsPromise : new Map<string, number>();
             const entries: { topic: string; event: string; payload: any }[] = [];
             for (const email of members) {
               const channel = await privateChannelName(email, sendVersions.get(norm(email)) ?? 0);
@@ -2558,11 +2570,6 @@ export default async function handler(req: any, res: any): Promise<void> {
 
     // ---- POST: send a message ----
     if (req.method === "POST") {
-      const rlSend = await checkRateLimit(`msg:send:${me}`, 60, 60 * 60 * 1000);
-      if (!rlSend.allowed && !rlSend.tableMissing) {
-        sendJson(res, 429, { message: "Too many messages. Try again shortly." }, { "Retry-After": String(rlSend.retryAfter) });
-        return;
-      }
       const eventId = String(body.eventId || "");
       const sender = me;
       const text = String(body.text || "").trim().slice(0, MAX_TEXT_CHARS);
@@ -2571,20 +2578,27 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 400, { message: "eventId is required" });
         return;
       }
-      // SEND-PATH SPEED (2026-11-06): the sender profile, the event
-      // and the sender's history are independent — run them in
-      // parallel, and load the event ONCE (it used to load twice).
-      // Display names stay server-derived, never caller-supplied:
-      // the old code stored body.senderName verbatim (spoofable).
+      // SEND-PATH SPEED (2026-11-06): the rate-limit check, sender
+      // profile, event and sender history are all independent — run
+      // them in ONE parallel batch, and load the event ONCE (it used
+      // to load twice). Every serial round trip here is delay the
+      // sender watches on their pending bubble. The 429 verdict is
+      // still enforced before anything is written; a denied request
+      // just wastes the reads. Display names stay server-derived,
+      // never caller-supplied: the old code stored body.senderName
+      // verbatim (spoofable).
       let senderName = sender;
       let eventForRecipient: any = null;
       let existing: any[] = [];
+      let rlSend = { allowed: true, retryAfter: 0 } as Awaited<ReturnType<typeof checkRateLimit>>;
       try {
-        const [profile, loadedEvent, history] = await Promise.all([
+        const [rl, profile, loadedEvent, history] = await Promise.all([
+          checkRateLimit(`msg:send:${me}`, 60, 60 * 60 * 1000),
           loadUserByEmail(sender).catch(() => null),
           loadEvent(eventId),
           loadMessagesFor(sender),
         ]);
+        rlSend = rl;
         if (profile && typeof profile.data?.name === "string" && profile.data.name.trim()) {
           senderName = profile.data.name.trim().slice(0, 80);
         }
@@ -2592,6 +2606,10 @@ export default async function handler(req: any, res: any): Promise<void> {
         existing = history;
       } catch {
         sendJson(res, 503, { message: "Messages are not set up yet" });
+        return;
+      }
+      if (!rlSend.allowed && !rlSend.tableMissing) {
+        sendJson(res, 429, { message: "Too many messages. Try again shortly." }, { "Retry-After": String(rlSend.retryAfter) });
         return;
       }
       // Recipient resolution (P2-4): organizerId -> stored event's
@@ -2691,12 +2709,16 @@ export default async function handler(req: any, res: any): Promise<void> {
       // reused across threads must not return another thread's row.
       const idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.slice(0, 100) : "";
       if (idempotencyKey) {
-        let prior = await loadMessageByIdempotencyKey({ eventId, key: idempotencyKey, senderEmail: sender, recipientEmail: recipient, community: false });
+        // Scan the already-loaded history FIRST: it was read at the
+        // top of this request, so a genuine retry's row is already
+        // in memory and the common send (no prior row) skips a whole
+        // database round trip. The targeted lookup stays as the
+        // fallback for a prior row outside the loaded history window
+        // (same match fields either way: event + key + sender +
+        // recipient).
+        let prior = existing.find((m: any) => m.type !== "community" && m.idempotencyKey === idempotencyKey && m.senderEmail === sender && String(m.eventId || "") === String(eventId) && norm(m.recipientEmail || "") === norm(recipient)) || null;
         if (!prior) {
-          // Fallback: the sender's history is already loaded above
-          // for authorizeContact, so this in-memory scan costs no
-          // extra read when the targeted lookup fails.
-          prior = existing.find((m: any) => m.type !== "community" && m.idempotencyKey === idempotencyKey && m.senderEmail === sender && String(m.eventId || "") === String(eventId) && norm(m.recipientEmail || "") === norm(recipient)) || null;
+          prior = await loadMessageByIdempotencyKey({ eventId, key: idempotencyKey, senderEmail: sender, recipientEmail: recipient, community: false });
         }
         if (prior) {
           sendJson(res, 200, { message: stripMessageForViewer(prior, sender), mailed: false, idempotent: true });
@@ -2753,6 +2775,12 @@ export default async function handler(req: any, res: any): Promise<void> {
         msg.replyToId = replyToId;
         msg.replySnapshot = replySnapshot;
       }
+      // The recipient's channel-version read is independent of the
+      // store — start it now so it overlaps the write instead of
+      // adding a full round trip between the store and the broadcast
+      // (every serial step before the broadcast is delivery delay
+      // the receiver can feel).
+      const recipientVersionPromise = loadSessionVersion(String(recipient || ""));
       try {
         await storeMessage(msg);
       } catch {
@@ -2767,7 +2795,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         const entries: { topic: string; event: string; payload: any }[] = [];
         // The sender is me: my version is in the verified session.
         // The recipient's stored version is loaded (one read).
-        const recipientVersion = await loadSessionVersion(String(recipient || ""));
+        const recipientVersion = await recipientVersionPromise;
         for (const email of [recipient, sender]) {
           const v = norm(String(email || "")) === norm(sender || "") ? (session.sessionVersion ?? 0) : recipientVersion;
           const channel = await privateChannelName(String(email || ""), v);

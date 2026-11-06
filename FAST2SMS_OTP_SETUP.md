@@ -9,11 +9,15 @@ Telegram contact-share verification (`api/telegram-verify.ts`,
 
 1. Profile page → `POST /api/phone-otp { action: "send", email, phone }`
    (signed-in session required, session email must match).
-2. The endpoint generates the OTP, stores **only its SHA-256 hash** in
-   the Supabase `phone_verifications` table (status `pending_otp`,
-   10-minute expiry), and asks Fast2SMS to deliver the code
-   (`bulkV2` API, route `otp` — Fast2SMS's own pre-approved OTP
-   template, so no DLT template of ours is needed to start).
+2. The endpoint generates the OTP, stores **only its HMAC-SHA256 hash**
+   (keyed by `SESSION_SECRET`) in the Supabase `phone_verifications`
+   table (status `pending_otp`, 10-minute expiry), and asks Fast2SMS to
+   deliver the code (`bulkV2` API, **Quick API route `q`**, code inside
+   the message text). The dedicated `otp` route is closed for this
+   account — Fast2SMS support (2026-11-06) confirmed the OTP API "has
+   now been closed" for accounts without completed KYC/DLT and
+   directed us to Quick API instead. Quick API needs no DLT template
+   and no website verification; it costs ₹7/SMS from the wallet.
 3. The user types the code → `POST /api/phone-otp { action: "verify",
    token, otp }`. Max 5 attempts; on a match the row becomes
    `verified` and keeps the same `{ email, phone, status, verifiedAt }`
@@ -30,8 +34,12 @@ accepts `9876543210`, `+91 98765 43210`, `919876543210`, `09876543210`.
 1. Sign up at fast2sms.com — **no company email or domain needed**;
    signup is with a mobile number and comes with ₹50 test credit.
 2. In the panel open **Dev API** and copy the API key.
-3. Recharge as needed (OTP route costs roughly ₹0.16–0.25/SMS at
-   small volumes, + GST).
+3. In **Dev API → API Access Management**, turn **Quick API Access ON**
+   (the code sends on the Quick API route `q`).
+4. Keep wallet balance available: Quick API costs **₹7/SMS**, so the
+   current ₹150 wallet covers ~21 verification codes. Recharge before
+   it runs out — sends fail with a generic "Could not send the SMS"
+   when the balance can't cover a message.
 
 ## Step 2 — Environment variables
 
@@ -66,8 +74,8 @@ flows.)
 
 1. Deploy (or run the API locally with the env vars set).
 2. Sign in → Profile → save your mobile number → **Verify via SMS OTP**.
-3. You should receive "Your OTP is …" by SMS within seconds; enter it
-   → the profile shows the number as verified.
+3. You should receive "Your Locora verification code is …" by SMS
+   within seconds; enter it → the profile shows the number as verified.
 4. Register for an event that requires attendee details → the
    registration carries the server-stamped `phoneVerified` badge.
 
@@ -85,11 +93,15 @@ flows.)
 
 ## Going further (optional, later)
 
-- **Your own sender ID** (e.g. `LOCORA` instead of the shared OTP
-  route): register on a TRAI DLT portal as a Principal Entity
-  (PAN-based; proprietors/individuals can register), approve a header
-  + OTP template, then switch the endpoint's `route`/`sender_id`/
-  `template_id` accordingly. Fast2SMS offers free DLT support.
+- **Back to the cheap OTP route** (~₹0.25/SMS): complete DLT
+  registration (Principal Entity on a TRAI DLT portal, PAN-based;
+  proprietors/individuals can register), approve a header + OTP
+  template, then switch the endpoint's `route` back to `otp` with the
+  template variables. Fast2SMS offers free DLT support. (The account's
+  KYC route is currently blocked on Fast2SMS's side — their Aadhaar
+  KYC API is disabled — which is why Quick API is in use.)
+- **2Factor** is the other low-cost OTP provider (~₹0.20/SMS); only
+  `sendFast2SmsOtp` in `api/phone-otp.ts` would change.
 - **WhatsApp OTP** is available from the same Fast2SMS account and
   needs no DLT (Meta template approval instead).
 
@@ -97,10 +109,9 @@ flows.)
 
 | Symptom | Likely cause |
 | --- | --- |
-| "Could not send the SMS: Before using OTP Message API, complete website verification…" | Fast2SMS account gate, not a code problem: in the Fast2SMS panel open the **OTP Message** menu and complete website verification for your site (locora-hyperlocal.vercel.app). Until then the OTP route refuses every send. No code change needed once verified. |
-| "SMS verification is not set up yet (Fast2SMS key missing)" | `FAST2SMS_API_KEY` not set, or no redeploy after setting it |
-| "Verification table is not set up yet" | `phone_verifications` table missing in Supabase (step 3) |
-| "Could not send the SMS: …" | Fast2SMS rejected the request — the gateway's message follows the colon (common: wallet balance exhausted, invalid key) |
+| "Could not send the SMS. Please try again shortly." | Fast2SMS rejected the send — the gateway's own reason is in the Vercel function logs ("Fast2SMS send failed: …"), never shown to users. Common causes: wallet balance too low for a ₹7 Quick API SMS, Quick API Access OFF in Dev API, or an invalid key. |
+| "SMS verification is not set up yet" | `FAST2SMS_API_KEY` not set, or no redeploy after setting it |
+| "Verification is temporarily unavailable…" / "SMS verification is temporarily unavailable…" | Supabase table read/write failed (missing `phone_verifications` or `rate_limits` table — step 3), or the rate-limit table is missing (OTP sends fail closed by design) |
 | "Enter a valid Indian mobile number (10 digits)" | Number isn't a 10-digit Indian mobile (landlines and non-Indian numbers can't receive Fast2SMS OTPs) |
-| OTP never arrives | Check the Fast2SMS panel's delivery report for the number; DND/operator delays show there first |
+| OTP never arrives | Check the Fast2SMS panel's delivery report for the number; DND/operator delays show there first. Quick API is not a priority OTP route, so peak-time delivery can take longer than a few seconds. |
 | "Too many OTP requests" | Rate limit: 5 sends/hour per email and per phone number |
