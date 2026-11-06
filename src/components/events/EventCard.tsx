@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Bookmark, MapPin, Calendar, Users, ImageOff } from 'lucide-react';
 import { EventItem } from '../../types';
-import { formatEventDate, formatPrice } from '../../utils/formatters';
+import { formatEventDate } from '../../utils/formatters';
 import { savedEventsService } from '../../services/saved-events-service';
 import { eventsService } from '../../services/events-service';
 import { useToast } from '../ui/Toast';
@@ -84,9 +84,10 @@ export function EventCard({ event, isRegistered = false, onBookmarkChange }: Eve
           <Bookmark className={`w-4 h-4 ${isSaved ? 'fill-[#1E3F35] text-[#1E3F35]' : ''}`} />
         </button>
 
-        {/* Price Tag in Bottom Corner */}
+        {/* Price Tag in Bottom Corner: cards show only Free / Paid —
+            the exact amount appears on the event page before paying. */}
         <div className="absolute bottom-3 left-3 px-2.5 py-1 rounded-md bg-[#1E2320]/85 backdrop-blur-xs text-white text-xs font-semibold tabular-nums">
-          {formatPrice(event.price)}
+          {event.price > 0 ? 'Paid' : 'Free'}
         </div>
 
         {/* Registered State Banner */}
