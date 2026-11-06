@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { Menu, X, PlusCircle, User, LogOut, Sparkles, ChevronDown } from 'lucide-react';
+import { Menu, X, PlusCircle, User, LogOut, Sparkles, ChevronDown, LayoutDashboard, Ticket, Bookmark, Settings, Briefcase, ShieldCheck } from 'lucide-react';
 import { authService } from '../../services/auth-service';
 import { messagesService } from '../../services/messages-service';
 import { subscribeToPrivateChannel } from '../../services/realtime-service';
@@ -325,7 +325,7 @@ export function Navbar() {
               <button
                 type="button"
                 onClick={() => setProfileDropdownOpen(!profileDropdownOpen)}
-                className="flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-full border border-slate-200 bg-white hover:bg-slate-50 transition-colors shadow-2xs text-xs font-medium text-slate-700"
+                className="flex items-center gap-2 pl-1.5 pr-3 py-1.5 rounded-full border border-[#E7E3DB] bg-white hover:bg-[#FAF8F5] hover:border-[#1E3F35]/40 transition-colors shadow-2xs text-xs font-semibold text-[#1E2320]"
                 aria-expanded={profileDropdownOpen}
               >
                 <Avatar
@@ -335,60 +335,74 @@ export function Navbar() {
                   initialClassName="text-[10px]"
                 />
                 <span className="max-w-[120px] truncate">{currentUser.name}</span>
-                <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <ChevronDown className="w-3.5 h-3.5 text-[#285447] shrink-0" />
               </button>
 
               {/* Profile Dropdown Menu */}
               {profileDropdownOpen && (
-                <div className="absolute right-0 mt-2 w-56 bg-white rounded-xl border border-slate-200 shadow-xl py-1 z-50 animate-in fade-in zoom-in-95 duration-100">
-                  <div className="px-4 py-2 border-b border-slate-100">
-                    <p className="text-xs font-medium text-slate-900 truncate">{currentUser.name}</p>
-                    <p className="text-[11px] text-slate-500 truncate">{currentUser.email}</p>
-                    <p className="text-[10px] text-indigo-600 font-semibold uppercase tracking-wider mt-1">
-                      Role: {accessRole ?? currentUser.role}
-                    </p>
+                <div className="absolute right-0 mt-2 w-64 bg-white rounded-2xl border border-[#E7E3DB] shadow-[0_20px_45px_-12px_rgba(30,35,32,0.28)] p-1.5 z-50 animate-in fade-in zoom-in-95 duration-100">
+                  <div className="flex items-center gap-3 px-3 pt-2.5 pb-3 border-b border-[#E7E3DB] mb-1">
+                    <Avatar
+                      src={currentUser.avatar}
+                      name={currentUser.name}
+                      className="w-10 h-10 rounded-full object-cover shrink-0 ring-2 ring-[#EAF1ED]"
+                      initialClassName="text-sm"
+                    />
+                    <div className="min-w-0">
+                      <p className="text-[13px] font-semibold text-[#1E2320] truncate">{currentUser.name}</p>
+                      <p className="text-[11px] text-[#5F6B66] truncate">{currentUser.email}</p>
+                      <span className="inline-flex items-center gap-1.5 mt-1.5 px-2 py-0.5 rounded-full bg-[#EAF1ED] text-[#1E3F35] text-[9px] font-bold uppercase tracking-[0.08em]">
+                        <span className="w-1 h-1 rounded-full bg-[#1E3F35]" />
+                        {accessRole ?? currentUser.role}
+                      </span>
+                    </div>
                   </div>
 
                   <Link
                     to="/dashboard"
-                    className="block px-4 py-2 text-xs text-slate-700 hover:bg-slate-50"
+                    className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-[#1E2320]/75 hover:bg-[#FAF8F5] hover:text-[#1E3F35] transition-colors"
                   >
-                    Attendee Dashboard
+                    <LayoutDashboard className="w-4 h-4 text-[#285447]/70 shrink-0" />
+                    <span>Attendee Dashboard</span>
                   </Link>
                   <Link
                     to="/my-registrations"
-                    className="block px-4 py-2 text-xs text-slate-700 hover:bg-slate-50"
+                    className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-[#1E2320]/75 hover:bg-[#FAF8F5] hover:text-[#1E3F35] transition-colors"
                   >
-                    My Registrations
+                    <Ticket className="w-4 h-4 text-[#285447]/70 shrink-0" />
+                    <span>My Registrations</span>
                   </Link>
                   <Link
                     to="/saved"
-                    className="block px-4 py-2 text-xs text-slate-700 hover:bg-slate-50"
+                    className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-[#1E2320]/75 hover:bg-[#FAF8F5] hover:text-[#1E3F35] transition-colors"
                   >
-                    Saved Events
+                    <Bookmark className="w-4 h-4 text-[#285447]/70 shrink-0" />
+                    <span>Saved Events</span>
                   </Link>
                   <Link
                     to="/profile"
-                    className="block px-4 py-2 text-xs text-slate-700 hover:bg-slate-50"
+                    className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-[#1E2320]/75 hover:bg-[#FAF8F5] hover:text-[#1E3F35] transition-colors"
                   >
-                    Profile Settings
+                    <Settings className="w-4 h-4 text-[#285447]/70 shrink-0" />
+                    <span>Profile Settings</span>
                   </Link>
 
                   {canPost && (
                     <>
-                      <div className="border-t border-slate-100 my-1" />
+                      <div className="border-t border-[#E7E3DB] my-1.5 mx-1" />
 
                       <Link
                         to="/organizer/dashboard"
-                        className="block px-4 py-2 text-xs text-slate-700 hover:bg-slate-50"
+                        className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-[#1E2320]/75 hover:bg-[#FAF8F5] hover:text-[#1E3F35] transition-colors"
                       >
-                        Organizer Console
+                        <Briefcase className="w-4 h-4 text-[#285447]/70 shrink-0" />
+                        <span>Organizer Console</span>
                       </Link>
                       <Link
                         to="/organizer/events/new"
-                        className="flex items-center gap-1.5 px-4 py-2 text-xs text-indigo-600 font-medium hover:bg-indigo-50"
+                        className="flex items-center justify-center gap-1.5 mt-1 px-3 py-2 rounded-lg text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] transition-colors"
                       >
-                        <PlusCircle className="w-3.5 h-3.5" />
+                        <PlusCircle className="w-4 h-4" />
                         <span>Create New Event</span>
                       </Link>
                     </>
@@ -396,24 +410,25 @@ export function Navbar() {
 
                   {isAdmin && (
                     <>
-                      <div className="border-t border-slate-100 my-1" />
+                      <div className="border-t border-[#E7E3DB] my-1.5 mx-1" />
 
                       <Link
                         to="/admin"
-                        className="block px-4 py-2 text-xs text-slate-700 hover:bg-slate-50"
+                        className="flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-[#1E2320]/75 hover:bg-[#FAF8F5] hover:text-[#1E3F35] transition-colors"
                       >
-                        Admin — Organizer Requests
+                        <ShieldCheck className="w-4 h-4 text-[#285447]/70 shrink-0" />
+                        <span>Admin — Organizer Requests</span>
                       </Link>
                     </>
                   )}
 
-                  <div className="border-t border-slate-100 my-1" />
+                  <div className="border-t border-[#E7E3DB] my-1.5 mx-1" />
 
                   <button
                     onClick={handleLogout}
-                    className="w-full text-left flex items-center gap-2 px-4 py-2 text-xs text-rose-600 hover:bg-rose-50"
+                    className="w-full text-left flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium text-[#B3402E] hover:bg-[#FAF0ED] transition-colors"
                   >
-                    <LogOut className="w-3.5 h-3.5" />
+                    <LogOut className="w-4 h-4 shrink-0" />
                     <span>Sign Out</span>
                   </button>
                 </div>
@@ -618,7 +633,7 @@ export function Navbar() {
             </div>
           )}
 
-          <div className="pt-4 border-t border-slate-100 flex flex-col gap-2">
+          <div className="pt-4 border-t border-[#E7E3DB] flex flex-col gap-2">
             {currentUser ? (
               <div className="flex items-center justify-between py-2">
                 <div className="flex items-center gap-2">
@@ -629,13 +644,13 @@ export function Navbar() {
                     initialClassName="text-xs"
                   />
                   <div>
-                    <p className="text-xs font-semibold text-slate-900">{currentUser.name}</p>
-                    <p className="text-[11px] text-slate-500">{currentUser.role}</p>
+                    <p className="text-xs font-semibold text-[#1E2320]">{currentUser.name}</p>
+                    <p className="text-[11px] text-[#5F6B66]">{currentUser.role}</p>
                   </div>
                 </div>
                 <button
                   onClick={handleLogout}
-                  className="text-xs font-medium text-rose-600 p-2 hover:bg-rose-50 rounded-lg"
+                  className="text-xs font-medium text-[#B3402E] p-2 hover:bg-[#FAF0ED] rounded-lg"
                 >
                   Sign Out
                 </button>
