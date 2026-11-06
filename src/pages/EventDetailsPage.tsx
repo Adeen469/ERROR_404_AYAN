@@ -20,6 +20,7 @@ import {
 import { EventItem, AttendeeRegistration } from '../types';
 import { eventsService, isEventOwner } from '../services/events-service';
 import { registrationsService, getRefundQuote, TeamRegistrationOptions } from '../services/registrations-service';
+import { safeLinkUrl } from '../services/messages-service';
 import { paymentsService } from '../services/payments-service';
 import { savedEventsService } from '../services/saved-events-service';
 import { authService } from '../services/auth-service';
@@ -943,6 +944,38 @@ export function EventDetailsPage() {
                     )}
                   </div>
                 </div>
+
+                {/* Community links: revealed only now that this viewer
+                    has a confirmed registration (this whole branch is
+                    the registered state). Rendered through safeLinkUrl
+                    so only https links become buttons. */}
+                {(safeLinkUrl(event.whatsappGroupUrl) || safeLinkUrl(event.communityUrl)) && (
+                  <div className="p-3 bg-white border border-[#E7E3DB] rounded-lg space-y-2">
+                    <p className="text-xs font-semibold text-[#1E2320]">Event community</p>
+                    {safeLinkUrl(event.whatsappGroupUrl) && (
+                      <a
+                        href={safeLinkUrl(event.whatsappGroupUrl) || undefined}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-2 py-2 px-3 text-xs font-semibold text-[#1E3F35] bg-[#EAF1ED] hover:bg-[#DCEAE3] border border-[#D0E2D9] rounded-lg transition-colors"
+                      >
+                        <MessageCircle className="w-4 h-4" />
+                        Join the WhatsApp group
+                      </a>
+                    )}
+                    {safeLinkUrl(event.communityUrl) && (
+                      <a
+                        href={safeLinkUrl(event.communityUrl) || undefined}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-2 py-2 px-3 text-xs font-semibold text-[#1E3F35] bg-[#EAF1ED] hover:bg-[#DCEAE3] border border-[#D0E2D9] rounded-lg transition-colors"
+                      >
+                        <Users className="w-4 h-4" />
+                        Visit the community page
+                      </a>
+                    )}
+                  </div>
+                )}
 
                 <div className="flex gap-2">
                   <Link

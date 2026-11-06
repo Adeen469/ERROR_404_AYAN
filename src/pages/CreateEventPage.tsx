@@ -214,6 +214,11 @@ export function CreateEventPage() {
   // organizer pastes. The details page "View in Maps" opens this exact
   // location; when blank it falls back to a Maps search for the address.
   const [mapUrl, setMapUrl] = useState('');
+  // Optional community links (WhatsApp group invite / community
+  // page). The event page reveals them only to attendees with a
+  // confirmed registration.
+  const [whatsappGroupUrl, setWhatsappGroupUrl] = useState('');
+  const [communityUrl, setCommunityUrl] = useState('');
   const [price, setPrice] = useState('0');
   // Attendee details gate: on by default. When on, registering requires
   // the attendee's name, mobile number and email, plus a confirmation
@@ -269,6 +274,20 @@ export function CreateEventPage() {
         }
       } catch {
         errs.mapUrl = 'Map link must be a valid link.';
+      }
+    }
+    for (const [key, val] of [['whatsappGroupUrl', whatsappGroupUrl], ['communityUrl', communityUrl]] as const) {
+      if (val.trim()) {
+        try {
+          const u = new URL(val.trim());
+          if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+            errs[key] = 'Link must start with http:// or https://.';
+          } else if (val.trim().length > 500) {
+            errs[key] = 'Link is too long.';
+          }
+        } catch {
+          errs[key] = 'Link must be a valid link.';
+        }
       }
     }
 
@@ -398,6 +417,8 @@ export function CreateEventPage() {
         venueName: venueName.trim(),
         address: address.trim(),
         mapUrl: mapUrl.trim() || undefined,
+        whatsappGroupUrl: whatsappGroupUrl.trim() || undefined,
+        communityUrl: communityUrl.trim() || undefined,
         // Location rule: the neighborhood is the city when a state is
         // selected, otherwise none.
         neighborhood: location.state.trim() ? (location.city.trim() || 'Metro City') : '',
@@ -771,6 +792,42 @@ export function CreateEventPage() {
             </p>
             {errors.mapUrl && (
               <p className="text-[11px] text-rose-600 mt-1">{errors.mapUrl}</p>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+              Community Links
+            </label>
+            <div className="space-y-2">
+              <input
+                type="url"
+                value={whatsappGroupUrl}
+                onChange={(e) => setWhatsappGroupUrl(e.target.value)}
+                placeholder="WhatsApp group link, e.g. https://chat.whatsapp.com/…"
+                className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] ${
+                  errors.whatsappGroupUrl ? 'border-rose-500' : 'border-[#E2DFD8]'
+                }`}
+              />
+              <input
+                type="url"
+                value={communityUrl}
+                onChange={(e) => setCommunityUrl(e.target.value)}
+                placeholder="Community link, e.g. https://…"
+                className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] ${
+                  errors.communityUrl ? 'border-rose-500' : 'border-[#E2DFD8]'
+                }`}
+              />
+            </div>
+            <p className="text-[11px] text-[#5F635D] mt-1">
+              Optional — these links stay hidden until an attendee registers
+              for your event; only registered attendees can see and open them.
+            </p>
+            {errors.whatsappGroupUrl && (
+              <p className="text-[11px] text-rose-600 mt-1">{errors.whatsappGroupUrl}</p>
+            )}
+            {errors.communityUrl && (
+              <p className="text-[11px] text-rose-600 mt-1">{errors.communityUrl}</p>
             )}
           </div>
         </div>

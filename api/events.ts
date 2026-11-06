@@ -1280,6 +1280,21 @@ export default async function handler(req: any, res: any) {
         } catch { okUrl = false; }
         if (!okUrl) return sendJson(res, 400, { message: "Map link must be a valid http(s) URL" });
       }
+      // Optional community links (WhatsApp group invite / community
+      // page): same rule as the map link — http(s) only, capped.
+      const communityLinks: Record<string, string> = {};
+      for (const key of ["whatsappGroupUrl", "communityUrl"]) {
+        const v = typeof p[key] === "string" ? p[key].trim() : "";
+        if (v) {
+          let okUrl = false;
+          try {
+            const u = new URL(v);
+            okUrl = (u.protocol === "http:" || u.protocol === "https:") && v.length <= 500;
+          } catch { okUrl = false; }
+          if (!okUrl) return sendJson(res, 400, { message: "Community link must be a valid http(s) URL" });
+          communityLinks[key] = v;
+        }
+      }
       // Team participation (Technology & Hackathons only, f-1 + f-2):
       // the organizer picks Individual only / Team only / Individual
       // or Team, plus the min/max team size (2..10, min <= max). Any
@@ -1339,6 +1354,8 @@ export default async function handler(req: any, res: any) {
         endDate: endRaw,
         venueName, address: typeof p.address === "string" ? p.address.slice(0, 300) : "100 Main Street",
         mapUrl: mapUrl || undefined,
+        whatsappGroupUrl: communityLinks.whatsappGroupUrl || undefined,
+        communityUrl: communityLinks.communityUrl || undefined,
         neighborhood: p.state ? (p.city || "") : "", city: p.city || "Metro City",
         state: p.state || undefined, country: p.country || undefined,
         // Ownership is forced from the session, never from the body.
@@ -1437,6 +1454,22 @@ export default async function handler(req: any, res: any) {
           } catch { okUrl = false; }
           if (!okUrl) return sendJson(res, 400, { message: "Map link must be a valid http(s) URL" });
           updates.mapUrl = m;
+        }
+      }
+      // Community links on edit: same http(s) rule as the map link.
+      for (const key of ["whatsappGroupUrl", "communityUrl"]) {
+        if (updates[key] !== undefined) {
+          if (typeof updates[key] !== "string") return sendJson(res, 400, { message: "Community link must be a valid http(s) URL" });
+          const m = updates[key].trim();
+          if (m) {
+            let okUrl = false;
+            try {
+              const u = new URL(m);
+              okUrl = (u.protocol === "http:" || u.protocol === "https:") && m.length <= 500;
+            } catch { okUrl = false; }
+            if (!okUrl) return sendJson(res, 400, { message: "Community link must be a valid http(s) URL" });
+            updates[key] = m;
+          }
         }
       }
       // Same as POST: a caller-uploaded cover arrives as a data URL

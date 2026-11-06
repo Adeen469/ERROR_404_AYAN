@@ -73,6 +73,11 @@ export interface EventItem {
   // present, the details page "View in Maps" opens this exact location;
   // when absent it falls back to a Maps search for the street address.
   mapUrl?: string;
+  // Optional community links the organizer pastes (WhatsApp group
+  // invite, community page). The event page reveals them ONLY to
+  // attendees with a confirmed registration — a perk of being in.
+  whatsappGroupUrl?: string;
+  communityUrl?: string;
   // Legacy stored value, kept for old records. Never displayed or
   // filtered on: the neighborhood is derived — the city when a state is
   // selected, otherwise none (see getEventNeighborhood in formatters).
