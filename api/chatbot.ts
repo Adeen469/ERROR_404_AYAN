@@ -9,9 +9,13 @@
 // material: only the HTTP status and the provider's own short error
 // message, truncated and scrubbed of anything key-shaped.
 //
-// Providers: Gemini FIRST (gemini-2.5-flash via generateContent), Groq
-// as fallback (llama-3.3-70b-versatile via the OpenAI-compatible chat
-// completions endpoint). If Gemini fails for ANY reason (non-2xx incl.
+// Providers: Gemini FIRST (gemini-3.8-flash via generateContent), Groq
+// as fallback (openai/gpt-oss-120b via the OpenAI-compatible chat
+// completions endpoint, then openai/gpt-oss-20b if the first model 404s
+// — Groq retired llama-3.3-70b-versatile from free/developer plans on
+// 2026-08-16, and Gemini retired gemini-2.5-flash for new users; both
+// old IDs 404, which is why the bot answered with the fallback even
+// with valid keys). If Gemini fails for ANY reason (non-2xx incl.
 // 403/429, timeout, empty reply), Groq is tried once. If both fail the
 // caller gets a friendly fallback message — never raw provider errors,
 // statuses, or key material.
@@ -272,9 +276,13 @@ async function fetchJson(url: string, init?: any): Promise<{ ok: boolean; status
 
 export interface ChatTurn { role: "user" | "assistant"; text: string; }
 
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-3.8-flash";
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-const GROQ_MODEL = "llama-3.3-70b-versatile";
+// Groq's current production chat models (free/developer plans). The
+// first is the direct replacement for the retired llama-3.3-70b;
+// the second is tried only if the first 404s (retired), never on
+// auth/rate-limit errors, which would fail identically for both.
+const GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"];
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 // Generous but bounded: the two legs together stay inside a normal
 // serverless invocation even if both are slow.
@@ -478,32 +486,44 @@ export async function callGemini(message: string, history: ChatTurn[], eventsCon
 export async function callGroq(message: string, history: ChatTurn[], eventsContext: string, fetchImpl: any = fetch, diag?: any): Promise<string | null> {
   const key = getEnv("GROQ_API_KEY");
   if (!key) { if (diag) diag.groq = { keyPresent: false }; return null; }
-  try {
-    const res = await fetchWithTimeout(
-      fetchImpl,
-      GROQ_URL,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-        body: JSON.stringify({
-          model: GROQ_MODEL,
-          messages: buildGroqMessages(message, history, eventsContext),
-          temperature: 0.7,
-          max_tokens: 600,
-        }),
-      },
-      GROQ_TIMEOUT_MS,
-    );
-    if (!res) { if (diag) diag.groq = { keyPresent: true, status: 0, error: "no response" }; return null; }
+  let lastStatus = 0;
+  let lastError = "provider error";
+  for (const model of GROQ_MODELS) {
+    let res: any = null;
+    try {
+      res = await fetchWithTimeout(
+        fetchImpl,
+        GROQ_URL,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+          body: JSON.stringify({
+            model,
+            messages: buildGroqMessages(message, history, eventsContext),
+            temperature: 0.7,
+            max_tokens: 600,
+          }),
+        },
+        GROQ_TIMEOUT_MS,
+      );
+    } catch {
+      lastStatus = 0; lastError = "network/timeout";
+      break;
+    }
+    if (!res) { lastStatus = 0; lastError = "no response"; break; }
     const body = await res.json().catch(() => null);
-    if (!res.ok) { if (diag) diag.groq = { keyPresent: true, status: res.status, error: sanitizeProviderError(body) }; return null; }
+    if (!res.ok) {
+      lastStatus = res.status; lastError = sanitizeProviderError(body);
+      if (res.status === 404) continue; // retired model — try the next one
+      break;
+    }
     const text = parseGroqText(body);
-    if (!text && diag) diag.groq = { keyPresent: true, status: res.status, error: "empty reply" };
-    return text;
-  } catch {
-    if (diag) diag.groq = { keyPresent: true, status: 0, error: "network/timeout" };
-    return null;
+    if (text) return text;
+    lastStatus = res.status; lastError = "empty reply";
+    break;
   }
+  if (diag) diag.groq = { keyPresent: true, status: lastStatus, error: lastError };
+  return null;
 }
 
 // Short, safe provider error text for the debug object: the HTTP
