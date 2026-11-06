@@ -76,7 +76,7 @@ const deployed = listApiFiles("api")
   .filter((f) => !ignored.has(f));
 console.log("deployed functions:", deployed.join(", "));
 check("deployed function count <= 12 (Vercel Hobby cap)", deployed.length <= 12);
-check("deployed function count is 10 (no drift since the sweep)", deployed.length === 10);
+check("deployed function count is 11 (10 + api/chatbot.ts, Loci chatbot 2026-11-06)", deployed.length === 11);
 for (const f of ["api/auth.ts", "api/events.ts", "api/messages.ts", "api/registrations.ts", "api/payments.ts", "api/phone-otp.ts", "api/notify.ts", "api/organizer-access.ts", "api/auth/callback/google.ts", "api/auth/google.ts"]) {
   check(`deployed set includes ${f}`, deployed.includes(f));
 }
@@ -88,10 +88,10 @@ check("PERF: slim list never ships an embedded data-URI cover over ~60KB (one me
 check("PERF: cover uploads are capped at 1024px so embedded covers stay small",
   uploadField.includes("const MAX_DIMENSION = 1024;"));
 const allApiSrc = listApiFiles("api").map((f) => readFileSync(f, "utf8")).join("\n");
-check("H2: checkRateLimit defined in the canonical module + inlined into the 8 deployed handlers",
-  (allApiSrc.match(/function checkRateLimit\(/g) || []).length === 9);
-check("H2: getClientIp defined in the canonical module + inlined into all 8 deployed handlers (phone-otp defines it in its copy but never calls it)",
-  (allApiSrc.match(/function getClientIp\(/g) || []).length === 9);
+check("H2: checkRateLimit defined in the canonical module + inlined into the 9 deployed handlers",
+  (allApiSrc.match(/function checkRateLimit\(/g) || []).length === 10);
+check("H2: getClientIp defined in the canonical module + inlined into the deployed handlers (phone-otp defines it in its copy but never calls it; api/chatbot.ts carries an extra local copy)",
+  (allApiSrc.match(/function getClientIp\(/g) || []).length === 11);
 check("H2: shared limiter lives in api/_lib/rate-limit.ts",
   rateLimitLib.includes("export function getClientIp") && rateLimitLib.includes("export async function checkRateLimit"));
 for (const [name, src] of [["auth", auth], ["events", events], ["messages", messages], ["registrations", registrations], ["payments", payments], ["phone-otp", phoneOtp], ["notify", notify], ["organizer-access", orgAcc]] as const) {

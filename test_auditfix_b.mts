@@ -69,11 +69,11 @@ const vercelignore = readFileSync(".vercelignore", "utf8");
 // deployed function crashes it live on this project's Vercel setup
 // (FUNCTION_INVOCATION_FAILED — see the module header for the history).
 const defs = apiFiles.filter((f) => /function checkRateLimit\(/.test(f.src));
-check("H2: checkRateLimit definitions = canonical module + 8 inlined handler copies",
-  defs.length === 9 && defs.some((f) => f.path === "api/_lib/rate-limit.ts"));
+check("H2: checkRateLimit definitions = canonical module + 9 inlined handler copies",
+  defs.length === 10 && defs.some((f) => f.path === "api/_lib/rate-limit.ts"));
 const ipDefs = apiFiles.filter((f) => /function getClientIp\(/.test(f.src));
-check("H2: getClientIp definitions = canonical module + 8 inlined handler copies (phone-otp's copy defines it but never calls it)",
-  ipDefs.length === 9 && ipDefs.some((f) => f.path === "api/_lib/rate-limit.ts"));
+check("H2: getClientIp definitions = canonical module + inlined handler copies (phone-otp's copy defines it but never calls it; api/chatbot.ts also carries a copy)",
+  ipDefs.length === 10 && ipDefs.some((f) => f.path === "api/_lib/rate-limit.ts"));
 
 // --- 2: every deployed caller carries an inlined copy and calls it;
 // no deployed file imports api/_lib (those imports crash live) ---
@@ -118,12 +118,12 @@ check("H2: api/_lib/session.ts re-exports the shared helpers (surface preserved)
 check("H2: shared module is under api/_lib, not a new function file",
   existsSync("api/_lib/rate-limit.ts") && !existsSync("api/rate-limit.ts"));
 {
-  // Deployed function count stays 10 (Hobby cap 12): api/**/*.ts minus
+  // Deployed function count stays 11 (Hobby cap 12): api/**/*.ts minus
   // _lib minus .vercelignore entries.
   const ignored = new Set(vercelignore.split("\n").map((s) => s.trim()).filter((s) => s && !s.startsWith("#")));
   const deployed = apiFiles.filter((f) => !f.path.startsWith("api/_lib/") && !ignored.has(f.path));
-  check("H2: deployed Vercel function count still 10 (cap 12)",
-    deployed.length === 10);
+  check("H2: deployed Vercel function count still 11 (cap 12)",
+    deployed.length === 11);
 }
 
 // --- 3: getClientIp uses the LAST x-forwarded-for entry ---

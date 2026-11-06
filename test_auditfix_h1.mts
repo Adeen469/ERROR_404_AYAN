@@ -172,7 +172,7 @@ check("functions: no new api file was created for H1",
     }
   };
   walk("api");
-  check(`functions: deployed count stays 10/12 (got ${deployed.length}: ${deployed.join(", ")})`, deployed.length === 10);
+  check(`functions: deployed count stays 11/12 (got ${deployed.length}: ${deployed.join(", ")})`, deployed.length === 11);
 }
 
 // ---- Frontend ----
