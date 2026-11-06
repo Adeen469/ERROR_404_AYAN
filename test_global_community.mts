@@ -94,7 +94,7 @@ check("global marker: a private row in the global room is NOT global",
 
 // --- Global GET branch (server) ---
 check("global GET: dedicated branch loads only global rows",
-  messages.includes("loadCommunityMessages(GLOBAL_EVENT_ID)"));
+  messages.includes("loadCommunityMessagesPage(GLOBAL_EVENT_ID, pageOpts)")); // H8: paged loader, same scope
 check("global GET: returns member:true for any session user",
   messages.includes("if (eventId === GLOBAL_EVENT_ID)"));
 check("global GET: moderator flag comes from approved organizers/admins",
@@ -108,7 +108,7 @@ check("leak: private GET excludes community rows",
 check("leak: event GET loads only that event's rows",
   messages.includes("loadCommunityMessages(eventId)"));
 check("leak: global GET loads only global rows",
-  messages.includes("loadCommunityMessages(GLOBAL_EVENT_ID)"));
+  messages.includes("loadCommunityMessagesPage(GLOBAL_EVENT_ID, pageOpts)")); // H8: paged loader, same scope
 check("leak: private inbox client filters community rows too",
   service.includes("m.type !== 'community'"));
 

@@ -2,7 +2,7 @@
 // is now a cache-clear no-op because counts are owned server-side by
 // api/registrations.ts (direct count PATCHes are refused with 403).
 import { EventFilterOptions, EventItem, PaginatedResponse } from '../types';
-import { DEMO_EVENTS, DEMO_ORGANIZERS } from '../mocks/demo-data';
+import { DEMO_EVENTS } from '../mocks/demo-data';
 import { apiClient, isDemoMode } from './api-client';
 import {
   addPendingOp,
@@ -220,14 +220,20 @@ function migrateCoverImage(coverImage: string | undefined): string | undefined {
 }
 
 function getStoredEvents(): EventItem[] {
+  // L9 (audit #4): demo events are dev-only now. The local store used
+  // to seed itself with DEMO_EVENTS on first run, so a production user
+  // with an empty store saw eight fake events presented as real ones.
+  // Seeding happens only with VITE_USE_MOCK_API=true (isDemoMode);
+  // in production an empty store is just empty.
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) {
+      if (!isDemoMode()) return [];
       localStorage.setItem(STORAGE_KEY, JSON.stringify(DEMO_EVENTS));
       return DEMO_EVENTS;
     }
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return DEMO_EVENTS;
+    if (!Array.isArray(parsed)) return isDemoMode() ? DEMO_EVENTS : [];
     let changed = false;
     const migrated = parsed.map((event: EventItem) => {
       const fixed = migrateCoverImage(event.coverImage);
@@ -251,7 +257,9 @@ function getStoredEvents(): EventItem[] {
     }
     return withoutSamples;
   } catch {
-    return DEMO_EVENTS;
+    // A corrupt store reads as empty in production; demo mode keeps
+    // the old behaviour of falling back to the sample events.
+    return isDemoMode() ? DEMO_EVENTS : [];
   }
 }
 
@@ -404,7 +412,17 @@ export const eventsService = {
     };
   },
 
-  async getEventById(id: string): Promise<EventItem | null> {
+  // H11: `strict` mode distinguishes a LOAD FAILURE from a genuinely
+  // missing event. The default (non-strict) path swallows remote
+  // failures into the local-store fallback and returns null — which
+  // made every details page show "Event Not Found" when the API was
+  // down. Strict callers (EventDetailsPage) get the error rethrown
+  // when the remote fetch fails AND no local copy exists, so the page
+  // can show an error state with Retry instead. A 404 from the API
+  // is still a genuine "not found" (null, no throw), and a local
+  // copy still renders (stale beats missing). Non-strict callers
+  // (AttendeesPage, EditEventPage, prefetch) are untouched.
+  async getEventById(id: string, opts?: { strict?: boolean }): Promise<EventItem | null> {
     if (!isDemoMode()) {
       try {
         // Single events go through /events?id=<id> on the shared list
@@ -424,6 +442,11 @@ export const eventsService = {
         );
       } catch (err) {
         console.warn('Backend API /events?id unavailable, falling back to local events store:', err);
+        if (opts?.strict && (err as any)?.status !== 404) {
+          const local = getStoredEvents().find((e) => e.id === id) || null;
+          if (!local) throw err instanceof Error ? err : new Error('Failed to load event');
+          return local;
+        }
       }
     }
 
@@ -532,7 +555,22 @@ export const eventsService = {
       capacity: Number(payload.capacity) || 50,
       registeredCount: 0,
       status: 'published',
-      organizer: payload.organizer || DEMO_ORGANIZERS[0],
+      // L9 (audit #4): the fallback organizer used to be
+      // DEMO_ORGANIZERS[0] — a made-up organizer shown as the poster
+      // of a real user's event. A locally created event with no
+      // organizer record now gets a plain generic organizer built
+      // from the creator's own email instead.
+      organizer: payload.organizer || {
+        id: `local-${(payload.createdByEmail || 'organizer').toLowerCase()}`,
+        name: 'Community Organizer',
+        slug: 'community-organizer',
+        avatar: '',
+        bio: '',
+        email: payload.createdByEmail || '',
+        location: payload.city || '',
+        eventsCount: 0,
+        totalAttendeesServed: 0,
+      },
       tags: payload.tags && payload.tags.length > 0 ? payload.tags : ['Local', 'Community'],
       isFeatured: false,
     };

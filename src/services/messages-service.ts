@@ -105,6 +105,38 @@ export function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// L9 (audit #4): temp ids for optimistic bubbles were `temp-<ms>` —
+// predictable, and two sends in the same millisecond collided (same
+// React key, same reconcile identity). A crypto-random suffix makes
+// each bubble unique.
+export function newTempId(): string {
+  try {
+    const b = new Uint8Array(6);
+    crypto.getRandomValues(b);
+    return `temp-${Date.now()}-${Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('')}`;
+  } catch {
+    return `temp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+
+// L9 (audit #4): attachment / message links may only point at https:
+// or blob: URLs. Attachment URLs come from the server (Supabase public
+// Storage), but a tampered or legacy row could carry a javascript: /
+// data: / file: URL — rendered as an <a href> that would run on click.
+// Returns the URL when its scheme is allowed, null otherwise; callers
+// render a non-link fallback (name + size, no anchor) for null.
+export function safeLinkUrl(url: string | undefined | null): string | null {
+  if (!url || typeof url !== 'string') return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol === 'https:' || parsed.protocol === 'blob:') return url;
+  return null;
+}
+
 // One thread per (event, attendee, organizer): the key is the event
 // plus both participants' emails, sorted so either side computes the
 // same key for the same conversation.
@@ -231,6 +263,26 @@ export function isNearBottom(el: HTMLElement | null, thresholdPx = 120): boolean
   return el.scrollHeight - el.scrollTop - el.clientHeight <= thresholdPx;
 }
 
+// ONE dedupe window for pending bubbles (M10): the visible-list
+// hide check (MessagesPage / CommunityChat) and
+// reconcileFailedPending below must agree, or a slow send whose
+// server copy arrives 31–60s after the temp bubble shows BOTH
+// copies until the POST resolves. 60s absorbs client/server clock
+// skew and slow (large-attachment) uploads; the hide check's
+// `server.createdAt >= temp.createdAt` guard still keeps a genuinely
+// repeated message ("Hi", "Hi") from collapsing into the first copy.
+export const PENDING_DEDUPE_WINDOW_MS = 60 * 1000;
+
+// M10: identity of the tail of the visible list. The "New messages"
+// pill counts ARRIVALS only — rows appended at the END. Prepending
+// older pages (loadOlder) or replacing the list with the same tail
+// leaves this key unchanged, so no pill is counted. An edit or a
+// tombstone keeps the row's id, so it never counts either.
+export function lastVisibleKey(list: Array<{ id?: string; createdAt?: string }>): string {
+  const last = list.length ? list[list.length - 1] : null;
+  return last ? `${last.id || ''}|${last.createdAt || ''}` : '';
+}
+
 // Reconcile "stored but response lost" sends (2026-11-06): a send can
 // reach the server and be stored, yet the client sees a network
 // failure ("Failed to fetch") and marks the bubble failed — while the
@@ -245,10 +297,29 @@ export function isNearBottom(el: HTMLElement | null, thresholdPx = 120): boolean
 // own response. A dropped bubble is always represented by the
 // matching server row, so no message is lost, and it is never shown
 // twice.
+//
+// THREAD SCOPING (audit #4 H10): the old match had no thread scope,
+// so the same "Hi" sent in two threads (or two events) collapsed
+// into one — a failed bubble in thread A vanished because an
+// identical message existed in thread B. A match now also requires
+// the same event AND the same thread (raw `eventId|a|b` key, sorted
+// pair — the same key `threadKey` above builds; community rows
+// match on the event/room alone, since the room IS the thread).
+// A missing event/thread on either side (legacy callers, unit
+// fixtures) falls back to the old unscoped match rather than
+// refusing — the real app always carries both fields.
+// NOTE: no idempotencyKey hash is used here, deliberately: the
+// server strips the key from viewer payloads because it is
+// bearer-ish, and publishing even a hash of it would let anyone
+// brute-force the low-entropy client key format back. The
+// event+thread+sender+text+attachment+60s match is the tightest
+// safe scope available without that key.
 export function reconcileFailedPending<
   T extends {
     failed?: boolean;
+    eventId?: string;
     senderEmail?: string;
+    recipientEmail?: string;
     text?: string;
     attachment?: { name?: string } | null;
     createdAt?: string;
@@ -256,7 +327,9 @@ export function reconcileFailedPending<
 >(
   pending: T[],
   serverMessages: Array<{
+    eventId?: string;
     senderEmail?: string;
+    recipientEmail?: string;
     text?: string;
     attachment?: { name?: string } | null;
     createdAt?: string;
@@ -265,6 +338,15 @@ export function reconcileFailedPending<
 ): T[] {
   const me = (meEmail || '').toLowerCase();
   if (!me || pending.length === 0 || serverMessages.length === 0) return pending;
+  // Local thread key (same shape as threadKey() above, kept inline
+  // so this function stays self-contained for the extraction-based
+  // tests). Community rows (recipient "community:<eventId>") have
+  // no thread pair — they match on the event alone.
+  const threadOf = (eventId: string | undefined, a: string | undefined, b: string | undefined): string => {
+    if (!a || !b || String(b).startsWith('community:')) return '';
+    const pair = [a.toLowerCase(), b.toLowerCase()].sort().join('|');
+    return `${eventId || ''}|${pair}`;
+  };
   const used = new Set<number>();
   return pending.filter((p) => {
     if (!p.failed) return true;
@@ -272,15 +354,23 @@ export function reconcileFailedPending<
     const pText = (p.text || '').trim();
     const pName = p.attachment?.name || '';
     const pMs = Date.parse(p.createdAt || '');
+    const pEventId = p.eventId || '';
+    const pThread = threadOf(p.eventId, p.senderEmail, p.recipientEmail);
     for (let i = 0; i < serverMessages.length; i++) {
       if (used.has(i)) continue;
       const s = serverMessages[i];
       if ((s.senderEmail || '').toLowerCase() !== me) continue;
+      // H10 scope: same event when both sides carry one, same
+      // thread when both sides carry one.
+      const sEventId = s.eventId || '';
+      if (pEventId && sEventId && pEventId !== sEventId) continue;
+      const sThread = threadOf(s.eventId, s.senderEmail, s.recipientEmail);
+      if (pThread && sThread && pThread !== sThread) continue;
       if ((s.text || '').trim() !== pText) continue;
       if ((s.attachment?.name || '') !== pName) continue;
       const sMs = Date.parse(s.createdAt || '');
       if (!Number.isFinite(pMs) || !Number.isFinite(sMs)) continue;
-      if (Math.abs(sMs - pMs) > 60 * 1000) continue;
+      if (Math.abs(sMs - pMs) > PENDING_DEDUPE_WINDOW_MS) continue;
       used.add(i);
       return false;
     }
@@ -307,26 +397,58 @@ export interface SendMessageInput {
 
 // Cached private Realtime channel name for this session (see
 // getRealtimeChannel in the service below). `undefined` = not
-// fetched yet; null = Realtime is not configured.
+// fetched yet; null = Realtime is not configured. The cache has a
+// 5-minute TTL (audit #4 M13): the old code cached `null` forever,
+// so a page that loaded before Realtime was configured never
+// retried, and — since the channel name now mixes in
+// sessionVersion (audit #4 H7) — a name cached before a
+// sign-out-everywhere bump would keep subscribing to the dead
+// pre-bump channel. A refetch every 5 minutes is one cheap GET
+// and self-heals both cases.
 let cachedRealtimeChannel: string | null | undefined;
+let cachedRealtimeChannelAt = 0;
+const REALTIME_CHANNEL_CACHE_MS = 5 * 60 * 1000;
+
+// Forget the cached channel name (e.g. after a sign-out /
+// sign-in that keeps the SPA alive): the next call re-fetches
+// from the server instead of reusing the pre-bump name.
+export function resetRealtimeChannelCache(): void {
+  cachedRealtimeChannel = undefined;
+  cachedRealtimeChannelAt = 0;
+}
 
 export const messagesService = {
   async getMessages(_userEmail?: string): Promise<EventMessage[]> {
-    const data = await apiClient.request<{ messages: EventMessage[] }>('/messages');
-    const list = Array.isArray(data.messages) ? data.messages : [];
+    // H8: the server now paginates every GET (newest 50 by default),
+    // so the old no-param full list is gone. This legacy full-list
+    // helper (quote-jump fallback in MessagesPage) pages backwards
+    // with `before` until hasMore is false — bounded at 10 pages
+    // (500 messages) so a huge inbox cannot loop forever. Pages come
+    // back oldest-first within the page, so the merged list is
+    // re-sorted oldest-first at the end.
+    const all: EventMessage[] = [];
+    let before: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const p = await this.getMessagesPage({ limit: 50, before });
+      all.push(...p.messages);
+      if (!p.hasMore || p.messages.length === 0) break;
+      before = p.messages[0]?.createdAt;
+      if (!before) break;
+    }
+    const list = all.filter((m) => m.type !== 'community');
     // Defense in depth: the server already excludes community rows
     // from the private inbox, but a community row must never render
     // as a private thread even if a server filter is ever missed —
     // its recipient is the "community:<eventId>" marker, not a user.
-    return list.filter((m) => m.type !== 'community');
+    list.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '') || (a.id || '').localeCompare(b.id || ''));
+    return list;
   },
 
   // One page of the private inbox (newest `limit`, default 50).
   // `before` pages backwards (older than a createdAt cursor),
   // `since` fetches only rows newer than a createdAt floor — the
   // polls use `since` + a client-side id dedupe, so a poll no
-  // longer re-downloads the whole history. No options = the old
-  // full-list behaviour (the server keeps that for compatibility).
+  // longer re-downloads the whole history.
   async getMessagesPage(opts?: {
     limit?: number;
     before?: string;
@@ -347,12 +469,21 @@ export const messagesService = {
   },
 
   // My private Realtime channel name (HMAC, server-issued — see
-  // realtime-service.ts). Cached for the session: the name is
-  // deterministic per user, so one fetch is enough. Null while
-  // Realtime is not configured (VITE_SUPABASE_* / SESSION_SECRET
-  // missing) — callers then stay on polling.
+  // realtime-service.ts). Cached for the session with a 5-minute
+  // TTL (see cachedRealtimeChannel above): the name mixes in
+  // sessionVersion, so a bump (sign-out-everywhere / password
+  // reset) changes it, and a stale cache would subscribe to a
+  // dead channel. Null while Realtime is not configured
+  // (VITE_SUPABASE_* / SESSION_SECRET missing) — callers then
+  // stay on polling, and the TTL means a later configuration is
+  // picked up without a reload.
   async getRealtimeChannel(): Promise<string | null> {
-    if (cachedRealtimeChannel !== undefined) return cachedRealtimeChannel;
+    if (
+      cachedRealtimeChannel !== undefined &&
+      Date.now() - cachedRealtimeChannelAt < REALTIME_CHANNEL_CACHE_MS
+    ) {
+      return cachedRealtimeChannel;
+    }
     try {
       const data = await apiClient.request<{ realtimeChannel?: string | null }>('/messages', {
         params: { action: 'channel' },
@@ -362,6 +493,7 @@ export const messagesService = {
     } catch {
       cachedRealtimeChannel = null;
     }
+    cachedRealtimeChannelAt = Date.now();
     return cachedRealtimeChannel;
   },
 
@@ -550,18 +682,26 @@ export const messagesService = {
   async getCommunityMessages(
     eventId: string,
   ): Promise<{ messages: EventMessage[]; member: boolean; canPost: boolean; isOrganizer: boolean }> {
-    const data = await apiClient.request<{
-      messages: EventMessage[];
-      member: boolean;
-      canPost: boolean;
-      isOrganizer: boolean;
-    }>('/messages', { params: { community: 1, eventId } });
-    return {
-      messages: Array.isArray(data.messages) ? data.messages : [],
-      member: data.member === true,
-      canPost: data.canPost === true,
-      isOrganizer: data.isOrganizer === true,
-    };
+    // H8: same as getMessages above — the server paginates by
+    // default, so this legacy full-list helper pages backwards
+    // (bounded at 10 pages / 500 messages) and re-sorts.
+    const all: EventMessage[] = [];
+    let member = false;
+    let canPost = false;
+    let isOrganizer = false;
+    let before: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const p = await this.getCommunityMessagesPage(eventId, { limit: 50, before });
+      all.push(...p.messages);
+      member = p.member;
+      canPost = p.canPost;
+      isOrganizer = p.isOrganizer;
+      if (!p.hasMore || p.messages.length === 0) break;
+      before = p.messages[0]?.createdAt;
+      if (!before) break;
+    }
+    all.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '') || (a.id || '').localeCompare(b.id || ''));
+    return { messages: all, member, canPost, isOrganizer };
   },
 
   // One page of a community room (newest `limit`, default 50).

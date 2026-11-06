@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { MapPin, Globe, Mail, Calendar, Users, ArrowLeft, ShieldCheck } from 'lucide-react';
 import { Organizer, EventItem } from '../types';
 import { organizersService } from '../services/organizers-service';
+import { safeLinkUrl } from '../services/messages-service';
 import { EventCard } from '../components/events/EventCard';
 import { formatEventLocation } from '../utils/formatters';
 import { ProfileSkeleton } from '../components/ui/LoadingSkeleton';
@@ -51,6 +52,10 @@ export function OrganizerProfilePage() {
   // of their events, never a stored neighborhood string.
   const organizerLocation = events.map((e) => formatEventLocation(e)).find(Boolean) || '';
 
+  // Sweep G: website through safeLinkUrl (see the Website block
+  // below) — computed once here, not inline in the JSX.
+  const websiteUrl = safeLinkUrl(organizer.website);
+
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-10">
       <Link
@@ -95,15 +100,29 @@ export function OrganizerProfilePage() {
               )}
 
               {organizer.website && (
-                <a
-                  href={organizer.website}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-1.5 text-[#1E3F35] hover:underline"
-                >
-                  <Globe className="w-3.5 h-3.5" />
-                  <span>Website</span>
-                </a>
+                // Sweep G: the website comes from the organizer record
+                // (production records are built server-side by
+                // allowlistedOrganizer, which strips website — only
+                // demo data carries one today), so it is rendered
+                // through safeLinkUrl: an http(s) URL links out, any
+                // other scheme (e.g. javascript:) renders as plain
+                // text instead of a clickable href.
+                websiteUrl ? (
+                  <a
+                    href={websiteUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1.5 text-[#1E3F35] hover:underline"
+                  >
+                    <Globe className="w-3.5 h-3.5" />
+                    <span>Website</span>
+                  </a>
+                ) : (
+                  <span className="flex items-center gap-1.5 text-[#8C887E]">
+                    <Globe className="w-3.5 h-3.5" />
+                    <span>Website</span>
+                  </span>
+                )
               )}
 
               <span className="flex items-center gap-1.5">

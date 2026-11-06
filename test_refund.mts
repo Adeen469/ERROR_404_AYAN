@@ -127,18 +127,24 @@ check("formatPaise: ₹500", formatPaise(50000) === "₹500");
 check("formatPaise: ₹1,00,000 groups Indian-style", formatPaise(10000000) === "₹1,00,000");
 
 // --- Server: attendee-cancel path uses the quote + partial amount ---
+// (auditfix_c / H3: the cancel now claims processing + amounts BEFORE
+// the Razorpay call and finalises after, so the markers below check
+// the claim/finalise shape instead of the old refund-then-save shape.)
 check("server: cancel branch computes the quote from the stored row",
   registrations.includes("const quote = refundQuote(existing);"));
 check("server: cancel passes the partial amount only after 24h",
-  registrations.includes("refundRazorpayPayment(existing.razorpayPaymentId, quote.isFull ? undefined : quote.refundAmountPaise)"));
-check("server: cancel stores the refund amount + fee on the row",
-  registrations.includes("merged.refundAmountPaise = quote.refundAmountPaise") &&
-  registrations.includes("merged.refundFeePaise = quote.refundFeePaise"));
-check("server: refund helper takes an optional amount (partial refund)",
-  registrations.includes("refundRazorpayPayment(paymentId: string, amountPaise?: number)") &&
-  registrations.includes("{ amount: amountPaise }"));
+  registrations.includes("refundRazorpayPayment(existing.razorpayPaymentId, quote.isFull ? undefined : quote.refundAmountPaise, existing.id)"));
+check("server: cancel claims processing + amounts BEFORE the Razorpay call",
+  registrations.includes('refundStatus: "processing"') &&
+  registrations.includes("refundAmountPaise: quote.refundAmountPaise") &&
+  registrations.includes("refundFeePaise: quote.refundFeePaise") &&
+  registrations.indexOf('refundStatus: "processing"') < registrations.indexOf("refundRazorpayPayment(existing.razorpayPaymentId"));
+check("server: refund helper takes an optional amount + registration id (H3 idempotency key)",
+  registrations.includes("refundRazorpayPayment(paymentId: string, amountPaise?: number, registrationId?: string)") &&
+  registrations.includes("{ amount: amountPaise }") &&
+  registrations.includes('headers["Idempotency-Key"] = `refund-${registrationId}`'));
 check("server: cancel still proceeds when the refund call fails",
-  registrations.includes('merged.refundStatus = rf.ok ? "initiated" : "failed"'));
+  registrations.includes('refundStatus: rf.ok ? "initiated" : "failed"'));
 check("server: check-in refuses cancelled rows",
   registrations.includes("Only confirmed registrations can be checked in"));
 check("server: reactivation clears stale refund bookkeeping",
@@ -147,15 +153,24 @@ check("server: POST strips smuggled refund fields from the client body",
   registrations.includes("delete (reg as any).refundStatus;") &&
   registrations.includes("delete (reg as any).refundId;"));
 
-// --- Full refunds elsewhere are UNCHANGED ---
+// --- Full refunds elsewhere: amounts now recorded too (auditfix_c
+// M17 supersedes the old "UNCHANGED / no amounts" assertions below:
+// the verify-409 path and the organizer DELETE path now record
+// refundAmountPaise / refundFeePaise on success AND on failure). ---
 check("payments: verify 409 path still calls the full refund (no amount arg)",
-  payments.includes("refundRazorpayPayment(captured.id)") &&
-  !payments.includes("refundAmountPaise"));
-check("payments: helper is still full-refund only (no amount param)",
-  payments.includes("async function refundRazorpayPayment(paymentId: string):"));
+  payments.includes("refundRazorpayPayment(captured.id"));
+check("payments: verify 409 path records the full amount + fee 0 on success AND failure (M17)",
+  payments.includes("refundAmountPaise, refundFeePaise: 0") &&
+  payments.includes('refundStatus: "failed", refundAmountPaise'));
+check("payments: helper is still full-refund only (no amount param) + idempotency key (H3)",
+  payments.includes("async function refundRazorpayPayment(paymentId: string, registrationId?: string)") &&
+  payments.includes('headers["Idempotency-Key"] = `refund-${registrationId}`'));
 check("events: organizer DELETE still calls the full refund (no amount arg)",
-  events.includes("refundRazorpayPayment(r.razorpayPaymentId)") &&
-  !events.includes("refundAmountPaise"));
+  events.includes("refundRazorpayPayment(r.razorpayPaymentId"));
+check("events: organizer DELETE records the full amount + fee 0 on the row (M17)",
+  events.includes("refundAmountPaise = Number(r.amountPaise)") &&
+  events.includes("next.refundAmountPaise = refundAmountPaise") &&
+  events.includes("next.refundFeePaise = 0"));
 
 // --- Client: preview before confirm + refund in the success toast ---
 check("client: cancelRegistration returns the cancelled row (refund fields)",

@@ -130,7 +130,7 @@ check("realtime: payload is id only",
 check("realtime: event type is id-only (no message field)",
   realtime.includes("type: 'message'; id: string"));
 check("realtime: client null without VITE vars",
-  realtime.includes("client = url && anon ? createClient(url, anon) : null"));
+  realtime.includes("if (!url || !anon) return null"));
 check("realtime: DB-H1 fix documented",
   realtime.includes("DB-H1") && realtime.includes("content-free"));
 

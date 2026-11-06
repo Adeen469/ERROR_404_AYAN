@@ -52,11 +52,6 @@ export function parseCookies(req: any): Record<string, string> {
   return out;
 }
 
-export function getClientIp(req: any): string {
-  const fwd = req.headers?.["x-forwarded-for"] || "";
-  if (typeof fwd === "string" && fwd.trim()) return fwd.split(",")[0].trim();
-  return req.headers?.["x-real-ip"] || "unknown";
-}
 
 function bytesToB64url(bytes: Uint8Array): string {
   let bin = "";
@@ -245,36 +240,6 @@ export function randomTokenHex(bytes = 32): string {
   return bytesToHex(randomBytes(bytes));
 }
 
-// ---- Rate limiting (Supabase-backed counter, table rate_limits) ----
-export async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
-  try {
-    if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
-    const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
-    const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
-    if (!ok) {
-      if (status === 404 || status === 400) return { allowed: false, retryAfter: 0, tableMissing: true };
-      return { allowed: true, retryAfter: 0, tableMissing: false };
-    }
-    const now = Date.now();
-    const row = Array.isArray(body) && body.length > 0 ? body[0].data : null;
-    const windowStart = row && typeof row.windowStart === "number" ? row.windowStart : 0;
-    const count = row && typeof row.count === "number" ? row.count : 0;
-    if (windowStart && now - windowStart < windowMs && count >= limit) {
-      return { allowed: false, retryAfter: Math.ceil((windowStart + windowMs - now) / 1000), tableMissing: false };
-    }
-    const fresh = !windowStart || now - windowStart >= windowMs;
-    const next = { count: fresh ? 1 : count + 1, windowStart: fresh ? now : windowStart };
-    const up = await fetchJson(`${supabaseBase()}/rest/v1/rate_limits`, {
-      method: "POST",
-      headers: { ...supabaseHeaders(), Prefer: "resolution=merge-duplicates,return=representation" },
-      body: JSON.stringify({ id: key, data: next }),
-    });
-    if (!up.ok && (up.status === 404 || up.status === 400)) return { allowed: false, retryAfter: 0, tableMissing: true };
-    return { allowed: true, retryAfter: 0, tableMissing: false };
-  } catch {
-    return { allowed: true, retryAfter: 0, tableMissing: false };
-  }
-}
 
 // ---- Events / organiser helpers ----
 export function organizerEmailOf(event: any): string {
@@ -440,9 +405,11 @@ function calendarSupabaseHeaders(): Record<string, string> {
 
 
 function htmlPage(title: string, bodyHtml: string): string {
+  // L2 (audit #4): the title is escaped — errorPage passes headings
+  // that can carry reflected values (e.g. Google's error_description).
   return `<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>${title}</title></head>
+<head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>${esc(title)}</title></head>
 <body style="font-family: system-ui, sans-serif; max-width: 640px; margin: 48px auto; padding: 0 16px; color: #1E2320;">
 ${bodyHtml}
 </body>
@@ -470,12 +437,16 @@ const FALLBACK_AVATAR =
   "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80";
 
 function errorPage(res: any, status: number, heading: string, detail: string) {
+  // L2 (audit #4): esc() was defined but never used — heading/detail
+  // are interpolated into HTML, and one caller passes Google's
+  // error_description straight through (reflected server value), so
+  // escape both here, once, for every caller.
   return sendText(
     res,
     status,
     htmlPage(
       heading,
-      `<h1>${heading}</h1><p>${detail}</p><p><a href="/login">Back to sign in</a></p>`,
+      `<h1>${esc(heading)}</h1><p>${esc(detail)}</p><p><a href="/login">Back to sign in</a></p>`,
     ),
     "text/html; charset=utf-8",
   );
@@ -493,9 +464,10 @@ export default async function handler(req: any, res: any) {
       res,
       500,
       "Google sign-in is not configured",
-      "GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET is missing on the server. " +
-        "Set both in Vercel (Production, sensitive) and redeploy. " +
-        "Do not put the secret in code or in a VITE_ variable.",
+      // L5 (audit #4): no env-var names in user-facing text — the
+      // variable names stay in server logs / setup docs only.
+      "Google sign-in is not configured on the server. " +
+        "Ask the site administrator to check the configuration and redeploy.",
     );
   }
 
@@ -570,8 +542,8 @@ export default async function handler(req: any, res: any) {
         `Google said: ${detail}. ` +
           `Most often this is a redirect URI mismatch: make sure ` +
           `${redirectUri} is registered exactly as an Authorized redirect URI ` +
-          `in Google Cloud Console for this OAuth client, and that ` +
-          `GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET in Vercel belong to that same client, then redeploy.`,
+          `in Google Cloud Console for this OAuth client, and that the ` +
+          `credentials configured on the server belong to that same client, then redeploy.`,
       );
     }
   } catch {
@@ -595,7 +567,7 @@ export default async function handler(req: any, res: any) {
         400,
         "Google sign-in could not be verified",
         "The ID token returned by Google did not match this OAuth client. " +
-          "Check that GOOGLE_CLIENT_ID in Vercel matches the client used to start the sign-in.",
+          "Check that the credentials configured on the server match the client used to start the sign-in.",
       );
     }
   } catch {
@@ -610,15 +582,37 @@ export default async function handler(req: any, res: any) {
   // Calendar connect branch: same exchange + ID-token verification as
   // sign-in above, but no sign-in happens here. Store the refresh token
   // and send the user back to where they started.
+  //
+  // SECURITY (audit #4 C2): the connection is stored ONLY under the
+  // signed-in session's own locora_users row id. state.userId must match
+  // that id exactly — a mismatched or missing session is refused 403,
+  // so one user can never plant a refresh token under another user's id.
   if (state.purpose === "calendar") {
-    const calendarUserId =
-      typeof state.userId === "string" ? state.userId : "";
-    if (!calendarUserId || calendarUserId.length > 128) {
+    const session = await verifySession(req);
+    if (!session) {
       return errorPage(
         res,
-        400,
+        403,
         "Google Calendar connection failed",
-        "The connection request did not carry a valid user. Please connect again from your profile page while signed in.",
+        "You must be signed in to Locora to connect Google Calendar. Please sign in, then connect again from your profile page.",
+      );
+    }
+    const sessionUserRow = await loadUserByEmail(session.email).catch(() => null);
+    if (!sessionUserRow || !sessionUserRow.id) {
+      return errorPage(
+        res,
+        403,
+        "Google Calendar connection failed",
+        "Your Locora account could not be verified. Please sign out and sign in again, then connect again from your profile page.",
+      );
+    }
+    const calendarUserId = sessionUserRow.id;
+    if (typeof state.userId !== "string" || state.userId !== calendarUserId) {
+      return errorPage(
+        res,
+        403,
+        "Google Calendar connection failed",
+        "The connection request does not match the signed-in account. Please connect again from your profile page while signed in.",
       );
     }
     if (!tokenData.refresh_token) {
@@ -659,9 +653,7 @@ export default async function handler(req: any, res: any) {
         res,
         500,
         "Google Calendar storage is not configured",
-        "SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing on the server, " +
-          "or the calendar_connections table has not been created yet. " +
-          "See CALENDAR_SETUP.md, then try connecting again.",
+        "Calendar storage is not available right now. Please try connecting again later.",
       );
     }
     let encrypted: string;
@@ -696,13 +688,14 @@ export default async function handler(req: any, res: any) {
       );
       if (!upsertRes.ok) {
         const detail = await upsertRes.text().catch(() => "");
+        // Sweep G: the Supabase/PostgREST detail used to be shown to
+        // the user ("Server said: ...") — it stays in server logs now.
+        try { console.warn("Google Calendar connect save failed:", detail.slice(0, 200)); } catch {}
         return errorPage(
           res,
           502,
           "Google Calendar connection could not be saved",
-          "The connection token could not be stored. " +
-            "Make sure the calendar_connections table exists in Supabase (see CALENDAR_SETUP.md). " +
-            (detail ? `Server said: ${detail.slice(0, 200)}` : ""),
+          "The connection token could not be stored. Please try again.",
         );
       }
     } catch {
@@ -721,14 +714,14 @@ export default async function handler(req: any, res: any) {
     return res.end(
       htmlPage(
         "Google Calendar connected",
-        `<p id="status">Google Calendar connected${calendarEmail ? ` as ${calendarEmail}` : ""} — taking you back…</p>
+        `<p id="status">Google Calendar connected${calendarEmail ? ` as ${esc(calendarEmail)}` : ""} — taking you back…</p>
         <p>Events you register for will now be added to your Google Calendar automatically.</p>
         <script>
           setTimeout(function () {
             window.location.replace(${escapeForScript(JSON.stringify(returnTo))});
           }, 900);
         </script>
-        <noscript><p><a href="${returnTo}">Continue</a></p></noscript>`,
+        <noscript><p><a href="${esc(returnTo)}">Continue</a></p></noscript>`,
       ),
     );
   }
@@ -809,7 +802,8 @@ export default async function handler(req: any, res: any) {
       res,
       500,
       "Sign-in is not configured",
-      "SESSION_SECRET is missing on the server. Set it in Vercel (Production, sensitive) and redeploy.",
+      // L5 (audit #4): no env-var names in user-facing text.
+      "Sign-in is not configured on the server. Ask the site administrator to check the configuration and redeploy.",
     );
   }
   try {

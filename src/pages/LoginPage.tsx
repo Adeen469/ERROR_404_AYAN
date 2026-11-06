@@ -24,6 +24,11 @@ export function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  // H1: set when the server refuses sign-in because the local account
+  // has not verified its email yet (code "email_not_verified").
+  const [unverifiedEmail, setUnverifiedEmail] = useState('');
+  const [resendMessage, setResendMessage] = useState('');
+  const [resending, setResending] = useState(false);
 
   const returnTo = safeReturnTo(searchParams.get('returnTo'));
 
@@ -53,11 +58,34 @@ export function LoginPage() {
         navigate('/dashboard');
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Invalid credentials');
+      // H1: unverified local account — show the verify message plus a
+      // resend action instead of a bare "invalid credentials".
+      const code = (err as any)?.details?.code;
+      if ((err as any)?.status === 403 && code === 'email_not_verified') {
+        setUnverifiedEmail(email.trim());
+        setError(err instanceof Error ? err.message : 'Please verify your email before signing in.');
+      } else {
+        setUnverifiedEmail('');
+        setError(err instanceof Error ? err.message : 'Invalid credentials');
+      }
     } finally {
       setLoading(false);
     }
   };
+
+  async function handleResend() {
+    if (!unverifiedEmail || resending) return;
+    setResending(true);
+    setResendMessage('');
+    try {
+      await authService.resendVerification(unverifiedEmail);
+      setResendMessage('If an account exists for that email, a new verification link has been sent. It expires in 24 hours — check your inbox and spam.');
+    } catch {
+      setResendMessage('Could not resend the link right now. Try again in a few minutes.');
+    } finally {
+      setResending(false);
+    }
+  }
 
   return (
     <div className="max-w-md mx-auto px-4 py-12 sm:py-16 space-y-6">
@@ -80,6 +108,25 @@ export function LoginPage() {
         {error && (
           <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700">
             {error}
+          </div>
+        )}
+
+        {/* H1: unverified local account — resend the verification link. */}
+        {unverifiedEmail && (
+          <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl space-y-2">
+            <p className="text-xs text-amber-800">
+              Your email <span className="font-semibold">{unverifiedEmail}</span> is not verified yet.
+              The link expires in 24 hours — check your inbox and spam.
+            </p>
+            {resendMessage && <p className="text-xs text-[#1E3F35]">{resendMessage}</p>}
+            <button
+              type="button"
+              onClick={handleResend}
+              disabled={resending}
+              className="w-full py-2 bg-white border border-amber-300 text-amber-900 text-xs font-semibold rounded-lg transition-colors disabled:opacity-60 cursor-pointer"
+            >
+              {resending ? 'Sending…' : 'Resend verification email'}
+            </button>
           </div>
         )}
 

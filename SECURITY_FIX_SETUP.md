@@ -125,6 +125,32 @@ is > 0). Two things kill old tokens server-side:
   sign in again on all devices. This is true remote logout for the
   reset case, without a revocation list lookup for every other token.
 
+## 4c. Email verification (H1, audit #4 — link-based, no new table)
+
+Local sign-up creates the account with `emailVerified: false` and
+issues NO session. The emailed link is
+`https://locora-hyperlocal.vercel.app/api/auth/verify-email?token=<raw>`,
+which verifies and redirects to the `/verify-email` result page; the
+user then signs in normally (no auto-sign-in from the link). Sign-in
+with an unverified local account is refused 403
+(`code: "email_not_verified"`) with a resend option. Google accounts
+are never gated (Google verified the email), and local rows created
+before H1 have no `emailVerified` field and are grandfathered.
+`locora_users.data` carries, for local accounts:
+`emailVerified` (bool), `emailVerificationTokenHash` (SHA-256 hex of a
+256-bit token — the raw token is never stored or logged),
+`emailVerificationExpiresAt` (ISO, 24h). Verifying sets
+`emailVerified: true` and clears the hash + expiry, so a link is
+single-use. Sign-up keeps a generic 409 for an existing email (no
+enumeration); if that account is unverified, a fresh link is quietly
+re-sent. Resend (`POST /api/auth/resend-verification`, 5/hour per
+email, 20/hour per IP) is generic too — same response whether the
+email exists or not. No new Supabase table and no new Vercel env var:
+the mailer reuses `GMAIL_USER` / `GMAIL_APP_PASSWORD`, and if the
+mailer is not configured sign-up still succeeds (the link can be
+resent later). No new Vercel function either — both actions live in
+the `api/auth.ts` dispatcher (see `vercel.json` rewrites).
+
 ## 5. Test artefacts — do NOT delete yet
 
 Do not delete anything from live Supabase in this staging task. After

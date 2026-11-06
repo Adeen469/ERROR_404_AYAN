@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   Calendar,
@@ -81,6 +81,10 @@ export function EventDetailsPage() {
   const [event, setEvent] = useState<EventItem | null>(null);
   const [relatedEvents, setRelatedEvents] = useState<EventItem[]>([]);
   const [loading, setLoading] = useState(true);
+  // H11: a load FAILURE is not a missing event. When the fetch throws
+  // (API/network down — getEventById strict mode), this is set and the
+  // page shows an error state with Retry instead of "Event Not Found".
+  const [loadFailed, setLoadFailed] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
   const [registration, setRegistration] = useState<AttendeeRegistration | null>(null);
 
@@ -133,39 +137,77 @@ export function EventDetailsPage() {
   const [optionsError, setOptionsError] = useState('');
   const [pendingSelections, setPendingSelections] = useState<Record<string, string> | undefined>(undefined);
 
-  useEffect(() => {
-    async function loadEventData() {
-      if (!eventId) return;
-      setLoading(true);
-      try {
-        // These three do not depend on each other, so run them together
-        // instead of stacking three ~2s calls (the shared event cache
-        // also dedupes the event fetch inside getRelatedEvents).
-        const [data, reg, related] = await Promise.all([
-          eventsService.getEventById(eventId),
-          registrationsService.getRegistrationForEvent(eventId),
-          eventsService.getRelatedEvents(eventId),
-        ]);
-        setEvent(data);
-        if (data) {
-          setIsSaved(savedEventsService.isSaved(data.id));
-          setRegistration(reg);
-          setRelatedEvents(related);
-        }
-      } catch (err) {
-        console.error('Failed to load event details:', err);
-      } finally {
-        setLoading(false);
+  const loadEventData = useCallback(async () => {
+    if (!eventId) return;
+    setLoading(true);
+    setLoadFailed(false);
+    try {
+      // These three do not depend on each other, so run them together
+      // instead of stacking three ~2s calls (the shared event cache
+      // also dedupes the event fetch inside getRelatedEvents).
+      // Strict event fetch (H11): a remote failure with no local
+      // copy throws here instead of returning null, so the page can
+      // tell "could not load" apart from "does not exist".
+      const [data, reg, related] = await Promise.all([
+        eventsService.getEventById(eventId, { strict: true }),
+        registrationsService.getRegistrationForEvent(eventId),
+        eventsService.getRelatedEvents(eventId),
+      ]);
+      setEvent(data);
+      if (data) {
+        setIsSaved(savedEventsService.isSaved(data.id));
+        setRegistration(reg);
+        setRelatedEvents(related);
       }
+    } catch (err) {
+      console.error('Failed to load event details:', err);
+      setLoadFailed(true);
+    } finally {
+      setLoading(false);
     }
-    loadEventData();
   }, [eventId]);
+
+  useEffect(() => {
+    loadEventData();
+  }, [loadEventData]);
 
   if (loading) {
     return <EventDetailsSkeleton />;
   }
 
   if (!event) {
+    // H11: a failed load is an error state with Retry — not "Event
+    // Not Found". Only a load that SUCCEEDED with no event (strict
+    // fetch returned null) renders the not-found screen.
+    if (loadFailed) {
+      return (
+        <div className="max-w-lg mx-auto px-4 py-20 text-center space-y-4">
+          <div className="w-12 h-12 bg-rose-50 text-rose-600 rounded-xl flex items-center justify-center mx-auto">
+            <AlertCircle className="w-6 h-6" />
+          </div>
+          <h2 className="font-editorial text-2xl font-bold text-[#1E2320]">Couldn&apos;t load this event</h2>
+          <p className="text-sm text-[#5F635D]">
+            The event could not be loaded — check your connection and try again. The event may still exist.
+          </p>
+          <div className="flex items-center justify-center gap-3">
+            <button
+              type="button"
+              onClick={loadEventData}
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#1E3F35] text-white rounded-lg text-xs font-semibold hover:bg-[#163028] transition-colors"
+            >
+              Try again
+            </button>
+            <Link
+              to="/discover"
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-white text-[#1E2320] border border-[#E2DFD8] rounded-lg text-xs font-semibold hover:bg-[#F4F1EA] transition-colors"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Back to Discover</span>
+            </Link>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="max-w-lg mx-auto px-4 py-20 text-center space-y-4">
         <div className="w-12 h-12 bg-rose-50 text-rose-600 rounded-xl flex items-center justify-center mx-auto">
@@ -189,16 +231,21 @@ export function EventDetailsPage() {
   const isFull = event.registeredCount >= event.capacity;
   const isRegistered = Boolean(registration && registration.status === 'confirmed');
   const isPaymentPending = Boolean(registration && registration.status === 'pending');
-  // Refund preview for the cancel dialog (client-side preview only —
-  // the server computes the real refund on cancel). Paid confirmed
-  // passes only; free/pending rows get no refund line.
+  // Refund preview for the cancel dialog (client-side ESTIMATED
+  // preview only — M14: labelled "estimated" because it is computed
+  // in the browser from the stored row and can drift from the
+  // server quote; the server computes the real refund on cancel.
+  // No server quote endpoint was built for this: there is no cheap
+  // existing endpoint that returns a quote, and a new endpoint
+  // would be a bigger change than the label for the same drift).
+  // Paid confirmed passes only; free/pending rows get no refund line.
   const cancelRefundQuote =
     registration && registration.status === 'confirmed' ? getRefundQuote(registration) : null;
   const cancelRefundMessage = !cancelRefundQuote
     ? 'Are you sure you want to cancel your RSVP? This will free your spot for other attendees.'
     : cancelRefundQuote.isFull
-      ? `Are you sure you want to cancel your RSVP? You will get a full refund of ${formatPaise(cancelRefundQuote.refundAmountPaise)}. Your ticket will be cancelled immediately.`
-      : `Are you sure you want to cancel your RSVP? You will get ${formatPaise(cancelRefundQuote.refundAmountPaise)} back (90%). A 10% cancellation fee of ${formatPaise(cancelRefundQuote.refundFeePaise)} applies because it has been more than 24 hours since you bought the ticket. Your ticket will be cancelled immediately.`;
+      ? `Are you sure you want to cancel your RSVP? You will get an estimated full refund of ${formatPaise(cancelRefundQuote.refundAmountPaise)}. Your ticket will be cancelled immediately.`
+      : `Are you sure you want to cancel your RSVP? You will get an estimated ${formatPaise(cancelRefundQuote.refundAmountPaise)} back (90%). A 10% cancellation fee of ${formatPaise(cancelRefundQuote.refundFeePaise)} applies because it has been more than 24 hours since you bought the ticket. Your ticket will be cancelled immediately.`;
   const isPaymentRejected = Boolean(registration && registration.status === 'rejected');
   const isPaidEvent = event.price > 0;
   // Team participation config (hackathons only, f-1 + f-2): mode
@@ -554,13 +601,21 @@ export function EventDetailsPage() {
       // manually from the dashboard.
       const refundPaise = cancelled?.refundAmountPaise;
       const refundFailed = cancelled?.refundStatus === 'failed';
+      // L9 (audit #4): the toast states the refund AND the reason for
+      // its size, from the server row (fee > 0 means the 10% fee kept
+      // for cancelling more than 24h after purchase; fee 0 means a
+      // full refund for cancelling within 24h).
+      const refundFee = cancelled?.refundFeePaise || 0;
+      const refundReason = refundFee > 0
+        ? ' You cancelled more than 24 hours after purchase, so a 10% cancellation fee applies.'
+        : ' You cancelled within 24 hours of purchase, so the full amount is refunded.';
       toast({
         type: 'info',
         title: 'Registration Cancelled',
         description: refundPaise
           ? refundFailed
             ? `Your ticket is cancelled. The refund of ${formatPaise(refundPaise)} could not be initiated automatically — please contact the organizer so they can refund it from the Razorpay dashboard.`
-            : `Your ticket is cancelled. A refund of ${formatPaise(refundPaise)} has been initiated to your original payment method.`
+            : `Your ticket is cancelled. A refund of ${formatPaise(refundPaise)} has been initiated to your original payment method.${refundReason}`
           : heldSpot
             ? 'Your spot has been freed up for other community members.'
             : 'Your pending payment request has been withdrawn.',

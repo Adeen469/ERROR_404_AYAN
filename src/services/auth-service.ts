@@ -106,19 +106,43 @@ export const authService = {
     return user;
   },
 
-  async signup(name: string, email: string, password?: string): Promise<UserProfile> {
+  // H1: local sign-up creates an UNVERIFIED account and issues NO
+  // session. The returned needsVerification flag tells the signup page
+  // to show "check your email" instead of signing the user in. Nothing
+  // is stored locally and no welcome mail is sent until the email is
+  // verified (login after verification sends the welcome/login mail).
+  async signup(name: string, email: string, password?: string): Promise<{ user: UserProfile; needsVerification: boolean }> {
     // Every new account starts as an attendee. Organizer status is granted
     // later by an admin approval, never chosen at sign-up.
-    if (!password || password.length < 6) throw new Error('Password must be at least 6 characters');
+    // L6 (audit #4, user-authorised 2026-11-06): new sign-ups need at
+    // least 8 characters — mirrors the server rule in api/auth.ts.
+    if (!password || password.length < 8) throw new Error('Password must be at least 8 characters');
     if (ADMIN_EMAILS.includes(email.trim().toLowerCase())) {
       throw new Error('Admin accounts must sign in with Google.');
     }
-    const res = await apiClient.post<{ user: UserProfile }>('/auth/signup', { name, email, password });
+    const res = await apiClient.post<{ user: UserProfile; needsVerification?: boolean }>('/auth/signup', { name, email, password });
+    if (res.needsVerification) {
+      return { user: res.user, needsVerification: true };
+    }
     localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(res.user));
     writeSavedProfile(localStorage, res.user);
     sendAccountEmail('welcome', res.user, email);
     notify(res.user);
-    return res.user;
+    return { user: res.user, needsVerification: false };
+  },
+
+  // H1: resend the verification link. The server answers generically
+  // (same response whether the email exists or not), so the caller
+  // always shows the same "check your email" message.
+  async resendVerification(email: string): Promise<void> {
+    await apiClient.post('/auth/resend-verification', { email });
+  },
+
+  // H1: verify a token from an emailed link (used by the verify page
+  // when it is opened with ?token= directly; the emailed link itself
+  // hits the API, which redirects to /verify-email?status=...).
+  async verifyEmail(token: string): Promise<void> {
+    await apiClient.post('/auth/verify-email', { token });
   },
 
   async logout(): Promise<void> {

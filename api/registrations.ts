@@ -1,4 +1,4 @@
-// Shared server helpers for Locora security fix — NO IMPORTS, NO node:crypto.
+// Shared server helpers for Locora security fix — NO node:crypto; ONE import (H2 rate-limit, see below).
 // This file is inlined into each api/*.ts function because this project's
 // Vercel functions have historically been self-contained (no static imports:
 // the previous _lib import and the node:crypto import both failed live with
@@ -8,6 +8,12 @@
 // SESSION_SECRET, SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY come only from
 // Vercel env vars. If SESSION_SECRET is missing, session verification fails
 // closed (null) and login/signup/Google callback must refuse to issue a session.
+// H2 (audit #4): the ONLY static import in this file — the shared
+// rate-limit module (api/_lib/rate-limit.ts). See its header for the
+// live _lib-import risk + the live-test step after deploy.
+import { checkRateLimit, getClientIp } from "./_lib/rate-limit";
+import { originAllowed, isMutationMethod } from "./_lib/origin-check";
+
 export const ADMIN_EMAILS = ["mr.adeen946@gmail.com", "ayan.work937@gmail.com"];
 
 export function getEnv(name: string): string {
@@ -52,17 +58,6 @@ export function parseCookies(req: any): Record<string, string> {
   return out;
 }
 
-export function getClientIp(req: any): string {
-  // Last entry, not first: the first x-forwarded-for entry is
-  // client-controlled and trivially spoofed to dodge per-IP limits;
-  // Vercel appends the real connecting IP last.
-  const fwd = req.headers?.["x-forwarded-for"] || "";
-  if (typeof fwd === "string" && fwd.trim()) {
-    const parts = fwd.split(",").map((s: string) => s.trim()).filter(Boolean);
-    if (parts.length) return parts[parts.length - 1];
-  }
-  return req.headers?.["x-real-ip"] || "unknown";
-}
 
 function bytesToB64url(bytes: Uint8Array): string {
   let bin = "";
@@ -251,36 +246,6 @@ export function randomTokenHex(bytes = 32): string {
   return bytesToHex(randomBytes(bytes));
 }
 
-// ---- Rate limiting (Supabase-backed counter, table rate_limits) ----
-export async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
-  try {
-    if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
-    const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
-    const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
-    if (!ok) {
-      if (status === 404 || status === 400) return { allowed: false, retryAfter: 0, tableMissing: true };
-      return { allowed: true, retryAfter: 0, tableMissing: false };
-    }
-    const now = Date.now();
-    const row = Array.isArray(body) && body.length > 0 ? body[0].data : null;
-    const windowStart = row && typeof row.windowStart === "number" ? row.windowStart : 0;
-    const count = row && typeof row.count === "number" ? row.count : 0;
-    if (windowStart && now - windowStart < windowMs && count >= limit) {
-      return { allowed: false, retryAfter: Math.ceil((windowStart + windowMs - now) / 1000), tableMissing: false };
-    }
-    const fresh = !windowStart || now - windowStart >= windowMs;
-    const next = { count: fresh ? 1 : count + 1, windowStart: fresh ? now : windowStart };
-    const up = await fetchJson(`${supabaseBase()}/rest/v1/rate_limits`, {
-      method: "POST",
-      headers: { ...supabaseHeaders(), Prefer: "resolution=merge-duplicates,return=representation" },
-      body: JSON.stringify({ id: key, data: next }),
-    });
-    if (!up.ok && (up.status === 404 || up.status === 400)) return { allowed: false, retryAfter: 0, tableMissing: true };
-    return { allowed: true, retryAfter: 0, tableMissing: false };
-  } catch {
-    return { allowed: true, retryAfter: 0, tableMissing: false };
-  }
-}
 
 // ---- Events / organiser helpers ----
 export function organizerEmailOf(event: any): string {
@@ -413,11 +378,17 @@ export function esc(s: string): string {
 async function loadAllRegistrations(): Promise<any[]> {
   // Paginated: PostgREST's default cap is 1,000 rows, so an unpaged
   // read silently dropped older registrations as the table grew.
+  // L8 (audit #4): ordered server-side by created_at desc (the table
+  // carries created_at timestamptz default now() — see
+  // REGISTRATIONS_SETUP.md) instead of relying on callers to sort
+  // the rows in memory. The team-members sort in the GET handler
+  // stays client-side: leader-first is not expressible as a column
+  // order.
   const out: any[] = [];
   for (let page = 0; page < 10; page++) {
     const offset = page * 1000;
     const { ok, body } = await fetchJson(
-      `${supabaseBase()}/rest/v1/registrations?select=id,data&limit=1000&offset=${offset}`,
+      `${supabaseBase()}/rest/v1/registrations?select=id,data&order=created_at.desc&limit=1000&offset=${offset}`,
       { headers: supabaseHeaders() },
     );
     if (!ok) throw new Error("registrations table read failed");
@@ -426,6 +397,112 @@ async function loadAllRegistrations(): Promise<any[]> {
     if (rows.length < 1000) break;
   }
   return out;
+}
+
+// H8: targeted single-row fetch by primary key — GET ?id= and PATCH
+// used to load the WHOLE table (up to 10,000 rows) to find one row.
+async function loadRegistrationById(id: string): Promise<any | null> {
+  const { ok, body } = await fetchJson(
+    `${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(id)}&select=id,data`,
+    { headers: supabaseHeaders() },
+  );
+  if (!ok || !Array.isArray(body) || body.length === 0) return null;
+  return body[0].data;
+}
+
+// Sweep G (audit #4 final sweep): targeted loads. POST dedupe and
+// the GET roster/team/own-list branches used to load the WHOLE
+// registrations table (up to 10,000 rows) on every call. Every use
+// below filters by one event or one user, so the targeted query
+// returns exactly the rows the caller then filters in memory —
+// same rows, same order (created_at desc, as loadAll), paginated
+// the same way so a >1,000-row event or user is never truncated.
+// Each helper falls back to the full read if the filtered query is
+// ever rejected. The pendingCounts branch still uses the full load:
+// it counts pending rows across every event the caller manages, and
+// the caller set is owner-or-admin (mayManageEvent), not one
+// targeted query — it is an organizer-dashboard-only call, not a
+// hot path. The filters match idx_registrations_event,
+// idx_registrations_user and idx_registrations_event_user in
+// db-indexes.sql.
+async function loadRegistrationsForEvent(eventId: string): Promise<any[]> {
+  try {
+    const out: any[] = [];
+    for (let page = 0; page < 10; page++) {
+      const offset = page * 1000;
+      const { ok, body } = await fetchJson(
+        `${supabaseBase()}/rest/v1/registrations?select=id,data&data->>eventId=eq.${encodeURIComponent(eventId)}&order=created_at.desc&limit=1000&offset=${offset}`,
+        { headers: supabaseHeaders() },
+      );
+      if (!ok) throw new Error("filtered registrations read failed");
+      const rows = Array.isArray(body) ? body.map((row: any) => row.data).filter(Boolean) : [];
+      out.push(...rows);
+      if (rows.length < 1000) break;
+    }
+    return out;
+  } catch {
+    return loadAllRegistrations();
+  }
+}
+
+async function loadRegistrationsForUser(email: string): Promise<any[]> {
+  try {
+    const out: any[] = [];
+    for (let page = 0; page < 10; page++) {
+      const offset = page * 1000;
+      const { ok, body } = await fetchJson(
+        `${supabaseBase()}/rest/v1/registrations?select=id,data&data->>userEmail=eq.${encodeURIComponent(norm(email))}&order=created_at.desc&limit=1000&offset=${offset}`,
+        { headers: supabaseHeaders() },
+      );
+      if (!ok) throw new Error("filtered registrations read failed");
+      const rows = Array.isArray(body) ? body.map((row: any) => row.data).filter(Boolean) : [];
+      out.push(...rows);
+      if (rows.length < 1000) break;
+    }
+    return out;
+  } catch {
+    return loadAllRegistrations();
+  }
+}
+
+// Sweep G: site-wide ticket-code uniqueness guard. POST now loads
+// only this event's rows, so the in-memory clash check inside
+// newTicketCode covers this event only — but codes are shown to
+// attendees and mailed, so they stay unique site-wide via the same
+// targeted existence lookup payments.ts uses (data->>ticketCode).
+// A lookup failure never blocks registration (the code space is
+// 32^6); after 8 re-rolls the last code is kept.
+async function ticketCodeExists(code: string): Promise<boolean> {
+  try {
+    const { ok, body } = await fetchJson(
+      `${supabaseBase()}/rest/v1/registrations?select=id&data->>ticketCode=eq.${encodeURIComponent(code)}&limit=1`,
+      { headers: supabaseHeaders() },
+    );
+    return ok && Array.isArray(body) && body.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+// M6: crypto-random registration id (96 bits from WebCrypto, hex),
+// used when the client sends no id. Client-supplied ids are still
+// accepted, but must pass the charset check in POST.
+function newRegistrationId(): string {
+  try {
+    const bytes = new Uint8Array(12);
+    (globalThis as any).crypto.getRandomValues(bytes);
+    return "reg-" + Array.from(bytes, (b: any) => b.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return `reg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+
+// M9: the only statuses a PATCH may set. Exported so it is
+// unit-testable (see test_auditfix_e.mts). "confirmed"/"rejected"
+// are in the list but still refused by the organizer-approval gate
+// in PATCH (passes are issued only by Razorpay verify).
+export function isAllowedRegistrationStatus(s: any): boolean {
+  return ["confirmed", "pending", "cancelled", "waitlist", "rejected"].indexOf(String(s || "")) !== -1;
 }
 
 // True when an OTP-verified row matches this email + phone
@@ -588,17 +665,28 @@ function stripReg(reg: any, sessionEmail: string, isOrganiser: boolean): any {
 
 // 6 crypto-random characters (no lookalikes), server-generated only.
 // The old LOC-<1000..9999>-TK via Math.random had only 9,000 values.
-function newTicketCode(): string {
+// L8 (audit #4): generate-and-assign used to fail the whole
+// registration on a clash (or, worse, silently mint a duplicate code).
+// The code is now retried against the event's live rows — 32^6 codes,
+// so a clash is near-impossible, but the retry is what makes a clash
+// a non-event instead of a failed registration. After 8 attempts a
+// time-based code is the last resort so a registration is never lost.
+function newTicketCode(existing: any[]): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let out = "";
-  try {
-    const bytes = new Uint8Array(6);
-    (globalThis as any).crypto.getRandomValues(bytes);
-    for (const b of bytes) out += chars[b % chars.length];
-  } catch {
-    for (let i = 0; i < 6; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  for (let attempt = 0; attempt < 8; attempt++) {
+    let out = "";
+    try {
+      const bytes = new Uint8Array(6);
+      (globalThis as any).crypto.getRandomValues(bytes);
+      for (const b of bytes) out += chars[b % chars.length];
+    } catch {
+      for (let i = 0; i < 6; i++) out += chars[Math.floor(Math.random() * chars.length)];
+    }
+    const code = `LOC-${out}-TK`;
+    const clash = existing.some((r: any) => r.ticketCode === code && r.status !== "cancelled");
+    if (!clash) return code;
   }
-  return `LOC-${out}-TK`;
+  return `LOC-${Date.now().toString(36).toUpperCase().slice(-6)}-TK`;
 }
 
 // Team code for hackathon teams (f-1 + f-2): 6 crypto-random
@@ -652,11 +740,48 @@ function refundQuote(reg: any, nowMs?: number): { refundAmountPaise: number; ref
   return { refundAmountPaise: refund, refundFeePaise: fee, isFull: false };
 }
 
+// H5 (audit #4): one holdsSpot predicate, used by the confirm /
+// cancel / count paths in this file and mirrored in api/payments.ts,
+// src/services/registrations-service.ts and EventDetailsPage.
+// holdsSpot(reg) === true means the row ALREADY holds a seat:
+//   - holdsSpot === true  -> holds one (explicit)
+//   - holdsSpot undefined -> holds one (LEGACY rows created before
+//     the flag existed counted a seat at creation; see
+//     src/types/index.ts L149-153)
+//   - holdsSpot === false -> holds NO seat (new pending Razorpay
+//     rows; a seat is taken only when the payment confirms)
+// The payments-side checks read `holdsSpot === false` — that is the
+// NEGATION of this predicate ("needs a seat"), not a different
+// definition of undefined. Changing payments to `!== true` (the
+// audit's suggested fix) would be wrong: it would block legacy
+// holders from paying for a full event AND double-bump them on
+// confirm. See api/payments.ts rowNeedsSpot for the same reasoning.
+function rowHoldsSpot(reg: any): boolean {
+  return reg?.holdsSpot !== false;
+}
+
 // Full refund of a captured Razorpay payment (attendee-cancelled paid
 // passes). The organizer's dashboard is the fallback when this fails.
 // Pass amountPaise for a PARTIAL refund (Razorpay `amount` in paise);
 // omit it for a full refund (today's behaviour everywhere else).
-async function refundRazorpayPayment(paymentId: string, amountPaise?: number): Promise<{ ok: boolean; refundId?: string }> {
+// H3 (audit #4): refund-before-persist is fixed by the CALLER, which
+// writes refundStatus "processing" (+ amounts) to the row BEFORE
+// calling this (see the PATCH cancel branch). This helper itself
+// guards the retry side: on every call it FIRST re-reads the payment
+// from Razorpay and checks amount_refunded, and only then POSTs the
+// refund — so a retry after a lost response never double-refunds.
+// It also sends `Idempotency-Key: refund-<registrationId>` when the
+// caller passes registrationId. IDEMPOTENCY WARNING (verified
+// 2026-11-06 against Razorpay's public docs): Razorpay documents
+// idempotency keys ONLY for Payouts (`X-Payout-Idempotency`) and
+// Route transfers (`X-Transfer-Idempotency`); no public doc says the
+// standard Payments refund endpoint honours `Idempotency-Key`. The
+// header is sent best-effort and is NOT relied on — the pre-read
+// above + the processing claim are the real double-refund guards,
+// and a live Razorpay test is still owed to prove whether the
+// header has any effect on refunds. Razorpay itself also refuses a
+// second FULL refund with 400 ("already been fully refunded").
+async function refundRazorpayPayment(paymentId: string, amountPaise?: number, registrationId?: string): Promise<{ ok: boolean; refundId?: string; alreadyRefunded?: boolean }> {
   try {
     const keyId = getEnv("RAZORPAY_KEY_ID");
     const secret = getEnv("RAZORPAY_KEY_SECRET");
@@ -668,9 +793,39 @@ async function refundRazorpayPayment(paymentId: string, amountPaise?: number): P
       if (Buf) auth = `Basic ${Buf.from(raw, "utf-8").toString("base64")}`;
     }
     if (!auth) return { ok: false };
+    // Retry guard first: read the payment from Razorpay. If the
+    // amount we are about to refund is already refunded, recover
+    // the existing refund id (GET /payments/:id/refunds) and
+    // return success WITHOUT posting a second refund.
+    try {
+      const pay = await fetchJson(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, {
+        headers: { Authorization: auth },
+      });
+      if (pay.ok && pay.body) {
+        const already = Number(pay.body.amount_refunded || 0);
+        const target = amountPaise ? Number(amountPaise) : Number(pay.body.amount || 0);
+        if (target > 0 && already >= target) {
+          let existingRefundId: string | undefined;
+          try {
+            const list = await fetchJson(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}/refunds?count=10`, {
+              headers: { Authorization: auth },
+            });
+            const items = Array.isArray(list.body?.items) ? list.body.items : [];
+            const match = items.find((r: any) => r && Number(r.amount || 0) >= target) || items[0];
+            if (match?.id) existingRefundId = match.id;
+          } catch { /* refund id stays unknown; the row still records initiated */ }
+          return { ok: true, refundId: existingRefundId, alreadyRefunded: true };
+        }
+      }
+      // A failed pre-read must not block the refund: Razorpay
+      // refuses a duplicate FULL refund itself (400), and the
+      // processing claim means only one attempt is in flight.
+    } catch { /* fall through to the POST below */ }
+    const headers: Record<string, string> = { Authorization: auth, "Content-Type": "application/json" };
+    if (registrationId) headers["Idempotency-Key"] = `refund-${registrationId}`;
     const res = await fetchJson(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}/refund`, {
       method: "POST",
-      headers: { Authorization: auth, "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(amountPaise ? { amount: amountPaise } : {}),
     });
     if (res.ok && res.body?.id) return { ok: true, refundId: res.body.id };
@@ -678,6 +833,30 @@ async function refundRazorpayPayment(paymentId: string, amountPaise?: number): P
   } catch {
     return { ok: false };
   }
+}
+
+// Plain row save (PATCH the whole data jsonb). Returns false when
+// Supabase refuses the write.
+async function saveRegistrationRow(reg: any): Promise<boolean> {
+  const { ok } = await fetchJson(
+    `${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(reg.id)}`,
+    { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: reg }) },
+  );
+  return ok;
+}
+
+// Compare-and-swap save: applies ONLY if the row still carries
+// expectedStatus at write time (same pattern as
+// saveRegistrationIfPending in api/payments.ts). Returns true only
+// when a row was actually updated (PostgREST returns the row when
+// the filter matches). A parallel canceller wins the first write;
+// the loser sees false and must re-read instead of refunding again.
+async function saveRegistrationIfStill(reg: any, expectedStatus: string): Promise<boolean> {
+  const { ok, body } = await fetchJson(
+    `${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(reg.id)}&data->>status=eq.${encodeURIComponent(expectedStatus)}`,
+    { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: reg }) },
+  );
+  return ok && Array.isArray(body) && body.length > 0;
 }
 
 // Management (check-in, attendee roster) requires the
@@ -695,6 +874,12 @@ export default async function handler(req: any, res: any): Promise<void> {
   try {
     if (!getEnv("SUPABASE_URL") || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) {
       sendJson(res, 503, { message: "Shared registrations database is not configured" });
+      return;
+    }
+    // L3 (audit #4): mutations from another site are refused — see
+    // api/_lib/origin-check.ts. GETs are exempt (reads).
+    if (isMutationMethod(req) && !originAllowed(req)) {
+      sendJson(res, 403, { message: "Request origin not allowed" });
       return;
     }
     // Finding 1 / P2-1: session first, for every method. No session ->
@@ -717,8 +902,26 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rl.retryAfter) });
         return;
       }
-      const all = await loadAllRegistrations();
+      // H8: GET ?id= fetches the single row by primary key instead
+      // of loading the whole table to find it.
+      if (q.get("id")) {
+        const reg = await loadRegistrationById(q.get("id") || "");
+        if (!reg) { sendJson(res, 404, { message: "Registration not found" }); return; }
+        const event = await loadEvent(reg.eventId);
+        // Roster views require STILL-approved management (revocation
+        // must also close attendee phone/UTR access, not just the hub).
+        const isOrg = await mayManageEventActive(event, me);
+        if (norm(reg.userEmail) !== me && !isOrg) { sendJson(res, 403, { message: "Not allowed" }); return; }
+        sendJson(res, 200, stripReg(reg, me, isOrg));
+        return;
+      }
       if (q.get("pendingCounts") === "1") {
+        // Sweep G: the full-table load is kept ONLY for this branch
+        // — pendingCounts spans every event the caller manages, and
+        // the caller set is owner-or-admin (mayManageEvent), not one
+        // targeted query. It is an organizer-dashboard-only call,
+        // not a hot path.
+        const all = await loadAllRegistrations();
         // Only counts for events this caller organises (or admins).
         const events = await loadAllEventsForCounts();
         const counts: Record<string, number> = {};
@@ -752,6 +955,8 @@ export default async function handler(req: any, res: any): Promise<void> {
           sendJson(res, 404, { message: "Team not found" });
           return;
         }
+        // Sweep G: targeted per-event load (was the whole table).
+        const all = await loadRegistrationsForEvent(teamEventId);
         const mine = all.find((r: any) => r.eventId === teamEventId && r.teamCode === teamCode && norm(r.userEmail) === me && r.status !== "cancelled");
         if (!mine) {
           sendJson(res, 404, { message: "Team not found" });
@@ -774,27 +979,20 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 200, { eventId: teamEventId, teamCode, teamSize, members });
         return;
       }
-      if (q.get("id")) {
-        const reg = all.find((r: any) => r.id === q.get("id"));
-        if (!reg) { sendJson(res, 404, { message: "Registration not found" }); return; }
-        const event = await loadEvent(reg.eventId);
-        // Roster views require STILL-approved management (revocation
-        // must also close attendee phone/UTR access, not just the hub).
-        const isOrg = await mayManageEventActive(event, me);
-        if (norm(reg.userEmail) !== me && !isOrg) { sendJson(res, 403, { message: "Not allowed" }); return; }
-        sendJson(res, 200, stripReg(reg, me, isOrg));
-        return;
-      }
       if (q.get("eventId")) {
         const event = await loadEvent(q.get("eventId") || "");
         if (!event) { sendJson(res, 404, { message: "Event not found" }); return; }
         if (!(await mayManageEventActive(event, me))) { sendJson(res, 403, { message: "Not allowed" }); return; }
+        // Sweep G: targeted per-event load (was the whole table).
+        const all = await loadRegistrationsForEvent(q.get("eventId") || "");
         sendJson(res, 200, all.filter((r: any) => r.eventId === q.get("eventId")).map((r: any) => stripReg(r, me, true)));
         return;
       }
       // userId is IGNORED as identity (it was the IDOR vector). Any
       // other GET, including ?userId=someone-else, returns only the
       // caller's own records, by JWT email.
+      // Sweep G: targeted per-user load (was the whole table).
+      const all = await loadRegistrationsForUser(me);
       sendJson(res, 200, all.filter((r: any) => norm(r.userEmail) === me).map((r: any) => stripReg(r, me, false)));
       return;
     }
@@ -808,9 +1006,22 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       const reg = await readBody(req);
-      if (!reg || !reg.id || !reg.eventId || !reg.userId) {
-        sendJson(res, 400, { message: "Registration needs id, eventId and userId" });
+      if (!reg || !reg.eventId || !reg.userId) {
+        sendJson(res, 400, { message: "Registration needs eventId and userId" });
         return;
+      }
+      // M9: id charset — a client-supplied id must be a plain
+      // identifier (no slashes, spaces or query characters that
+      // could break the ?id=eq. lookup or smuggle a second row).
+      // M6: when the client sends no id, the server generates a
+      // crypto-random one instead of refusing the registration.
+      if (typeof reg.id === "string" && reg.id) {
+        if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(reg.id)) {
+          sendJson(res, 400, { message: "Invalid registration id" });
+          return;
+        }
+      } else {
+        reg.id = newRegistrationId();
       }
       // Identity is the JWT email, never the body email.
       if (norm(reg.userEmail) !== me) {
@@ -830,6 +1041,22 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 409, { message: "This event has ended" });
         return;
       }
+      // M7: requireAttendeeDetails is enforced SERVER-side, never
+      // just by the client gate: when the event requires attendee
+      // details (the default when the flag is missing — see the
+      // organizer toggle, default ON), a name (<=100 chars) and a
+      // 7–15 digit phone are mandatory. Digits are normalized here
+      // (spaces/dashes/+ stripped) so the stored phone is canonical.
+      if (event.requireAttendeeDetails !== false) {
+        const attName = typeof reg.userName === "string" ? reg.userName.trim() : "";
+        const attPhone = typeof reg.userPhone === "string" ? reg.userPhone.replace(/\D/g, "") : "";
+        if (!attName || attName.length > 100 || attPhone.length < 7 || attPhone.length > 15) {
+          sendJson(res, 400, { message: "Attendee name and a valid phone number (7–15 digits) are required for this event" });
+          return;
+        }
+        reg.userName = attName;
+        reg.userPhone = attPhone;
+      }
       // Organizers cannot take a seat at their own event: they would
       // inflate the count, occupy a real attendee's seat, and could
       // approve their own payment. (Admins attending others' events
@@ -838,7 +1065,11 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 403, { message: "Organizers cannot register for their own event" });
         return;
       }
-      const allRegs = await loadAllRegistrations();
+      // Sweep G: targeted per-event load (was the whole table — up to
+      // 10,000 rows per registration). Every use below filters by
+      // this event; the ticket-code line keeps its site-wide guard
+      // via ticketCodeExists below.
+      const allRegs = await loadRegistrationsForEvent(reg.eventId);
       // Server-side dedupe (the client check was local-storage only, so
       // a second device or tab created a second pass and a second
       // count bump). An active row is returned as-is, never duplicated.
@@ -1029,7 +1260,16 @@ export default async function handler(req: any, res: any): Promise<void> {
       delete (reg as any).refundId;
       delete (reg as any).refundAmountPaise;
       delete (reg as any).refundFeePaise;
-      if (reg.status === "confirmed") reg.ticketCode = newTicketCode();
+      if (reg.status === "confirmed") reg.ticketCode = newTicketCode(allRegs);
+      // Sweep G: allRegs is per-event now, so the clash check inside
+      // newTicketCode covers this event only. Keep codes unique
+      // site-wide (they are mailed and shown on passes) with the
+      // targeted existence check; re-roll on clash, max 8 attempts.
+      if (reg.status === "confirmed") {
+        for (let attempt = 0; attempt < 8 && (await ticketCodeExists(reg.ticketCode)); attempt++) {
+          reg.ticketCode = newTicketCode(allRegs);
+        }
+      }
       if (reg.status === "pending") reg.ticketCode = "";
       // Capacity is enforced here, not just in the UI: a confirmed row
       // past capacity is refused instead of overbooking the event.
@@ -1043,8 +1283,16 @@ export default async function handler(req: any, res: any): Promise<void> {
       // The snapshot is the TOTAL (base price + chosen option
       // extras), so a free-base event with a paid extra is a paid
       // registration for exactly that total.
-      if (!isTeamJoin && totalPaise > 0) reg.amountPaise = totalPaise;
-      reg.registeredAt = reg.registeredAt || new Date().toISOString();
+      // M9: amountPaise is server-owned — a free row (total 0) is
+      // always stored as 0, so a crafted body cannot smuggle a paid
+      // amount onto a free registration (or vice versa: a paid total
+      // always overwrites the client value above).
+      if (!isTeamJoin) reg.amountPaise = totalPaise > 0 ? totalPaise : 0;
+      // M9: registeredAt is server-side, never client-supplied — a
+      // crafted body cannot backdate a registration (which would
+      // shift the 24h refund anchor). Reactivations keep the
+      // ORIGINAL registeredAt (set on the merged row below).
+      if (!reactivating) reg.registeredAt = new Date().toISOString();
       // Do not store a full nested event with organiser email/UPI.
       // Store only the public snapshot the UI needs.
       if (reg.event) reg.event = stripEventPublic(reg.event);
@@ -1058,21 +1306,56 @@ export default async function handler(req: any, res: any): Promise<void> {
         // block the next cancel's refund via the !refundId guard.
         // (undefined keys are dropped by JSON.stringify, so the stored
         // row has no refund fields at all until a new refund happens.)
-        const merged = { ...existingCancelled, ...reg, id: existingCancelled.id, refundStatus: undefined, refundId: undefined, refundAmountPaise: undefined, refundFeePaise: undefined };
+        const merged = { ...existingCancelled, ...reg, id: existingCancelled.id, refundStatus: undefined, refundId: undefined, refundAmountPaise: undefined, refundFeePaise: undefined, registeredAt: existingCancelled.registeredAt || existingCancelled.createdAt || new Date().toISOString() };
         const { ok: patchOk, body: patchBody } = await fetchJson(`${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(reg.id)}`, {
           method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: merged }),
         });
         if (!patchOk) { sendJson(res, 500, { message: "Failed to store registration" }); return; }
         stored = Array.isArray(patchBody) && patchBody.length > 0 ? patchBody[0].data : merged;
       } else {
-        const { ok, body } = await fetchJson(`${supabaseBase()}/rest/v1/registrations`, {
+        const { ok, status, body } = await fetchJson(`${supabaseBase()}/rest/v1/registrations`, {
           method: "POST", headers: supabaseHeaders(), body: JSON.stringify({ id: reg.id, data: reg }),
         });
-        if (!ok) { sendJson(res, 500, { message: "Failed to store registration" }); return; }
+        if (!ok) {
+          // M6: a 409 is an id clash, not a lost write — re-read
+          // before failing. A retried POST whose first attempt
+          // already landed returns the stored row instead of a 500.
+          if (status === 409) {
+            try {
+              const clash = await loadRegistrationById(reg.id);
+              if (clash && String(clash.eventId || "") === String(reg.eventId) && norm(clash.userEmail || "") === me) {
+                stored = clash;
+              }
+            } catch { /* fall through to the 500 below */ }
+            if (stored) {
+              sendJson(res, 200, stripReg(stored, me, false));
+              return;
+            }
+          }
+          sendJson(res, 500, { message: "Failed to store registration" }); return;
+        }
         stored = Array.isArray(body) && body.length > 0 ? body[0].data : reg;
       }
       // Server-side count: a confirmed registration takes a slot now.
-      if (stored && stored.status === "confirmed") { try { await bumpEventCount(stored.eventId, 1); } catch {} }
+      // H4: the RPC result is the verdict. If the bump refuses
+      // (last seat taken by a parallel confirm), roll the row back
+      // to cancelled and answer 409 instead of overbooking — the
+      // pre-insert capacity check above cannot see a simultaneous
+      // insert (check-then-insert race; see bumpEventCount).
+      if (stored && stored.status === "confirmed") {
+        let bumped = false;
+        try { bumped = await bumpEventCount(stored.eventId, 1); } catch { bumped = false; }
+        if (!bumped) {
+          try {
+            await fetchJson(`${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(stored.id)}`, {
+              method: "PATCH", headers: supabaseHeaders(),
+              body: JSON.stringify({ data: { ...stored, status: "cancelled", cancelledReason: "event_full" } }),
+            });
+          } catch { /* the 409 below is the answer either way */ }
+          sendJson(res, 409, { message: "This event is at full capacity" });
+          return;
+        }
+      }
       if (stored) {
         try {
           // Only confirmed rows mail here (free instant passes). A
@@ -1087,13 +1370,26 @@ export default async function handler(req: any, res: any): Promise<void> {
     }
 
     if (req.method === "PATCH") {
+      // Sweep G: PATCH (attendee cancel with refund / organizer
+      // check-in toggle) had no rate limit while POST/GET did.
+      // Fail-open per session, 60/10min like msg:patch.
+      const rlPatch = await checkRateLimit(`reg:patch:${me}`, 60, 10 * 60 * 1000);
+      if (!rlPatch.allowed && !rlPatch.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlPatch.retryAfter) });
+        return;
+      }
       const id = q.get("id");
       if (!id) { sendJson(res, 400, { message: "Pass id" }); return; }
       const updates = await readBody(req);
-      const all = await loadAllRegistrations();
-      const existing = all.find((r: any) => r.id === id);
+      // H8: targeted row fetch, not a whole-table load.
+      const existing = await loadRegistrationById(id);
       if (!existing) { sendJson(res, 404, { message: "Registration not found" }); return; }
       const nextStatus = updates.status;
+      // M9: status allowlist — any status outside the known set is
+      // refused outright, before the role gates below.
+      if (nextStatus !== undefined && !isAllowedRegistrationStatus(nextStatus)) {
+        sendJson(res, 400, { message: "Invalid registration status" }); return;
+      }
       const event = await loadEvent(existing.eventId);
       const isOrg = mayManageEvent(event, me);
       // Organizer actions require STILL-approved management (see
@@ -1138,38 +1434,81 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 400, { message: "This update is not allowed" });
         return;
       }
-      const merged: any = { ...existing, ...allowedUpdates, id: existing.id, userEmail: existing.userEmail, userId: existing.userId, eventId: existing.eventId, utr: existing.utr };
+      // H3: `merged` is reassigned to the finalised refund row below,
+      // so it is a let, not a const.
+      let merged: any = { ...existing, ...allowedUpdates, id: existing.id, userEmail: existing.userEmail, userId: existing.userId, eventId: existing.eventId, utr: existing.utr };
       if (merged.event) merged.event = stripEventPublic(merged.event);
-      // Cancelling a confirmed Razorpay pass refunds it automatically
-      // under the 24h / 10% rule (see refundQuote): full refund when
-      // cancelled within 24h of purchase, 90% back after that (10%
-      // cancellation fee). The ticket is cancelled on the spot in this
-      // same request regardless of the refund outcome: if the refund
-      // call fails, the cancel still proceeds (the attendee asked to
-      // leave) but refundStatus "failed" stays on the row — with the
-      // amount owed recorded in refundAmountPaise — for the organizer
-      // to resolve in the Razorpay dashboard.
-      if (merged.status === 'cancelled' && existing.status === 'confirmed' && existing.paymentMethod === 'razorpay' && existing.razorpayPaymentId && !existing.refundId) {
+      // H3 (audit #4): refund-before-persist, fixed. The claim is
+      // written FIRST — status "cancelled" + refundStatus
+      // "processing" + the quoted amounts — via a CAS write that
+      // only applies while the row is still confirmed, THEN the
+      // Razorpay call runs, THEN the row is finalised with
+      // refundId + "initiated" (or "failed" + the amount owed).
+      // A failed refund NEVER un-cancels the ticket: the row stays
+      // cancelled either way (the attendee asked to leave) with
+      // refundStatus "failed" + refundAmountPaise for the organizer
+      // to resolve in the Razorpay dashboard. A parallel cancel
+      // loses the CAS, re-reads, and returns the already-cancelled
+      // row without calling Razorpay a second time. A row whose
+      // refund is already "processing" is likewise left alone.
+      let cancelSaved = false;
+      let refundAttempted = false;
+      if (merged.status === 'cancelled' && existing.status === 'confirmed' && existing.paymentMethod === 'razorpay' && existing.razorpayPaymentId && !existing.refundId && existing.refundStatus !== "processing") {
         const quote = refundQuote(existing);
         if (quote) {
-          const rf = await refundRazorpayPayment(existing.razorpayPaymentId, quote.isFull ? undefined : quote.refundAmountPaise);
-          merged.refundAmountPaise = quote.refundAmountPaise;
-          merged.refundFeePaise = quote.refundFeePaise;
-          merged.refundStatus = rf.ok ? "initiated" : "failed";
-          if (rf.refundId) merged.refundId = rf.refundId;
+          refundAttempted = true;
+          const claim: any = {
+            ...merged,
+            refundAmountPaise: quote.refundAmountPaise,
+            refundFeePaise: quote.refundFeePaise,
+            refundStatus: "processing",
+          };
+          let claimed = false;
+          try { claimed = await saveRegistrationIfStill(claim, "confirmed"); } catch { claimed = false; }
+          if (!claimed) {
+            // Lost the race, or the CAS jsonb filter is unsupported
+            // on this PostgREST version: re-read to tell which.
+            const freshClaim = await loadRegistrationById(id);
+            if (freshClaim && freshClaim.status === "cancelled") {
+              sendJson(res, 200, stripReg(freshClaim, me, isOrgActive));
+              return;
+            }
+            if (freshClaim && freshClaim.status === "confirmed") {
+              claimed = await saveRegistrationRow(claim);
+            }
+          }
+          if (claimed) {
+            cancelSaved = true;
+            const rf = await refundRazorpayPayment(existing.razorpayPaymentId, quote.isFull ? undefined : quote.refundAmountPaise, existing.id);
+            const finalRow: any = { ...claim, refundStatus: rf.ok ? "initiated" : "failed" };
+            if (rf.refundId) finalRow.refundId = rf.refundId;
+            await saveRegistrationRow(finalRow);
+            merged = finalRow;
+          }
         }
       }
-      const { ok } = await fetchJson(
-        `${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(id)}`,
-        { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: merged }) },
-      );
-      if (!ok) { sendJson(res, 500, { message: "Failed to update registration" }); return; }
+      if (refundAttempted && !cancelSaved) {
+        // The refund claim could not be written, so the cancel is
+        // refused rather than cancelling a paid pass with no refund
+        // record at all — the caller can retry, and the organizer
+        // can see the still-confirmed pass.
+        sendJson(res, 500, { message: "Failed to record refund" });
+        return;
+      }
+      if (!cancelSaved) {
+        const { ok } = await fetchJson(
+          `${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(id)}`,
+          { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: merged }) },
+        );
+        if (!ok) { sendJson(res, 500, { message: "Failed to update registration" }); return; }
+      }
       // Server-side counts: cancelling a held slot releases one
       // (confirmed passes, and legacy pending rows that predate the
-      // holdsSpot flag). Nothing else changes counts here anymore —
-      // Razorpay confirms bump their own count in api/payments.ts.
+      // holdsSpot flag — see rowHoldsSpot above). Nothing else
+      // changes counts here anymore — Razorpay confirms bump their
+      // own count in api/payments.ts.
       try {
-        if (merged.status === 'cancelled' && (existing.status === 'confirmed' || (existing.status === 'pending' && existing.holdsSpot !== false))) await bumpEventCount(merged.eventId, -1);
+        if (merged.status === 'cancelled' && (existing.status === 'confirmed' || (existing.status === 'pending' && rowHoldsSpot(existing)))) await bumpEventCount(merged.eventId, -1);
       } catch {}
       sendJson(res, 200, stripReg(merged, me, isOrgActive));
       return;
@@ -1191,24 +1530,47 @@ async function loadAllEventsForCounts(): Promise<Record<string, any>> {
   return out;
 }
 
-async function bumpEventCount(eventId: string, delta: number): Promise<void> {
-  // Atomic RPC first (see SUPABASE_RPC_SETUP.md): increments only when
-  // a seat is free, never past capacity, in one statement. Until that
-  // function exists in Supabase, fall back to a capped read-modify-write.
+async function bumpEventCount(eventId: string, delta: number): Promise<boolean> {
+  // H4 (audit #4): the RPC's BODY is the verdict, not its HTTP
+  // status. adjust_event_count returns boolean: true only when the
+  // count actually moved (a +1 returns false when the event is full
+  // or missing; a -1 returns false only when the event is missing).
+  // The old code returned on `rpc.ok` alone, so an HTTP-200 `false`
+  // was silently treated as a successful bump and the event
+  // overbooked. On `rpc.ok` with body false we return false at once
+  // and do NOT fall through to the capped fallback — the RPC just
+  // told us the seat is not there, and a stale re-read could still
+  // bump. When the RPC call itself fails (rpc.ok false: the function
+  // has not been created yet in Supabase — 404 — or a transient
+  // error), we DO fall through to the capped read-modify-write,
+  // which is fail-safe: the count can never exceed capacity or drop
+  // below zero, so capacity is still enforced, just not atomically.
+  // What remains racy even WITH the RPC: the check-then-insert in
+  // POST (read registeredCount, then insert) and in payments verify
+  // (read the count for the eventFull pre-check, then confirm) —
+  // two parallel requests can both pass the read before either
+  // bumps. The RPC bump is the backstop: the loser of the bump gets
+  // false and its confirm is rolled back (see the POST rollback
+  // above and confirmCapturedPayment in api/payments.ts). The
+  // option-cap counts in POST (taken >= cap) are still a plain
+  // read-then-insert with no atomic backstop — a simultaneous pair
+  // can oversell a capped choice by one.
   try {
     const rpc = await fetchJson(`${supabaseBase()}/rest/v1/rpc/adjust_event_count`, {
       method: "POST", headers: supabaseHeaders(),
       body: JSON.stringify({ p_event_id: eventId, p_delta: delta }),
     });
-    if (rpc.ok) return;
+    if (rpc.ok) return rpc.body === true;
   } catch { /* fall through to capped bump */ }
   const event = await loadEvent(eventId);
-  if (!event) return;
+  if (!event) return false;
   const capacity = Number(event.capacity || 0);
   const cap = capacity > 0 ? capacity : Number.MAX_SAFE_INTEGER;
   const next = Math.min(cap, Math.max(0, Number(event.registeredCount || 0) + delta));
-  if (next === Number(event.registeredCount || 0)) return;
-  await fetchJson(`${supabaseBase()}/rest/v1/events?id=eq.${encodeURIComponent(eventId)}`, {
-    method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: { ...event, registeredCount: next } }),
-  });
+  if (next === Number(event.registeredCount || 0)) return delta < 0; // +1 at cap: refused; -1 at 0: nothing to release, fine
+  const patched = await fetchJson(
+    `${supabaseBase()}/rest/v1/events?id=eq.${encodeURIComponent(eventId)}`,
+    { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: { ...event, registeredCount: next } }) },
+  );
+  return patched.ok;
 }

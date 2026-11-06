@@ -1,4 +1,4 @@
-// Shared server helpers for Locora security fix — NO IMPORTS, NO node:crypto.
+// Shared server helpers for Locora security fix — NO node:crypto; ONE import (H2 rate-limit, see below).
 // This file is inlined into each api/*.ts function because this project's
 // Vercel functions have historically been self-contained (no static imports:
 // the previous _lib import and the node:crypto import both failed live with
@@ -8,6 +8,12 @@
 // SESSION_SECRET, SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY come only from
 // Vercel env vars. If SESSION_SECRET is missing, session verification fails
 // closed (null) and login/signup/Google callback must refuse to issue a session.
+// H2 (audit #4): the ONLY static import in this file — the shared
+// rate-limit module (api/_lib/rate-limit.ts). See its header for the
+// live _lib-import risk + the live-test step after deploy.
+import { checkRateLimit, getClientIp } from "./_lib/rate-limit";
+import { originAllowed, isMutationMethod } from "./_lib/origin-check";
+
 export const ADMIN_EMAILS = ["mr.adeen946@gmail.com", "ayan.work937@gmail.com"];
 
 export function getEnv(name: string): string {
@@ -52,11 +58,6 @@ export function parseCookies(req: any): Record<string, string> {
   return out;
 }
 
-export function getClientIp(req: any): string {
-  const fwd = req.headers?.["x-forwarded-for"] || "";
-  if (typeof fwd === "string" && fwd.trim()) return fwd.split(",")[0].trim();
-  return req.headers?.["x-real-ip"] || "unknown";
-}
 
 function bytesToB64url(bytes: Uint8Array): string {
   let bin = "";
@@ -245,36 +246,6 @@ export function randomTokenHex(bytes = 32): string {
   return bytesToHex(randomBytes(bytes));
 }
 
-// ---- Rate limiting (Supabase-backed counter, table rate_limits) ----
-export async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
-  try {
-    if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
-    const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
-    const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
-    if (!ok) {
-      if (status === 404 || status === 400) return { allowed: false, retryAfter: 0, tableMissing: true };
-      return { allowed: true, retryAfter: 0, tableMissing: false };
-    }
-    const now = Date.now();
-    const row = Array.isArray(body) && body.length > 0 ? body[0].data : null;
-    const windowStart = row && typeof row.windowStart === "number" ? row.windowStart : 0;
-    const count = row && typeof row.count === "number" ? row.count : 0;
-    if (windowStart && now - windowStart < windowMs && count >= limit) {
-      return { allowed: false, retryAfter: Math.ceil((windowStart + windowMs - now) / 1000), tableMissing: false };
-    }
-    const fresh = !windowStart || now - windowStart >= windowMs;
-    const next = { count: fresh ? 1 : count + 1, windowStart: fresh ? now : windowStart };
-    const up = await fetchJson(`${supabaseBase()}/rest/v1/rate_limits`, {
-      method: "POST",
-      headers: { ...supabaseHeaders(), Prefer: "resolution=merge-duplicates,return=representation" },
-      body: JSON.stringify({ id: key, data: next }),
-    });
-    if (!up.ok && (up.status === 404 || up.status === 400)) return { allowed: false, retryAfter: 0, tableMissing: true };
-    return { allowed: true, retryAfter: 0, tableMissing: false };
-  } catch {
-    return { allowed: true, retryAfter: 0, tableMissing: false };
-  }
-}
 
 // ---- Events / organiser helpers ----
 export function organizerEmailOf(event: any): string {
@@ -444,13 +415,19 @@ export default async function handler(req: any, res: any): Promise<void> {
     if (!getEnv("SUPABASE_URL") || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) {
       sendJson(res, 503, {
         message:
-          "Shared organizer access is not configured. See ORGANIZER_ACCESS_SETUP.md.",
+          "Organizer access is temporarily unavailable.",
       });
       return;
     }
 
     const session = await verifySession(req);
     if (!session) { sendJson(res, 401, { message: "Sign in required" }); return; }
+    // L3 (audit #4): mutations from another site are refused — see
+    // api/_lib/origin-check.ts. GETs are exempt (reads).
+    if (isMutationMethod(req) && !originAllowed(req)) {
+      sendJson(res, 403, { message: "Request origin not allowed" });
+      return;
+    }
     const url = new URL(req.url || "/api/organizer-access", "http://localhost");
     const email = session.email;
 
@@ -459,6 +436,14 @@ export default async function handler(req: any, res: any): Promise<void> {
       (url.searchParams.get("pending") === "1" ||
         url.searchParams.get("organizers") === "1")
     ) {
+      // M17: admin list reads are rate-limited like other GETs
+      // (allow when the rate_limits table is missing — the admin
+      // session check already protects the data).
+      const rlList = await checkRateLimit(`orgacc:list:${getClientIp(req)}:${email}`, 300, 10 * 60 * 1000);
+      if (!rlList.allowed && !rlList.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlList.retryAfter) });
+        return;
+      }
       const adminEmail = session.email;
       if (!isAdmin(adminEmail)) {
         sendJson(res, 403, { message: "Only admins can list organizer requests." });
@@ -473,7 +458,7 @@ export default async function handler(req: any, res: any): Promise<void> {
           // Table may not exist yet; surface the setup message distinctly.
           sendJson(res, 503, {
             message:
-              "organizer_access table has not been created yet in Supabase. See ORGANIZER_ACCESS_SETUP.md step 2.",
+              "Organizer access is temporarily unavailable. Please try again shortly.",
           });
           return;
         }
@@ -503,6 +488,12 @@ export default async function handler(req: any, res: any): Promise<void> {
     }
 
     if (req.method === "GET") {
+      // M17: role reads are rate-limited like other GETs.
+      const rlGet = await checkRateLimit(`orgacc:get:${getClientIp(req)}:${email}`, 300, 10 * 60 * 1000);
+      if (!rlGet.allowed && !rlGet.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlGet.retryAfter) });
+        return;
+      }
       // email is the session email; the query param is ignored.
       let row: any = null;
       try {
@@ -524,6 +515,19 @@ export default async function handler(req: any, res: any): Promise<void> {
       const body = await readBody(req);
       const action = body.action;
 
+      // M17: every organizer-access write is rate-limited, per
+      // session email — requests (10/hour: an unbounded request
+      // endpoint was an admin-inbox spam vector) and admin decisions
+      // (30/hour). Allow when the rate_limits table is missing, the
+      // same convention as the other POST endpoints.
+      const rlPost = action === "request"
+        ? await checkRateLimit(`orgacc:request:${email}`, 10, 60 * 60 * 1000)
+        : await checkRateLimit(`orgacc:post:${email}`, 30, 60 * 60 * 1000);
+      if (!rlPost.allowed && !rlPost.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlPost.retryAfter) });
+        return;
+      }
+
       if (action === "request") {
         const reqEmail = session.email;
         if (isAdmin(reqEmail)) {
@@ -537,7 +541,7 @@ export default async function handler(req: any, res: any): Promise<void> {
           if (e && (e.status === 404 || e.status === 400)) {
             sendJson(res, 503, {
               message:
-                "organizer_access table has not been created yet in Supabase. See ORGANIZER_ACCESS_SETUP.md step 2.",
+                "Organizer access is temporarily unavailable. Please try again shortly.",
             });
             return;
           }

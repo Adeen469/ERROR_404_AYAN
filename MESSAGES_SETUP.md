@@ -179,7 +179,7 @@ one exception — see the hard gate above. Do not add them yet.)
 
 - Private + event-community chats now use **full-payload delivery on
   a private channel per user**: the channel name is
-  `inbox:<hex(HMAC-SHA256(SESSION_SECRET, "locora-inbox:" + email))>`,
+  `inbox:<hex(HMAC-SHA256(SESSION_SECRET, "locora-inbox:" + email + ":v" + sessionVersion))>`,
   computed server-side (`privateChannelName` in `api/messages.ts`);
   the client learns ONLY its own channel from GET
   `/api/messages?action=channel`. A client never learns another
@@ -194,6 +194,24 @@ one exception — see the hard gate above. Do not add them yet.)
   Payloads carry NAMES only (see `buildRealtimePayload`): no emails
   or phones, reply snapshots drop their senderEmail, readBy collapses
   to seenCount.
+- **Channel rotation (audit #4 H7):** the channel name mixes in
+  the user's `sessionVersion` (stored on the `locora_users` row,
+  bumped on sign-out-everywhere / password reset). After a bump,
+  the server derives a NEW name for that user — for their own
+  channel (GET `?action=channel` uses the version baked into the
+  verified session token) and for every broadcast to them
+  (`loadSessionVersion` / `loadSessionVersions`). A client still
+  subscribed to the pre-bump name simply stops receiving; polling
+  covers the gap, and the client re-learns its name (the channel
+  cache has a 5-minute TTL, `resetRealtimeChannelCache()` forces
+  an immediate re-fetch). This is rotation by invalidation, not
+  by access control: the channel is still `private: false` on
+  Supabase's side, so secrecy still rests on the name being
+  unguessable without SESSION_SECRET. The long-term path is
+  Supabase private-channel JWT auth (Realtime Authorization /
+  RLS on `realtime.messages`), which needs Supabase Auth — the
+  app uses custom HMAC sessions, not Supabase Auth, so that is
+  out of scope for this pass and is NOT attempted here.
 - **Global room stays ping-only** on the public `community:global`
   channel (a ping carries no content): fan-out to "every signed-in
   user" is unbounded, so there is no member list to derive channels
@@ -218,7 +236,67 @@ one exception — see the hard gate above. Do not add them yet.)
   live. The new channel name is unguessable without SESSION_SECRET;
   if the secret ever rotates, all channel names change at once and
   clients re-learn theirs from `?action=channel` (polling covers
-  the gap).
+  the gap). Rotation invalidates every session too — see the
+  runbook below.
+
+## SESSION_SECRET rotation runbook (audit #4 H7)
+
+`SESSION_SECRET` (Vercel Production env, server only, never in the
+repo or a `VITE_` var) signs every session token AND derives every
+private Realtime channel name. Rotating it is a deliberate outage
+for live sessions — do it only if the secret is suspected leaked.
+
+1. Generate a new secret: at least 32 random bytes. E.g. locally:
+   `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+   (64 hex chars) or `openssl rand -hex 32`. Never reuse a password
+   or a value from chat / a screenshot.
+2. In Vercel: Project → Settings → Environment Variables →
+   `SESSION_SECRET` → edit the value (Production). Do NOT delete
+   the variable first — edit in place so the name stays.
+3. Redeploy Production (Deployments → ⋯ → Redeploy on the latest
+   deployment). The new secret takes effect only after the redeploy
+   is Ready — env vars never apply to a running deployment.
+4. Effects (expected, not a bug): EVERY signed-in user is signed
+   out at once (their tokens were signed with the old secret, and
+   `verifySession` rejects them); every private Realtime channel
+   name changes at once (old subscribers stop receiving, polling
+   covers the gap, clients re-learn their new name from
+   `?action=channel` after signing in again). No data is lost —
+   messages, registrations and events are untouched.
+5. Verify: sign in fresh, send a private message and a community
+   message, confirm instant delivery on a second signed-in device.
+   If sign-in fails after the redeploy, the secret did not deploy —
+   check Deployments status and that the variable is Production,
+   not Preview-only.
+6. If the leak was via a specific user's session, prefer the
+   surgical option instead: sign-out-everywhere for that user
+   (bumps their `sessionVersion`, which rotates ONLY their channel
+   name and invalidates ONLY their sessions) — no global rotation
+   needed.
+
+## Razorpay webhook (audit #4 H6) — OWNER STEP
+
+Code is in place (`POST /api/payments?action=webhook`, same file as
+create-order / verify-payment — no new Vercel function). It does
+NOTHING until the owner registers it:
+
+1. In Vercel Production, set `RAZORPAY_WEBHOOK_SECRET` (Sensitive)
+   to the webhook secret from the Razorpay dashboard, then redeploy.
+   Without it the endpoint answers 503 and processes nothing.
+2. In the Razorpay dashboard (Settings → Webhooks → Add New
+   Webhook), register URL
+   `https://locora-hyperlocal.vercel.app/api/payments?action=webhook`
+   with events `payment.captured`, `refund.created`,
+   `refund.processed` ONLY. (`payment.refunded` is not a real
+   Razorpay event — do not add it.)
+3. What it does: verifies `X-Razorpay-Signature` (HMAC-SHA256 over
+   the raw body) and fails closed on any mismatch; `payment.captured`
+   confirms through the SAME compare-and-swap path as verify-payment
+   (so a browser that died mid-checkout still gets its pass, and a
+   webhook racing the browser cannot double-issue); refund events
+   only mark `refundStatus` / `refundId` on the registration row.
+   Unknown orders / non-pending rows answer 200 `{ignored}` so
+   Razorpay does not retry them forever.
 
 ## How it works
 

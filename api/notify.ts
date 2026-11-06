@@ -1,4 +1,4 @@
-// Shared server helpers for Locora security fix — NO IMPORTS, NO node:crypto.
+// Shared server helpers for Locora security fix — NO node:crypto; ONE import (H2 rate-limit, see below).
 // This file is inlined into each api/*.ts function because this project's
 // Vercel functions have historically been self-contained (no static imports:
 // the previous _lib import and the node:crypto import both failed live with
@@ -8,6 +8,12 @@
 // SESSION_SECRET, SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY come only from
 // Vercel env vars. If SESSION_SECRET is missing, session verification fails
 // closed (null) and login/signup/Google callback must refuse to issue a session.
+// H2 (audit #4): the ONLY static import in this file — the shared
+// rate-limit module (api/_lib/rate-limit.ts). See its header for the
+// live _lib-import risk + the live-test step after deploy.
+import { checkRateLimit, getClientIp } from "./_lib/rate-limit";
+import { originAllowed, isMutationMethod } from "./_lib/origin-check";
+
 export const ADMIN_EMAILS = ["mr.adeen946@gmail.com", "ayan.work937@gmail.com"];
 
 export function getEnv(name: string): string {
@@ -52,11 +58,6 @@ export function parseCookies(req: any): Record<string, string> {
   return out;
 }
 
-export function getClientIp(req: any): string {
-  const fwd = req.headers?.["x-forwarded-for"] || "";
-  if (typeof fwd === "string" && fwd.trim()) return fwd.split(",")[0].trim();
-  return req.headers?.["x-real-ip"] || "unknown";
-}
 
 function bytesToB64url(bytes: Uint8Array): string {
   let bin = "";
@@ -245,36 +246,6 @@ export function randomTokenHex(bytes = 32): string {
   return bytesToHex(randomBytes(bytes));
 }
 
-// ---- Rate limiting (Supabase-backed counter, table rate_limits) ----
-export async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
-  try {
-    if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
-    const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
-    const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
-    if (!ok) {
-      if (status === 404 || status === 400) return { allowed: false, retryAfter: 0, tableMissing: true };
-      return { allowed: true, retryAfter: 0, tableMissing: false };
-    }
-    const now = Date.now();
-    const row = Array.isArray(body) && body.length > 0 ? body[0].data : null;
-    const windowStart = row && typeof row.windowStart === "number" ? row.windowStart : 0;
-    const count = row && typeof row.count === "number" ? row.count : 0;
-    if (windowStart && now - windowStart < windowMs && count >= limit) {
-      return { allowed: false, retryAfter: Math.ceil((windowStart + windowMs - now) / 1000), tableMissing: false };
-    }
-    const fresh = !windowStart || now - windowStart >= windowMs;
-    const next = { count: fresh ? 1 : count + 1, windowStart: fresh ? now : windowStart };
-    const up = await fetchJson(`${supabaseBase()}/rest/v1/rate_limits`, {
-      method: "POST",
-      headers: { ...supabaseHeaders(), Prefer: "resolution=merge-duplicates,return=representation" },
-      body: JSON.stringify({ id: key, data: next }),
-    });
-    if (!up.ok && (up.status === 404 || up.status === 400)) return { allowed: false, retryAfter: 0, tableMissing: true };
-    return { allowed: true, retryAfter: 0, tableMissing: false };
-  } catch {
-    return { allowed: true, retryAfter: 0, tableMissing: false };
-  }
-}
 
 // ---- Events / organiser helpers ----
 export function organizerEmailOf(event: any): string {
@@ -347,6 +318,11 @@ export function esc(s: string): string {
 //   POST /api/notify { action: "login", email }
 //     -> "new sign-in" email with device + location, at most 5 per
 //        email per hour.
+//   POST /api/notify { action: "cleanup" }
+//     -> ADMIN ONLY: retention cleanup (audit #4 M5) — deletes
+//        expired rows (rate_limits >24h, email_log >90d,
+//        revoked_tokens/password_resets expired/used). Monthly,
+//        see runRetentionCleanup below for the schedule note.
 //
 // Callers (the app after a local sign-in/sign-up, and the Google
 // callback page after a Google sign-in) fire this and ignore failures:
@@ -376,9 +352,6 @@ export function esc(s: string): string {
 // from api/_lib), following the same shape as api/registrations.ts.
 // Sending uses Gmail SMTP via nodemailer, dynamically imported only
 // when a send actually happens, gated on GMAIL_USER / GMAIL_APP_PASSWORD.
-
-
-
 
 
 function validEmail(email: string): boolean {
@@ -430,9 +403,6 @@ function primaryButton(label: string, href: string): string {
 function secondaryButton(label: string, href: string): string {
   return `<a href="${href}" style="display:inline-block;background:#ffffff;color:#1E3F35;border:1px solid #1E3F35;padding:12px 24px;border-radius:999px;text-decoration:none;font-weight:600;font-size:15px;">${label}</a>`;
 }
-
-
-
 
 
 // Best-effort "Browser on OS" from a User-Agent string. Unknown agents
@@ -587,10 +557,118 @@ async function logSend(email: string, kind: string): Promise<void> {
   }
 }
 
+// ---- Retention cleanup (audit #4 M5) — ADMIN ONLY ----
+// Deletes expired rows so the bookkeeping tables cannot grow without
+// bound: rate_limits older than 24h (data.windowStart, epoch ms),
+// email_log older than 90 days (created_at), revoked_tokens past
+// expiresAt, password_resets expired OR used. Cutoffs mirror the
+// retention SQL in SECURITY_FIX_SETUP.md (revoked_tokens prune:
+// delete ... where (data->>'expiresAt')::timestamptz < now()).
+// PostgREST cannot compare a jsonb text field against a timestamp in
+// a DELETE filter, so the jsonb-expiry tables are fetched (max 1000
+// rows) and deleted by id; email_log deletes server-side by
+// created_at in one call. Each table is capped at 500 deletes per
+// run so one call stays inside serverless time limits — run it again
+// if a table still has expired rows.
+// SCHEDULE: call POST /api/notify { "action": "cleanup" } MONTHLY,
+// e.g. cron "0 3 1 * *" (the 1st of each month, 03:00). NOTE: Vercel
+// Cron Jobs issue unauthenticated GET requests, so a plain
+// vercel.json "crons" entry CANNOT call this admin session-gated
+// POST directly. Run it from a scheduler that can send the admin's
+// locora_session cookie (e.g. a monthly admin reminder + one curl
+// from an admin's signed-in browser session), or a future
+// signed-secret variant of this endpoint. The SQL equivalents
+// (owner-run, same cutoffs) are:
+//   delete from public.rate_limits where (data->>'windowStart')::bigint < (extract(epoch from now()) - 86400) * 1000;
+//   delete from public.email_log where created_at < now() - interval '90 days';
+//   delete from public.revoked_tokens where (data->>'expiresAt')::timestamptz < now();
+//   delete from public.password_resets where (data->>'used')::boolean is true or (data->>'expiresAt')::timestamptz < now();
+async function deleteRowsById(table: string, ids: string[]): Promise<number> {
+  let deleted = 0;
+  for (const id of ids.slice(0, 500)) {
+    try {
+      const { ok } = await fetchJson(
+        `${supabaseBase()}/rest/v1/${table}?id=eq.${encodeURIComponent(id)}`,
+        { method: "DELETE", headers: supabaseHeaders() },
+      );
+      if (ok) deleted++;
+    } catch { /* best-effort per row; the run still reports the rest */ }
+  }
+  return deleted;
+}
+
+async function fetchTableData(table: string): Promise<any[]> {
+  try {
+    const { ok, body } = await fetchJson(
+      `${supabaseBase()}/rest/v1/${table}?select=id,data&limit=1000`,
+      { headers: supabaseHeaders() },
+    );
+    if (!ok || !Array.isArray(body)) return [];
+    return body;
+  } catch {
+    return [];
+  }
+}
+
+async function runRetentionCleanup(): Promise<Record<string, number>> {
+  const now = Date.now();
+  const out: Record<string, number> = { rate_limits: 0, email_log: 0, revoked_tokens: 0, password_resets: 0 };
+  // rate_limits: windowStart older than 24h.
+  try {
+    const rows = await fetchTableData("rate_limits");
+    const stale = rows
+      .filter((r: any) => typeof r?.data?.windowStart === "number" && now - r.data.windowStart > 24 * 60 * 60 * 1000)
+      .map((r: any) => String(r.id));
+    out.rate_limits = await deleteRowsById("rate_limits", stale);
+  } catch { /* table missing: 0 stays */ }
+  // email_log: one server-side delete by created_at (real column).
+  try {
+    const cutoff = new Date(now - 90 * 24 * 60 * 60 * 1000).toISOString();
+    const { ok, body } = await fetchJson(
+      `${supabaseBase()}/rest/v1/email_log?created_at=lt.${encodeURIComponent(cutoff)}`,
+      { method: "DELETE", headers: supabaseHeaders() },
+    );
+    if (ok && Array.isArray(body)) out.email_log = body.length;
+  } catch { /* table missing: 0 stays */ }
+  // revoked_tokens: past expiresAt (inert rows — verifySession
+  // already ignores them; this just reclaims space).
+  try {
+    const rows = await fetchTableData("revoked_tokens");
+    const stale = rows
+      .filter((r: any) => {
+        const exp = Date.parse(String(r?.data?.expiresAt || ""));
+        return Number.isFinite(exp) && exp < now;
+      })
+      .map((r: any) => String(r.id));
+    out.revoked_tokens = await deleteRowsById("revoked_tokens", stale);
+  } catch { /* table missing: 0 stays */ }
+  // password_resets: expired OR used (a used token can never be
+  // replayed, and an expired one can never be completed).
+  try {
+    const rows = await fetchTableData("password_resets");
+    const stale = rows
+      .filter((r: any) => {
+        if (r?.data?.used === true) return true;
+        const exp = Date.parse(String(r?.data?.expiresAt || ""));
+        return Number.isFinite(exp) && exp < now;
+      })
+      .map((r: any) => String(r.id));
+    out.password_resets = await deleteRowsById("password_resets", stale);
+  } catch { /* table missing: 0 stays */ }
+  return out;
+}
+
 export default async function handler(req: any, res: any): Promise<void> {
   try {
     if (req.method !== "POST") {
       sendJson(res, 405, { message: "POST only" });
+      return;
+    }
+    // L3 (audit #4): mutations from another site are refused — see
+    // api/_lib/origin-check.ts. (The Google callback page posts here
+    // same-origin, so its keepalive login/welcome calls still pass.)
+    if (!originAllowed(req)) {
+      sendJson(res, 403, { message: "Request origin not allowed" });
       return;
     }
     const session = await verifySession(req);
@@ -599,11 +677,30 @@ export default async function handler(req: any, res: any): Promise<void> {
       return;
     }
     if (!getEnv("SUPABASE_URL") || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) {
-      sendJson(res, 503, { message: "Shared email log is not configured. See ACCOUNT_EMAILS_SETUP.md." });
+      sendJson(res, 503, { message: "Email notifications are temporarily unavailable." });
       return;
     }
     const body = await readBody(req);
     const action = body?.action;
+    // M5: retention cleanup — ADMIN ONLY. No email is involved, so
+    // the welcome/login email===session check below does not apply.
+    // Rate-limited (10/hour per admin); missing rate_limits table
+    // still allows the run (an admin-only endpoint must not be
+    // blocked by a missing counter table).
+    if (action === "cleanup") {
+      if (!isAdmin(session.email)) {
+        sendJson(res, 403, { message: "Only admins can run cleanup." });
+        return;
+      }
+      const rlCleanup = await checkRateLimit(`notify:cleanup:${session.email}`, 10, 60 * 60 * 1000);
+      if (!rlCleanup.allowed && !rlCleanup.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlCleanup.retryAfter) });
+        return;
+      }
+      const deleted = await runRetentionCleanup();
+      sendJson(res, 200, { cleaned: true, deleted });
+      return;
+    }
     const email = norm(body?.email || "");
     if ((action !== "welcome" && action !== "login") || !validEmail(email)) {
       sendJson(res, 400, { message: "Pass action 'welcome' or 'login' and a valid email." });

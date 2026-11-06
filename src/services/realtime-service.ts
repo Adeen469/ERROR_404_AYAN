@@ -16,10 +16,13 @@
 // a PRIVATE channel per user:
 //
 //   channel = "inbox:" + hex(HMAC-SHA256(SESSION_SECRET,
-//       "locora-inbox:" + lowercase(email)))
+//       "locora-inbox:" + lowercase(email) + ":v" + sessionVersion))
 //
 // The HMAC is computed SERVER-side (api/messages.ts
-// privateChannelName). The client learns ONLY ITS OWN channel name
+// privateChannelName). The sessionVersion is mixed in (audit #4
+// H7): it bumps on sign-out-everywhere / password reset, so a
+// bumped user gets a new channel name and the old name stops
+// working. The client learns ONLY ITS OWN channel name
 // from GET /api/messages?action=channel (session-authenticated) via
 // messagesService.getRealtimeChannel(). A client never learns
 // another user's channel name, so it cannot subscribe to anyone
@@ -132,15 +135,55 @@ export interface TypingEvent {
 
 let client: SupabaseClient | null | undefined;
 
+// Bounded client-creation retries (audit #4 M13): the old code
+// cached `null` forever on the first failure, so a transient
+// createClient error (or env vars arriving after a redeploy
+// without a reload) left the chat on polling for the whole page
+// lifetime. Creation is now retried at most 5 times, with a
+// growing 15s * attempt backoff between tries; after the 5th
+// failure the null is final for this page load. A successful
+// client is still created once and reused.
+let clientAttempts = 0;
+let clientLastAttemptMs = 0;
+const MAX_REALTIME_CLIENT_ATTEMPTS = 5;
+const REALTIME_CLIENT_RETRY_BASE_MS = 15000;
+
 export function getRealtimeClient(): SupabaseClient | null {
   if (client !== undefined) return client;
+  const now = Date.now();
+  if (clientAttempts >= MAX_REALTIME_CLIENT_ATTEMPTS) {
+    client = null;
+    return null;
+  }
+  if (clientAttempts > 0 && now - clientLastAttemptMs < REALTIME_CLIENT_RETRY_BASE_MS * clientAttempts) {
+    return null;
+  }
+  clientAttempts += 1;
+  clientLastAttemptMs = now;
   // import.meta.env exists under Vite; under plain node it does not,
   // so the optional chain keeps node tests from crashing on import.
   const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
   const url = env?.VITE_SUPABASE_URL;
   const anon = env?.VITE_SUPABASE_ANON_KEY;
-  client = url && anon ? createClient(url, anon) : null;
-  return client;
+  if (!url || !anon) return null;
+  try {
+    client = createClient(url, anon);
+  } catch {
+    // Transient failure: leave `client` undefined so the next call
+    // (after the backoff above) retries instead of caching null.
+    client = undefined;
+  }
+  return client ?? null;
+}
+
+// Test / sign-out hook: forget the cached client (and the retry
+// budget) so the next call creates it fresh. Not called by the
+// chats themselves — a sign-out that keeps the SPA alive should
+// call this so a new session is not stuck on the old client.
+export function resetRealtimeClient(): void {
+  client = undefined;
+  clientAttempts = 0;
+  clientLastAttemptMs = 0;
 }
 
 function channelName(email: string): string {

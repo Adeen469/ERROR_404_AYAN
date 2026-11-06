@@ -1,4 +1,4 @@
-// Shared server helpers for Locora security fix — NO IMPORTS, NO node:crypto.
+// Shared server helpers for Locora security fix — NO node:crypto; ONE import (H2 rate-limit, see below).
 // This file is inlined into each api/*.ts function because this project's
 // Vercel functions have historically been self-contained (no static imports:
 // the previous _lib import and the node:crypto import both failed live with
@@ -8,6 +8,12 @@
 // SESSION_SECRET, SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY come only from
 // Vercel env vars. If SESSION_SECRET is missing, session verification fails
 // closed (null) and login/signup/Google callback must refuse to issue a session.
+// H2 (audit #4): the ONLY static import in this file — the shared
+// rate-limit module (api/_lib/rate-limit.ts). See its header for the
+// live _lib-import risk + the live-test step after deploy.
+import { checkRateLimit, getClientIp } from "./_lib/rate-limit";
+import { originAllowed, isMutationMethod } from "./_lib/origin-check";
+
 export const ADMIN_EMAILS = ["mr.adeen946@gmail.com", "ayan.work937@gmail.com"];
 
 export function getEnv(name: string): string {
@@ -52,17 +58,6 @@ export function parseCookies(req: any): Record<string, string> {
   return out;
 }
 
-export function getClientIp(req: any): string {
-  // Last entry, not first: the first x-forwarded-for entry is
-  // client-controlled and trivially spoofed to dodge per-IP limits;
-  // Vercel appends the real connecting IP last.
-  const fwd = req.headers?.["x-forwarded-for"] || "";
-  if (typeof fwd === "string" && fwd.trim()) {
-    const parts = fwd.split(",").map((s: string) => s.trim()).filter(Boolean);
-    if (parts.length) return parts[parts.length - 1];
-  }
-  return req.headers?.["x-real-ip"] || "unknown";
-}
 
 function bytesToB64url(bytes: Uint8Array): string {
   let bin = "";
@@ -251,36 +246,6 @@ export function randomTokenHex(bytes = 32): string {
   return bytesToHex(randomBytes(bytes));
 }
 
-// ---- Rate limiting (Supabase-backed counter, table rate_limits) ----
-export async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
-  try {
-    if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
-    const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
-    const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
-    if (!ok) {
-      if (status === 404 || status === 400) return { allowed: false, retryAfter: 0, tableMissing: true };
-      return { allowed: true, retryAfter: 0, tableMissing: false };
-    }
-    const now = Date.now();
-    const row = Array.isArray(body) && body.length > 0 ? body[0].data : null;
-    const windowStart = row && typeof row.windowStart === "number" ? row.windowStart : 0;
-    const count = row && typeof row.count === "number" ? row.count : 0;
-    if (windowStart && now - windowStart < windowMs && count >= limit) {
-      return { allowed: false, retryAfter: Math.ceil((windowStart + windowMs - now) / 1000), tableMissing: false };
-    }
-    const fresh = !windowStart || now - windowStart >= windowMs;
-    const next = { count: fresh ? 1 : count + 1, windowStart: fresh ? now : windowStart };
-    const up = await fetchJson(`${supabaseBase()}/rest/v1/rate_limits`, {
-      method: "POST",
-      headers: { ...supabaseHeaders(), Prefer: "resolution=merge-duplicates,return=representation" },
-      body: JSON.stringify({ id: key, data: next }),
-    });
-    if (!up.ok && (up.status === 404 || up.status === 400)) return { allowed: false, retryAfter: 0, tableMissing: true };
-    return { allowed: true, retryAfter: 0, tableMissing: false };
-  } catch {
-    return { allowed: true, retryAfter: 0, tableMissing: false };
-  }
-}
 
 // ---- Events / organiser helpers ----
 export function organizerEmailOf(event: any): string {
@@ -440,6 +405,15 @@ function stripMessageForViewer(m: any, viewerEmail: string): any {
   const out: any = { ...m };
   delete out.hiddenFor;
   delete out.idempotencyKey;
+  // M1 (audit #4): community rooms are names-only — a community row
+  // must never carry either side's email to the viewer. The private
+  // inbox keeps senderEmail/recipientEmail (the client files threads
+  // by them); community rows never need them (senderName is shown).
+  if (m.type === "community") {
+    delete out.senderEmail;
+    delete out.recipientEmail;
+    // (replySnapshot senderEmail is dropped in the rebuild below.)
+  }
   if (m.senderEmail !== viewerEmail) delete out.editHistory;
   // readBy is a list of member EMAILS — it must never reach a
   // viewer (names only, everywhere). Collapse it to a count plus
@@ -456,7 +430,8 @@ function stripMessageForViewer(m: any, viewerEmail: string): any {
     const s = m.replySnapshot;
     out.replySnapshot = {
       id: String(s.id || ""),
-      senderEmail: String(s.senderEmail || ""),
+      // M1: community quotes are names-only too — no senderEmail.
+      ...(m.type === "community" ? {} : { senderEmail: String(s.senderEmail || "") }),
       ...(s.senderName ? { senderName: String(s.senderName).slice(0, 80) } : {}),
       text: String(s.text || "").slice(0, 200),
       ...(s.attachmentName ? { attachmentName: String(s.attachmentName).slice(0, 200) } : {}),
@@ -479,13 +454,25 @@ function stripMessageForViewer(m: any, viewerEmail: string): any {
 // NEW design: one private channel PER USER, named by an HMAC the
 // client cannot compute:
 //
-//   privateChannelName(email) = "inbox:" + hex(HMAC-SHA256(
-//       SESSION_SECRET, "locora-inbox:" + lowercase(email)))
+//   privateChannelName(email, sessionVersion) = "inbox:" +
+//       hex(HMAC-SHA256(SESSION_SECRET,
+//           "locora-inbox:" + lowercase(email) + ":v" + sessionVersion))
 //
 // Deterministic per user, unguessable without SESSION_SECRET (which
-// never leaves the server). NO new table, NO new storage: the server
-// derives the name on demand, and the client learns ONLY ITS OWN
-// channel name from GET ?action=channel (session-authenticated).
+// never leaves the server). The sessionVersion is mixed in (audit
+// #4 H7): it lives on the locora_users row and bumps on
+// sign-out-everywhere / password reset, so a bumped user gets a NEW
+// channel name and any client still subscribed to the old name
+// stops receiving — the old name is never derived again. The
+// caller learns its own name from GET ?action=channel, which uses
+// the version baked into the verified session token (already
+// checked against the stored row by verifySession); broadcasts to
+// OTHER users load their stored version (loadSessionVersion /
+// loadSessionVersions below). A user with no stored version (legacy
+// row) derives with 0, exactly as before the bump existed.
+// NO new table, NO new storage: the server derives the name on
+// demand, and the client learns ONLY ITS OWN channel name from
+// GET ?action=channel (session-authenticated).
 // A client never learns another user's channel name, so it cannot
 // subscribe to anyone else's live messages.
 //
@@ -509,15 +496,57 @@ function stripMessageForViewer(m: any, viewerEmail: string): any {
 // reply snapshot drops its senderEmail, and readBy is collapsed to
 // seenCount. `own` is computed per recipient so the receiver knows
 // whether the message is theirs without seeing any email.
-async function privateChannelName(email: string): Promise<string | null> {
+export async function privateChannelName(email: string, sessionVersion = 0): Promise<string | null> {
   const secret = getEnv("SESSION_SECRET");
   if (!secret || !isEmail(email || "")) return null;
   try {
-    const sig = await hmacB64url(secret, "locora-inbox:" + norm(email));
+    const v = Number.isFinite(sessionVersion) ? Math.trunc(sessionVersion) : 0;
+    const sig = await hmacB64url(secret, "locora-inbox:" + norm(email) + ":v" + v);
     return "inbox:" + bytesToHex(b64urlToBytes(sig));
   } catch {
     return null;
   }
+}
+
+// Stored sessionVersion for one user (locora_users row
+// data.sessionVersion; bumps on sign-out-everywhere / password
+// reset — see api/auth.ts). Missing row / missing field = 0, the
+// same default a fresh session is signed with, so legacy users
+// keep working until their next bump.
+export async function loadSessionVersion(email: string): Promise<number> {
+  try {
+    const row = await loadUserByEmail(email);
+    const v = row?.data?.sessionVersion;
+    return typeof v === "number" && Number.isFinite(v) ? v : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// Same, batched: ONE PostgREST read for a whole fan-out list
+// (community rooms), instead of one read per member. Emails with
+// no row / no version are absent from the map — callers treat a
+// miss as 0.
+export async function loadSessionVersions(emails: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const list = [...new Set(emails.map((e) => norm(e)).filter((e) => isEmail(e)))];
+  if (!list.length) return out;
+  try {
+    const q = list.map((e) => encodeURIComponent(e)).join(",");
+    const { ok, body } = await fetchJson(
+      `${supabaseBase()}/rest/v1/locora_users?select=data&data->>email=in.(${q})`,
+      { headers: supabaseHeaders() },
+    );
+    if (ok && Array.isArray(body)) {
+      for (const row of body) {
+        const d = row?.data || {};
+        if (isEmail(d.email || "") && typeof d.sessionVersion === "number") {
+          out.set(norm(d.email), d.sessionVersion);
+        }
+      }
+    }
+  } catch { /* fall through: missing versions derive as 0 */ }
+  return out;
 }
 
 // Server -> Supabase Realtime broadcast (REST). `entries` may carry
@@ -612,14 +641,18 @@ function buildRealtimePayload(m: any, viewerEmail: string): any {
     replyToId: v.replyToId || undefined,
     replySnapshot: snap,
     createdAt: v.createdAt || "",
-    own: norm(v.senderEmail || "") === norm(viewerEmail || ""),
+    own: norm(m.senderEmail || "") === norm(viewerEmail || ""),
     seenCount: typeof v.seenCount === "number" ? v.seenCount : undefined,
   };
   // Private chats only: the thread key lets the receiver file the
   // message into the right thread without any email in the payload
   // (the key is a hash of the pair, not the pair itself).
-  if (!isCommunityMessage(v) && v.senderEmail && v.recipientEmail) {
-    out.threadKey = threadKeyHash(v.eventId, v.senderEmail, v.recipientEmail);
+  // NOTE: `own` / threadKey read the RAW row (m), not the stripped
+  // copy (v) — stripMessageForViewer drops senderEmail/recipientEmail
+  // for community rows (M1), so reading them from v would always
+  // compute own:false.
+  if (!isCommunityMessage(v) && m.senderEmail && m.recipientEmail) {
+    out.threadKey = threadKeyHash(v.eventId, m.senderEmail, m.recipientEmail);
   }
   return out;
 }
@@ -916,7 +949,6 @@ const ALLOWED_EXTENSIONS: Record<string, string[]> = {
 };
 
 
-
 async function loadAllMessages(): Promise<any[]> {
   const { ok, body } = await fetchJson(
     `${supabaseBase()}/rest/v1/messages?select=id,data&limit=1000`,
@@ -1003,6 +1035,26 @@ async function verifyAttachment(path: string, ext: string): Promise<string | nul
     await deleteAttachmentObject(path);
     return "Attachment exceeds the 20MB limit";
   }
+  // L4 (audit #4): a Range GET does not always come back with a
+  // Content-Range — some Storage/CDN responses answer 200 with no
+  // range at all. "No total" used to mean "no size check", so an
+  // oversized object sailed through unchecked. Fall back to a HEAD
+  // request for Content-Length before giving up on the size check.
+  // Only when the HEAD also yields no usable length do we proceed
+  // (the magic-byte check below still runs); a HEAD failure is not
+  // proof of anything, so it never rejects a good upload.
+  if (!totalMatch) {
+    try {
+      const headRes = await fetch(url, { method: "HEAD" });
+      const len = Number(headRes.headers.get("content-length") || "");
+      if (Number.isFinite(len) && len > MAX_ATTACHMENT_BYTES) {
+        await deleteAttachmentObject(path);
+        return "Attachment exceeds the 20MB limit";
+      }
+    } catch {
+      // Continue to the magic-byte check below.
+    }
+  }
   let head = new Uint8Array(0);
   try {
     const reader = (res.body as any)?.getReader?.();
@@ -1070,8 +1122,75 @@ async function loadMessagesReplyingTo(id: string): Promise<any[]> {
   return [];
 }
 
+// M6: crypto-random message ids (48 bits from WebCrypto, hex).
+// The old `msg-<ms>-<Math.random base36>` id had far less entropy
+// and Math.random is not a randomness source for identifiers.
+function newMessageId(): string {
+  try {
+    return `msg-${Date.now().toString(36)}-${bytesToHex(randomBytes(6))}`;
+  } catch {
+    return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+}
+
+// H8/M16: targeted idempotency lookup — ONE indexed row fetch by
+// idempotencyKey + event + sender (+ recipient for private chats),
+// instead of loading the sender's whole history or the event's
+// whole room and scanning in memory. Returns null when no prior
+// row exists OR when the lookup itself fails (callers fall back to
+// the in-memory scan of data they already loaded).
+async function loadMessageByIdempotencyKey(opts: {
+  eventId: string; key: string; senderEmail: string; recipientEmail?: string; community: boolean;
+}): Promise<any | null> {
+  try {
+    const q =
+      `data->>idempotencyKey=eq.${encodeURIComponent(opts.key)}` +
+      `&data->>eventId=eq.${encodeURIComponent(opts.eventId)}` +
+      `&data->>senderEmail=eq.${encodeURIComponent(norm(opts.senderEmail))}` +
+      (opts.community
+        ? `&data->>type=eq.community`
+        : opts.recipientEmail
+          ? `&data->>recipientEmail=eq.${encodeURIComponent(norm(opts.recipientEmail))}`
+          : "") +
+      `&limit=1`;
+    const { ok, body } = await fetchJson(
+      `${supabaseBase()}/rest/v1/messages?select=id,data&${q}`,
+      { headers: supabaseHeaders() },
+    );
+    if (ok && Array.isArray(body) && body.length > 0) return body[0].data;
+  } catch { /* null below: caller falls back */ }
+  return null;
+}
+
+// H8: unread count via a PostgREST count=exact HEAD query — the
+// server returns only the total in the Content-Range header, not
+// the rows. Null when the count query fails (caller falls back to
+// the in-memory count over the loaded page). LIMIT: a message the
+// viewer hid for themselves (hiddenFor) but never read is still
+// counted — hiddenFor cannot be expressed in the count filter, and
+// hiding an unread message is a rare edge; the count stays exact
+// for every message the viewer has not hidden.
+async function countUnreadMessages(email: string): Promise<number | null> {
+  try {
+    const url =
+      `${supabaseBase()}/rest/v1/messages?select=id` +
+      `&data->>recipientEmail=eq.${encodeURIComponent(norm(email))}` +
+      `&data->>read=eq.false&data->>type=neq.community&data->>type=neq.block`;
+    const res = await fetch(url, {
+      method: "HEAD",
+      headers: { ...supabaseHeaders(), Prefer: "count=exact" },
+    });
+    const range = (res.headers as any)?.get?.("content-range") || "";
+    const m = String(range).match(/\/(\d+)\s*$/);
+    if (res.ok && m) return Number(m[1]);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function storeMessage(msg: any): Promise<void> {
-  const { ok } = await fetchJson(
+  const { ok, status } = await fetchJson(
     `${supabaseBase()}/rest/v1/messages`,
     {
       method: "POST",
@@ -1079,7 +1198,17 @@ async function storeMessage(msg: any): Promise<void> {
       body: JSON.stringify({ id: msg.id, data: msg }),
     },
   );
-  if (!ok) throw new Error("messages table write failed");
+  if (ok) return;
+  // M6: a 409 is a primary-key clash on the id, not a lost write —
+  // re-read before failing. A retried send whose first attempt
+  // already landed returns normally instead of a 503.
+  if (status === 409) {
+    try {
+      const existing = await loadMessage(msg.id);
+      if (existing) return;
+    } catch { /* fall through to the throw below */ }
+  }
+  throw new Error("messages table write failed");
 }
 
 async function updateMessageData(msg: any): Promise<void> {
@@ -1226,14 +1355,16 @@ async function sendMail(
 }
 
 // Pagination params for the chat GETs (?limit=&before=&since=).
-// Returns null when none are present, so a no-param GET behaves
-// exactly as before (full list, no hasMore in the response).
-function pageOptsFromQuery(q: any): { limit?: number; before?: string; since?: string } | null {
-  if (!q || (q.limit === undefined && q.before === undefined && q.since === undefined)) return null;
+// H8: every chat GET is paginated by default (newest 50, plus
+// hasMore) — there is no full-list GET anymore. Callers page
+// backwards with `before` (loadOlder) or forwards with `since`
+// (polls); the legacy full-list client helpers page backwards
+// themselves (see messages-service.ts getMessages).
+function pageOptsFromQuery(q: any): { limit?: number; before?: string; since?: string } {
   return {
-    limit: Number(q.limit) || 50,
-    before: String(q.before || ""),
-    since: String(q.since || ""),
+    limit: Number(q?.limit) || 50,
+    before: String(q?.before || ""),
+    since: String(q?.since || ""),
   };
 }
 
@@ -1252,6 +1383,12 @@ export default async function handler(req: any, res: any): Promise<void> {
       sendJson(res, 503, { message: "Messages are not set up yet" });
       return;
     }
+    // L3 (audit #4): mutations from another site are refused — see
+    // api/_lib/origin-check.ts. GETs are exempt (reads + channel).
+    if (isMutationMethod(req) && !originAllowed(req)) {
+      sendJson(res, 403, { message: "Request origin not allowed" });
+      return;
+    }
     // P2-3: session first, for every method. No session -> 401, no data.
     const session = await verifySession(req);
     if (!session) {
@@ -1268,7 +1405,11 @@ export default async function handler(req: any, res: any): Promise<void> {
     // Null when SESSION_SECRET is missing — Realtime then stays
     // polling-only, exactly as before.
     if (req.method === "GET" && req.query?.action === "channel") {
-      const channel = await privateChannelName(me);
+      // The version baked into the verified session token (already
+      // checked against the stored row by verifySession above), so
+      // a bumped user learns the NEW name here and the old name
+      // stops being derived anywhere (audit #4 H7).
+      const channel = await privateChannelName(me, session.sessionVersion ?? 0);
       sendJson(res, 200, { realtimeChannel: channel });
       return;
     }
@@ -1298,13 +1439,10 @@ export default async function handler(req: any, res: any): Promise<void> {
         let rows: any[];
         let hasMore = false;
         try {
-          if (pageOpts) {
-            const page = await loadCommunityMessagesPage(GLOBAL_EVENT_ID, pageOpts);
-            rows = page.messages;
-            hasMore = page.hasMore;
-          } else {
-            rows = await loadCommunityMessages(GLOBAL_EVENT_ID);
-          }
+          // H8: paginated by default (newest 50) — no full-list GET.
+          const page = await loadCommunityMessagesPage(GLOBAL_EVENT_ID, pageOpts);
+          rows = page.messages;
+          hasMore = page.hasMore;
         } catch {
           sendJson(res, 503, { message: "Messages are not set up yet" });
           return;
@@ -1323,7 +1461,7 @@ export default async function handler(req: any, res: any): Promise<void> {
           // Moderator flag for the client (delete-any buttons):
           // admins + approved organizers moderate the global room.
           isOrganizer: await isApprovedOrganizer(me),
-          ...(pageOpts ? { hasMore } : {}),
+          hasMore,
         });
         return;
       }
@@ -1347,13 +1485,10 @@ export default async function handler(req: any, res: any): Promise<void> {
       let rows: any[];
       let hasMore = false;
       try {
-        if (pageOpts) {
-          const page = await loadCommunityMessagesPage(eventId, pageOpts);
-          rows = page.messages;
-          hasMore = page.hasMore;
-        } else {
-          rows = await loadCommunityMessages(eventId);
-        }
+        // H8: paginated by default (newest 50) — no full-list GET.
+        const page = await loadCommunityMessagesPage(eventId, pageOpts);
+        rows = page.messages;
+        hasMore = page.hasMore;
       } catch {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
@@ -1373,7 +1508,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         member: true,
         canPost: true,
         isOrganizer: mayManageEvent(event, me),
-        ...(pageOpts ? { hasMore } : {}),
+        hasMore,
       });
       return;
     }
@@ -1391,13 +1526,10 @@ export default async function handler(req: any, res: any): Promise<void> {
       let hasMore = false;
       const pageOpts = pageOptsFromQuery(req.query);
       try {
-        if (pageOpts) {
-          const page = await loadMessagesForPage(userEmail, pageOpts);
-          all = page.messages;
-          hasMore = page.hasMore;
-        } else {
-          all = await loadMessagesFor(userEmail);
-        }
+        // H8: paginated by default (newest 50) — no full-list GET.
+        const page = await loadMessagesForPage(userEmail, pageOpts);
+        all = page.messages;
+        hasMore = page.hasMore;
       } catch {
         sendJson(res, 503, { message: "Messages are not set up yet" });
         return;
@@ -1419,6 +1551,14 @@ export default async function handler(req: any, res: any): Promise<void> {
         // editHistory keeps edited-away text readable after an edit.
         .map((m: any) => stripMessageForViewer(m, userEmail));
       if (req.query?.unreadCount === "1") {
+        // H8: the count comes from a count=exact HEAD query, not
+        // from loading the rows. Null = the count query failed, so
+        // fall back to the in-memory count over the loaded page.
+        const counted = await countUnreadMessages(userEmail);
+        if (counted !== null) {
+          sendJson(res, 200, { count: counted });
+          return;
+        }
         sendJson(res, 200, {
           count: mine.filter((m: any) => m.recipientEmail === userEmail && !m.read)
             .length,
@@ -1431,7 +1571,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         (a.createdAt || "").localeCompare(b.createdAt || "") ||
         (a.id || "").localeCompare(b.id || ""),
       );
-      sendJson(res, 200, { messages: mine, ...(pageOpts ? { hasMore } : {}) });
+      sendJson(res, 200, { messages: mine, hasMore });
       return;
     }
 
@@ -1485,9 +1625,10 @@ export default async function handler(req: any, res: any): Promise<void> {
           return;
         }
         const members = communityMemberEmails(event, regs).filter((e) => norm(e) !== norm(me));
+        const versions = await loadSessionVersions(members);
         const entries: { topic: string; event: string; payload: any }[] = [];
         for (const email of members.slice(0, 200)) {
-          const channel = await privateChannelName(email);
+          const channel = await privateChannelName(email, versions.get(norm(email)) ?? 0);
           if (channel) entries.push({ topic: channel, event: "typing", payload: { name: senderName, eventId } });
         }
         await broadcastRealtimeSoon(entries);
@@ -1512,7 +1653,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 403, { message: denied });
         return;
       }
-      const channel = await privateChannelName(recipient);
+      const channel = await privateChannelName(recipient, await loadSessionVersion(recipient));
       if (channel) {
         await broadcastRealtimeSoon([{
           topic: channel,
@@ -1548,6 +1689,15 @@ export default async function handler(req: any, res: any): Promise<void> {
       }
       let marked = 0;
       const readEntries: { topic: string; event: string; payload: any }[] = [];
+      // Sender channel versions, loaded lazily once per distinct
+      // sender in this request (H7): a bumped sender's read receipt
+      // must go to their CURRENT channel, not the pre-bump name.
+      const senderVersions = new Map<string, number>();
+      const versionFor = async (email: string): Promise<number> => {
+        const key = norm(email || "");
+        if (!senderVersions.has(key)) senderVersions.set(key, await loadSessionVersion(key));
+        return senderVersions.get(key) ?? 0;
+      };
       for (const id of ids) {
         let msg: any = null;
         try { msg = await loadMessage(id); } catch { msg = null; }
@@ -1565,11 +1715,22 @@ export default async function handler(req: any, res: any): Promise<void> {
           const readBy: string[] = Array.isArray(msg.readBy) ? msg.readBy : [];
           if (readBy.some((e: any) => norm(e) === norm(me))) continue;
           readBy.push(me);
-          msg.readBy = readBy.slice(0, 200);
+          // Dedupe (M12): two parallel mark-read calls can both pass
+          // the check above and append the same email twice, which
+          // would inflate seenCount. Keep first-seen order, cap 200.
+          const seenEmails = new Set<string>();
+          msg.readBy = readBy
+            .filter((e: any) => {
+              const n = norm(e);
+              if (seenEmails.has(n)) return false;
+              seenEmails.add(n);
+              return true;
+            })
+            .slice(0, 200);
           try {
             await updateMessageData(msg);
             marked++;
-            const channel = await privateChannelName(String(msg.senderEmail || ""));
+            const channel = await privateChannelName(String(msg.senderEmail || ""), await versionFor(String(msg.senderEmail || "")));
             if (channel) readEntries.push({ topic: channel, event: "read", payload: { id, seenCount: msg.readBy.length } });
           } catch { /* best-effort */ }
         } else {
@@ -1579,7 +1740,7 @@ export default async function handler(req: any, res: any): Promise<void> {
           try {
             await updateMessageData(msg);
             marked++;
-            const channel = await privateChannelName(String(msg.senderEmail || ""));
+            const channel = await privateChannelName(String(msg.senderEmail || ""), await versionFor(String(msg.senderEmail || "")));
             if (channel) readEntries.push({ topic: channel, event: "read", payload: { id } });
           } catch { /* best-effort */ }
         }
@@ -1702,17 +1863,19 @@ export default async function handler(req: any, res: any): Promise<void> {
             loadRegistrationsForEvent(tombstoned.eventId).catch(() => null),
           ]);
           const members = event && regs ? communityMemberEmails(event, regs) : [];
+          const versions = await loadSessionVersions(members);
           const entries: { topic: string; event: string; payload: any }[] = [];
           for (const email of members.slice(0, 200)) {
-            const channel = await privateChannelName(email);
+            const channel = await privateChannelName(email, versions.get(norm(email)) ?? 0);
             if (channel) entries.push({ topic: channel, event: "deleted", payload: buildRealtimePayload(tombstoned, email) });
           }
           if (entries.length) await broadcastRealtimeSoon(entries);
           else await broadcastRealtimeSoon([{ topic: `community:${tombstoned.eventId}`, event: "deleted", payload: { id: tombstoned.id } }]);
         } else {
           const entries: { topic: string; event: string; payload: any }[] = [];
+          const delVersions = await loadSessionVersions([tombstoned.senderEmail, tombstoned.recipientEmail]);
           for (const email of [tombstoned.senderEmail, tombstoned.recipientEmail]) {
-            const channel = await privateChannelName(String(email || ""));
+            const channel = await privateChannelName(String(email || ""), delVersions.get(norm(String(email || ""))) ?? 0);
             if (channel) entries.push({ topic: channel, event: "deleted", payload: buildRealtimePayload(tombstoned, email) });
           }
           await broadcastRealtimeSoon(entries);
@@ -1833,12 +1996,66 @@ export default async function handler(req: any, res: any): Promise<void> {
     // bucket forever. The client calls this best-effort on send failure.
     // The path pattern is the same one send() enforces, and the random
     // suffix makes other users' paths unguessable.
+    // ---- POST: delete an uploaded attachment object ----
+    // M2 (audit #4): deleting used to be unauthenticated-ownership
+    // and un-rate-limited — anyone with a path could delete anyone
+    // else's attachment. Now: rate-limited (20 / 10 min), and when a
+    // stored message references the path, only its sender or the
+    // event's organizer/admin may delete it (403 otherwise). When NO
+    // message references the path it is a just-uploaded file whose
+    // send failed or was aborted — the client's orphan cleanup after
+    // a failed send — and the uploader may delete it: the path
+    // suffix is crypto-random (see upload-url), so it is
+    // unguessable, and the rate limit bounds blind probing.
     if (req.method === "POST" && body.action === "delete-upload") {
+      const rlDelUp = await checkRateLimit(`msg:delete-upload:${me}`, 20, 10 * 60 * 1000);
+      if (!rlDelUp.allowed && !rlDelUp.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlDelUp.retryAfter) });
+        return;
+      }
       const path = String(body.path || "");
       const pathOk = /^[A-Za-z0-9_-]+\/[0-9]+-[a-z0-9]+\.[A-Za-z0-9]+$/.test(path);
       if (!pathOk) {
         sendJson(res, 400, { message: "Invalid attachment path" });
         return;
+      }
+      let referenced: any = null;
+      try {
+        const { ok, body: rows } = await fetchJson(
+          `${supabaseBase()}/rest/v1/messages?select=id,data&data->attachment->>path=eq.${encodeURIComponent(path)}&limit=1`,
+          { headers: supabaseHeaders() },
+        );
+        if (ok && Array.isArray(rows) && rows.length > 0) referenced = rows[0].data;
+      } catch { /* fall through to the history fallback below */ }
+      if (!referenced) {
+        // Fallback when the nested-jsonb filter is rejected: scan
+        // the caller's own history (already session-scoped) plus
+        // the event's community room (community rows are not in
+        // loadMessagesFor — their recipient is the marker).
+        try {
+          const mine = await loadMessagesFor(me);
+          referenced = mine.find((m: any) => m?.attachment?.path === path) || null;
+        } catch { /* unreferenced: treated as the uploader's orphan */ }
+        if (!referenced) {
+          try {
+            const comm = await loadCommunityMessages(path.split("/")[0]);
+            referenced = comm.find((m: any) => m?.attachment?.path === path) || null;
+          } catch { /* unreferenced: treated as the uploader's orphan */ }
+        }
+      }
+      if (referenced) {
+        const isSender = norm(referenced.senderEmail || "") === norm(me);
+        let isManager = false;
+        if (!isSender) {
+          try {
+            const ev = await loadEvent(referenced.eventId || path.split("/")[0]);
+            isManager = !!ev && mayManageEvent(ev, me);
+          } catch { isManager = false; }
+        }
+        if (!isSender && !isManager) {
+          sendJson(res, 403, { message: "You can only delete your own uploads" });
+          return;
+        }
       }
       await deleteAttachmentObject(path);
       sendJson(res, 200, { deleted: true });
@@ -1943,7 +2160,7 @@ export default async function handler(req: any, res: any): Promise<void> {
           return;
         }
       }
-      const path = `${sanitizePathSegment(eventId)}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
+      const path = `${sanitizePathSegment(eventId)}/${Date.now()}-${bytesToHex(randomBytes(5))}.${ext}`;
       // Upload signed URLs are a DIFFERENT endpoint from download
       // signed URLs, and mixing them up fails in confusing ways:
       //   - POST /object/sign/... signs a DOWNLOAD link, so it 404s
@@ -2088,9 +2305,11 @@ export default async function handler(req: any, res: any): Promise<void> {
       let replySnapshot: any = null;
       let prior: any = null;
       {
-        const [quoted, communityRows] = await Promise.all([
+        const [quoted, priorRow] = await Promise.all([
           wantsReply ? loadMessage(String(body.replyToId).trim().slice(0, 200)).catch(() => null) : Promise.resolve(null),
-          idempotencyKey ? loadCommunityMessages(eventId).catch(() => []) : Promise.resolve([]),
+          // H8/M16: targeted idempotency lookup (one indexed row),
+          // not a load of the room's whole history.
+          idempotencyKey ? loadMessageByIdempotencyKey({ eventId, key: idempotencyKey, senderEmail: sender, community: true }) : Promise.resolve(null),
         ]);
         if (wantsReply) {
           replyToId = String(body.replyToId).trim().slice(0, 200);
@@ -2106,7 +2325,9 @@ export default async function handler(req: any, res: any): Promise<void> {
           replySnapshot = buildReplySnapshot(quoted);
         }
         if (idempotencyKey) {
-          prior = (communityRows || []).find((m: any) => m.idempotencyKey === idempotencyKey && m.senderEmail === sender);
+          // The targeted lookup already matched sender + event +
+          // key; the sender check below is defence-in-depth.
+          prior = priorRow && priorRow.senderEmail === sender ? priorRow : null;
           if (prior) {
             sendJson(res, 200, { message: stripMessageForViewer(prior, sender), idempotent: true });
             return;
@@ -2121,7 +2342,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         }
       }
       const msg: any = {
-        id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        id: newMessageId(),
         type: "community",
         eventId,
         eventTitle: event.title || "",
@@ -2167,9 +2388,10 @@ export default async function handler(req: any, res: any): Promise<void> {
               payload: { id: msg.id },
             }]);
           } else {
+            const sendVersions = await loadSessionVersions(members);
             const entries: { topic: string; event: string; payload: any }[] = [];
             for (const email of members) {
-              const channel = await privateChannelName(email);
+              const channel = await privateChannelName(email, sendVersions.get(norm(email)) ?? 0);
               if (channel) entries.push({ topic: channel, event: "message", payload: buildRealtimePayload(msg, email) });
             }
             await broadcastRealtimeSoon(entries);
@@ -2310,10 +2532,18 @@ export default async function handler(req: any, res: any): Promise<void> {
       // Send idempotency: a lost response + Retry used to create a
       // duplicate message (the client cleared the draft before the send
       // completed). A retry carrying the same key returns the original
-      // row instead of storing a second one.
+      // row instead of storing a second one. M16: the lookup is
+      // scoped by eventId + recipientEmail, not just the key — a key
+      // reused across threads must not return another thread's row.
       const idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.slice(0, 100) : "";
       if (idempotencyKey) {
-        const prior = existing.find((m: any) => m.type !== "community" && m.idempotencyKey === idempotencyKey && m.senderEmail === sender);
+        let prior = await loadMessageByIdempotencyKey({ eventId, key: idempotencyKey, senderEmail: sender, recipientEmail: recipient, community: false });
+        if (!prior) {
+          // Fallback: the sender's history is already loaded above
+          // for authorizeContact, so this in-memory scan costs no
+          // extra read when the targeted lookup fails.
+          prior = existing.find((m: any) => m.type !== "community" && m.idempotencyKey === idempotencyKey && m.senderEmail === sender && String(m.eventId || "") === String(eventId) && norm(m.recipientEmail || "") === norm(recipient)) || null;
+        }
         if (prior) {
           sendJson(res, 200, { message: stripMessageForViewer(prior, sender), mailed: false, idempotent: true });
           return;
@@ -2351,7 +2581,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         }
       } catch { /* fall back to the email address */ }
       const msg: any = {
-        id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        id: newMessageId(),
         eventId,
         eventTitle: event.title || "",
         senderEmail: sender,
@@ -2381,8 +2611,12 @@ export default async function handler(req: any, res: any): Promise<void> {
       // the sender's POST never stalls on Realtime.
       try {
         const entries: { topic: string; event: string; payload: any }[] = [];
+        // The sender is me: my version is in the verified session.
+        // The recipient's stored version is loaded (one read).
+        const recipientVersion = await loadSessionVersion(String(recipient || ""));
         for (const email of [recipient, sender]) {
-          const channel = await privateChannelName(String(email || ""));
+          const v = norm(String(email || "")) === norm(sender || "") ? (session.sessionVersion ?? 0) : recipientVersion;
+          const channel = await privateChannelName(String(email || ""), v);
           if (channel) entries.push({ topic: channel, event: "message", payload: buildRealtimePayload(msg, email) });
         }
         await broadcastRealtimeSoon(entries);
@@ -2483,17 +2717,19 @@ export default async function handler(req: any, res: any): Promise<void> {
               loadRegistrationsForEvent(msg.eventId).catch(() => null),
             ]);
             const members = event && regs ? communityMemberEmails(event, regs) : [];
+            const editVersions = await loadSessionVersions(members);
             const entries: { topic: string; event: string; payload: any }[] = [];
             for (const email of members.slice(0, 200)) {
-              const channel = await privateChannelName(email);
+              const channel = await privateChannelName(email, editVersions.get(norm(email)) ?? 0);
               if (channel) entries.push({ topic: channel, event: "edited", payload: buildRealtimePayload(msg, email) });
             }
             if (entries.length) await broadcastRealtimeSoon(entries);
             else await broadcastRealtimeSoon([{ topic: `community:${msg.eventId}`, event: "edited", payload: { id: msg.id } }]);
           } else {
             const entries: { topic: string; event: string; payload: any }[] = [];
+            const editVersions = await loadSessionVersions([msg.senderEmail, msg.recipientEmail]);
             for (const email of [msg.senderEmail, msg.recipientEmail]) {
-              const channel = await privateChannelName(String(email || ""));
+              const channel = await privateChannelName(String(email || ""), editVersions.get(norm(String(email || ""))) ?? 0);
               if (channel) entries.push({ topic: channel, event: "edited", payload: buildRealtimePayload(msg, email) });
             }
             await broadcastRealtimeSoon(entries);
@@ -2527,7 +2763,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       // waiting for a poll. Fire-and-forget — if it drops, the next
       // poll shows the same state.
       try {
-        const channel = await privateChannelName(String(msg.senderEmail || ""));
+        const channel = await privateChannelName(String(msg.senderEmail || ""), await loadSessionVersion(String(msg.senderEmail || "")));
         if (channel) broadcastRealtime([{ topic: channel, event: "read", payload: { id: msg.id } }]).catch(() => {});
       } catch { /* broadcast is speed only */ }
       sendJson(res, 200, { message: stripMessageForViewer(msg, recipient) });

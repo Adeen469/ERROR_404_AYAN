@@ -1,4 +1,4 @@
-// Locora Razorpay Standard Checkout — NO IMPORTS, NO node:crypto, NO SDK.
+// Locora Razorpay Standard Checkout — NO node:crypto, NO SDK; ONE import (H2 rate-limit, see below).
 // This file is self-contained like every other api/*.ts in this project
 // (relative imports and the node:crypto import have both failed live with
 // FUNCTION_INVOCATION_FAILED; the import-free pattern works). Razorpay is
@@ -8,6 +8,8 @@
 // Routes (see vercel.json rewrites; the frontend calls these URLs):
 //   POST /api/create-order   -> /api/payments?action=create-order
 //   POST /api/verify-payment -> /api/payments?action=verify-payment
+//   POST /api/payments?action=webhook (Razorpay dashboard webhook —
+//     NOT called by the browser; see handleWebhook below)
 // One function file keeps the Vercel Hobby 12-function limit safe
 // (the project is at 9 functions; this makes 10).
 //
@@ -45,6 +47,13 @@
 //   the event count twice. Confirmation itself is compare-and-swap
 //   (the row must still be pending at write time), so two parallel
 //   verifies cannot issue two different ticket codes for one pass.
+// - Webhook (audit #4 H6): Razorpay POSTs payment/refund events to
+//   ?action=webhook. The X-Razorpay-Signature HMAC-SHA256 is verified
+//   over the RAW request body with RAZORPAY_WEBHOOK_SECRET (fail
+//   closed when the secret is missing). payment.captured confirms
+//   through the SAME compare-and-swap path as verify-payment, so a
+//   browser that died mid-checkout still gets its pass; refund
+//   events only mark refundStatus/refundId on the row.
 // - Secrets come only from Vercel env vars: RAZORPAY_KEY_ID (public,
 //   returned to the browser with the order so no VITE_ build var is
 //   needed) and RAZORPAY_KEY_SECRET (server only, never returned, never
@@ -52,6 +61,13 @@
 // - Manual UPI/UTR payments are untouched: this adds a Razorpay path
 //   alongside them. A Razorpay pending registration never triggers the
 //   organizer-approval emails (see api/registrations.ts).
+
+// H2 (audit #4): the shared rate-limit module (api/_lib/rate-limit.ts)
+// plus the L3 origin check (api/_lib/origin-check.ts). See the
+// rate-limit header for the live _lib-import risk + the live-test
+// step after deploy.
+import { checkRateLimit, getClientIp } from "./_lib/rate-limit";
+import { originAllowed } from "./_lib/origin-check";
 
 export function getEnv(name: string): string {
   try {
@@ -105,6 +121,57 @@ export function readBody(req: any): Promise<any> {
   });
 }
 
+// RAW body reader (webhook signature verification, H6). The
+// X-Razorpay-Signature is an HMAC over the EXACT bytes Razorpay
+// sent — a parsed-and-reserialised body does not verify, so the
+// webhook path must never go through readBody() (audit #3 found
+// exactly that raw-body bug pattern elsewhere). In the Vercel
+// Node runtime req is a raw stream and this returns the exact
+// bytes; if a platform ever pre-parses req.body into an object,
+// the exact bytes are unrecoverable and we fall back to
+// JSON.stringify — verification then succeeds only when the
+// round trip preserves key order, and a mismatch fails closed
+// (401) rather than processing an unverified event.
+export function readRawBody(req: any): Promise<{ raw: string; parsed: any }> {
+  return new Promise((resolve) => {
+    const safeParse = (text: string): any => {
+      try { return text ? JSON.parse(text) : null; } catch { return null; }
+    };
+    try {
+      const b = (req as any).body;
+      if (typeof b === "string" && b.length > 0) {
+        resolve({ raw: b, parsed: safeParse(b) });
+        return;
+      }
+      if (b && typeof b === "object") {
+        resolve({ raw: JSON.stringify(b), parsed: b });
+        return;
+      }
+      let data = "";
+      const timer = setTimeout(() => resolve({ raw: data, parsed: safeParse(data) }), 3000);
+      req.on("data", (chunk: any) => { data += chunk; });
+      req.on("end", () => { clearTimeout(timer); resolve({ raw: data, parsed: safeParse(data) }); });
+      req.on("error", () => { clearTimeout(timer); resolve({ raw: data, parsed: safeParse(data) }); });
+    } catch {
+      resolve({ raw: "", parsed: null });
+    }
+  });
+}
+
+// Verify a Razorpay webhook signature: HMAC-SHA256(secret, rawBody)
+// hex, compared in constant time. Empty secret / body / signature
+// all fail closed — a webhook with no usable signature is never
+// processed.
+export async function verifyRazorpayWebhookSignature(secret: string, rawBody: string, signature: string): Promise<boolean> {
+  if (!secret || !rawBody || !signature) return false;
+  try {
+    const expected = await hmacSha256Hex(secret, rawBody);
+    return ctEqual(expected.toLowerCase(), signature.trim().toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 function esc(s: string): string {
   return String(s || "")
     .replace(/&/g, "&amp;")
@@ -128,6 +195,34 @@ function newTicketCode(): string {
     for (let i = 0; i < 6; i++) out += chars[Math.floor(Math.random() * chars.length)];
   }
   return `LOC-${out}-TK`;
+}
+
+// L8 (audit #4): retry on clash at payment-confirm time. The confirm
+// path loads one row only, so the clash check is a targeted PostgREST
+// lookup by ticket code (one row, same pattern as the idempotency
+// lookup in api/registrations.ts) — not a full-table scan. A lookup
+// failure never blocks a payment confirm (the code space is 32^6, so
+// an unchecked mint is still near-certainly unique); after 8 clashes
+// a time-based code is the last resort so a paid registration is
+// never lost.
+async function ticketCodeExists(code: string): Promise<boolean> {
+  try {
+    const { ok, body } = await fetchJson(
+      `${supabaseBase()}/rest/v1/registrations?select=id&data->>ticketCode=eq.${encodeURIComponent(code)}&limit=1`,
+      { headers: supabaseHeaders() },
+    );
+    return ok && Array.isArray(body) && body.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function newTicketCodeUnique(): Promise<string> {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const code = newTicketCode();
+    if (!(await ticketCodeExists(code))) return code;
+  }
+  return `LOC-${Date.now().toString(36).toUpperCase().slice(-6)}-TK`;
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -178,14 +273,6 @@ function parseCookies(req: any): Record<string, string> {
 // client-controlled (an attacker can spoof it and rotate it to dodge
 // per-IP limits); Vercel appends the real connecting IP last, so the
 // LAST entry is the trustworthy one. Single-entry headers are unaffected.
-function getClientIp(req: any): string {
-  const fwd = req.headers?.["x-forwarded-for"] || "";
-  if (typeof fwd === "string" && fwd.trim()) {
-    const parts = fwd.split(",").map((s: string) => s.trim()).filter(Boolean);
-    if (parts.length) return parts[parts.length - 1];
-  }
-  return req.headers?.["x-real-ip"] || "unknown";
-}
 
 function bytesToB64url(bytes: Uint8Array): string {
   let bin = "";
@@ -265,43 +352,94 @@ async function verifySession(req: any): Promise<{ email: string } | null> {
 // Supabase-backed rate limit (table rate_limits). If the table is
 // missing, allow rather than bricking payments — the limit takes
 // effect once the table exists (see SECURITY_FIX_SETUP.md).
-async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
-  try {
-    if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
-    const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
-    const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
-    if (!ok) {
-      if (status === 404 || status === 400) return { allowed: false, retryAfter: 0, tableMissing: true };
-      return { allowed: true, retryAfter: 0, tableMissing: false };
-    }
-    const now = Date.now();
-    const row = Array.isArray(body) && body.length > 0 ? body[0].data : null;
-    const windowStart = row && typeof row.windowStart === "number" ? row.windowStart : 0;
-    const count = row && typeof row.count === "number" ? row.count : 0;
-    if (windowStart && now - windowStart < windowMs && count >= limit) {
-      return { allowed: false, retryAfter: Math.ceil((windowStart + windowMs - now) / 1000), tableMissing: false };
-    }
-    const fresh = !windowStart || now - windowStart >= windowMs;
-    const next = { count: fresh ? 1 : count + 1, windowStart: fresh ? now : windowStart };
-    await fetchJson(`${supabaseBase()}/rest/v1/rate_limits`, {
-      method: "POST",
-      headers: { ...supabaseHeaders(), Prefer: "resolution=merge-duplicates,return=representation" },
-      body: JSON.stringify({ id: key, data: next }),
-    });
-    return { allowed: true, retryAfter: 0, tableMissing: false };
-  } catch {
-    return { allowed: true, retryAfter: 0, tableMissing: false };
-  }
+
+// H5 (audit #4): holdsSpot, one predicate, two spellings of the
+// same fact — mirrored in api/registrations.ts (rowHoldsSpot),
+// src/services/registrations-service.ts and EventDetailsPage.
+//   rowHoldsSpot(reg)  = reg.holdsSpot !== false
+//     true  -> the row already holds a seat (explicit true, or
+//              undefined = LEGACY rows created before the flag
+//              existed, which counted a seat at creation — see
+//              src/types/index.ts L149-153)
+//     false -> the row holds NO seat (new pending Razorpay rows)
+//   rowNeedsSpot(reg)  = reg.holdsSpot === false — the negation:
+//     only an explicit-false row needs a free seat on confirm, and
+//     only such a row takes a seat (+1) when it confirms.
+// The audit suggested changing these three checks to
+// `holdsSpot !== true`; that is WRONG and was not done, with the
+// exact lines as evidence: at create-order (below) `!== true`
+// would block a legacy holder from paying for a full event even
+// though their seat is already counted; at eventFull (below) it
+// would refund-and-cancel a legacy holder instead of issuing the
+// pass their seat entitles them to; at the confirm bump (below) it
+// would +1 a legacy row that already holds a seat, double-counting
+// it. The `=== false` form was already the correct negation — it is
+// now named so the equivalence is visible instead of looking like
+// a disagreement with registrations.ts (`!== false` there is the
+// holds-spot side of the same predicate).
+function rowHoldsSpot(reg: any): boolean {
+  return reg?.holdsSpot !== false;
+}
+function rowNeedsSpot(reg: any): boolean {
+  return reg?.holdsSpot === false;
 }
 
 // Full refund of a captured Razorpay payment. Used when a payment was
 // captured but no pass can be issued (event full, event cancelled or
 // ended): money must not sit captured with nothing to show for it.
-async function refundRazorpayPayment(paymentId: string): Promise<{ ok: boolean; refundId?: string }> {
+// H3 (audit #4): the CALLER writes refundStatus "processing" (+ the
+// full amount, see M17) to the row BEFORE calling this, and
+// finalises it after. This helper itself guards the retry side: on
+// every call it FIRST re-reads the payment from Razorpay and checks
+// amount_refunded, and only then POSTs — so a retry after a lost
+// response never double-refunds. It also sends
+// `Idempotency-Key: refund-<registrationId>` when the caller passes
+// registrationId. IDEMPOTENCY WARNING (verified 2026-11-06 against
+// Razorpay's public docs): Razorpay documents idempotency keys ONLY
+// for Payouts (`X-Payout-Idempotency`) and Route transfers
+// (`X-Transfer-Idempotency`); no public doc says the standard
+// Payments refund endpoint honours `Idempotency-Key`. The header is
+// sent best-effort and is NOT relied on — the pre-read above + the
+// processing claim are the real double-refund guards, and a live
+// Razorpay test is still owed to prove whether the header has any
+// effect on refunds. Razorpay itself also refuses a second FULL
+// refund with 400 ("already been fully refunded").
+async function refundRazorpayPayment(paymentId: string, registrationId?: string): Promise<{ ok: boolean; refundId?: string; alreadyRefunded?: boolean }> {
   try {
+    const auth = razorpayAuthHeader();
+    // Retry guard first: read the payment from Razorpay. If it is
+    // already fully refunded, recover the existing refund id
+    // (GET /payments/:id/refunds) and return success WITHOUT
+    // posting a second refund.
+    try {
+      const pay = await fetchJson(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, {
+        headers: { Authorization: auth },
+      });
+      if (pay.ok && pay.body) {
+        const already = Number(pay.body.amount_refunded || 0);
+        const target = Number(pay.body.amount || 0);
+        if (target > 0 && already >= target) {
+          let existingRefundId: string | undefined;
+          try {
+            const list = await fetchJson(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}/refunds?count=10`, {
+              headers: { Authorization: auth },
+            });
+            const items = Array.isArray(list.body?.items) ? list.body.items : [];
+            const match = items.find((r: any) => r && Number(r.amount || 0) >= target) || items[0];
+            if (match?.id) existingRefundId = match.id;
+          } catch { /* refund id stays unknown; the row still records initiated */ }
+          return { ok: true, refundId: existingRefundId, alreadyRefunded: true };
+        }
+      }
+      // A failed pre-read must not block the refund: Razorpay
+      // refuses a duplicate FULL refund itself (400), and the
+      // processing claim means only one attempt is in flight.
+    } catch { /* fall through to the POST below */ }
+    const headers: Record<string, string> = { Authorization: auth, "Content-Type": "application/json" };
+    if (registrationId) headers["Idempotency-Key"] = `refund-${registrationId}`;
     const res = await fetchJson(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}/refund`, {
       method: "POST",
-      headers: { Authorization: razorpayAuthHeader(), "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({}),
     });
     if (res.ok && res.body?.id) return { ok: true, refundId: res.body.id };
@@ -327,6 +465,18 @@ function razorpayAuthHeader(): string {
 async function loadRegistration(id: string): Promise<any | null> {
   const { ok, body } = await fetchJson(
     `${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(id)}&select=data`,
+    { headers: supabaseHeaders() },
+  );
+  if (!ok || !Array.isArray(body) || body.length === 0) return null;
+  return body[0].data || null;
+}
+
+// Webhook lookups: find a registration by a stored Razorpay id
+// (order id from payment.captured, payment id from refund events).
+// `field` is a fixed internal literal, never caller input.
+async function loadRegistrationByField(field: string, value: string): Promise<any | null> {
+  const { ok, body } = await fetchJson(
+    `${supabaseBase()}/rest/v1/registrations?data->>${field}=eq.${encodeURIComponent(value)}&select=data`,
     { headers: supabaseHeaders() },
   );
   if (!ok || !Array.isArray(body) || body.length === 0) return null;
@@ -364,33 +514,46 @@ async function saveRegistrationIfPending(reg: any): Promise<boolean> {
   return ok && Array.isArray(body) && body.length > 0;
 }
 
-async function bumpEventCount(eventId: string, delta: number): Promise<void> {
-  // Atomic path first: the adjust_event_count RPC (see
-  // SUPABASE_RPC_SETUP.md) increments only when a seat is actually
-  // free and never lets the count pass capacity, in one statement —
-  // the only real cure for last-seat races. Until that function is
-  // created in Supabase, fall back to a capped read-modify-write:
-  // the count can never exceed capacity or drop below zero, though a
-  // perfectly simultaneous pair of confirms can still oversell by one
-  // pass in that fallback mode.
+async function bumpEventCount(eventId: string, delta: number): Promise<boolean> {
+  // H4 (audit #4): the RPC's BODY is the verdict, not its HTTP
+  // status. adjust_event_count returns boolean: true only when the
+  // count actually moved (a +1 returns false when the event is full
+  // or missing; a -1 returns false only when the event is missing).
+  // The old code returned on `rpc.ok` alone, so an HTTP-200 `false`
+  // was silently treated as a successful bump and the event
+  // overbooked. On `rpc.ok` with body false we return false at once
+  // and do NOT fall through to the capped fallback — the RPC just
+  // told us the seat is not there. When the RPC call itself fails
+  // (rpc.ok false: the function has not been created yet in
+  // Supabase — 404 — or a transient error), we DO fall through to
+  // the capped read-modify-write, which is fail-safe: the count can
+  // never exceed capacity or drop below zero, so capacity is still
+  // enforced, just not atomically (see SUPABASE_RPC_SETUP.md).
+  // What remains racy even WITH the RPC: the check-then-insert in
+  // registrations POST and the eventFull pre-check in
+  // confirmCapturedPayment below — two parallel requests can both
+  // pass the read before either bumps. The RPC bump is the
+  // backstop: the loser gets false and its confirm is rolled back
+  // (see the bump gate at the end of confirmCapturedPayment).
   try {
     const rpc = await fetchJson(`${supabaseBase()}/rest/v1/rpc/adjust_event_count`, {
       method: "POST",
       headers: supabaseHeaders(),
       body: JSON.stringify({ p_event_id: eventId, p_delta: delta }),
     });
-    if (rpc.ok) return;
+    if (rpc.ok) return rpc.body === true;
   } catch { /* fall through to capped bump */ }
   const event = await loadEvent(eventId);
-  if (!event) return;
+  if (!event) return false;
   const capacity = Number(event.capacity || 0);
   const cap = capacity > 0 ? capacity : Number.MAX_SAFE_INTEGER;
   const next = Math.min(cap, Math.max(0, Number(event.registeredCount || 0) + delta));
-  if (next === Number(event.registeredCount || 0)) return;
-  await fetchJson(
+  if (next === Number(event.registeredCount || 0)) return delta < 0; // +1 at cap: refused; -1 at 0: nothing to release, fine
+  const patched = await fetchJson(
     `${supabaseBase()}/rest/v1/events?id=eq.${encodeURIComponent(eventId)}`,
     { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: { ...event, registeredCount: next } }) },
   );
+  return patched.ok;
 }
 
 // Best-effort confirmation email. Email must never fail a payment
@@ -492,7 +655,9 @@ async function handleCreateOrder(req: any, res: any): Promise<void> {
   }
   // Capacity is checked at registration time; re-check here so a
   // no-spot pending row cannot start a payment for a full event.
-  if (reg.holdsSpot === false && Number(event.registeredCount || 0) >= Number(event.capacity || 0)) {
+  // (H5: rowNeedsSpot — only an explicit-false row needs a seat;
+  // a legacy undefined row already holds one.)
+  if (rowNeedsSpot(reg) && Number(event.registeredCount || 0) >= Number(event.capacity || 0)) {
     sendJson(res, 409, { message: "This event is at full capacity" });
     return;
   }
@@ -692,27 +857,102 @@ async function handleVerifyPayment(req: any, res: any): Promise<void> {
     sendJson(res, 400, { message: "This payment was refunded and cannot issue a pass" });
     return;
   }
-  // Dead events and full events never issue passes. The money is
-  // refunded first when possible; only if the refund call itself fails
-  // does the row stay pending with a contact-the-organizer message, so
-  // the payment stays visible in the organizer's queue instead of
-  // vanishing with the money captured.
+  await confirmCapturedPayment(reg, captured, orderId, req, res);
+}
+
+// Shared confirm tail for verify-payment AND the webhook (H6): a
+// captured payment confirms through exactly one path, so a
+// browser that died mid-checkout and the Razorpay webhook can
+// never mint two different ticket codes for one pass. `captured`
+// must already be verified (signature path or server-side fetch)
+// as captured for the full order amount before this is called.
+// Sends the response itself.
+async function confirmCapturedPayment(reg: any, captured: any, orderId: string, req: any, res: any): Promise<void> {
+  const registrationId = reg.id;
+  const event = await loadEvent(reg.eventId);
+  if (!event) {
+    sendJson(res, 404, { message: "Event not found" });
+    return;
+  }
+  // Dead events and full events never issue passes. H3 (audit #4):
+  // the refund is no longer issued before the row is persisted.
+  // Order is now: re-read FIRST (a parallel verify may already
+  // have confirmed or refunded this row), then write the claim
+  // (refundStatus "processing" + the FULL amount, M17 — a dead/full
+  // payment is refunded in full, never at the 10% attendee-cancel
+  // rate) to the still-pending row, then call Razorpay, then
+  // finalise with "initiated" + refundId (or "failed" + the amount
+  // owed). A failed refund NEVER cancels the row here: it stays
+  // pending with refundStatus "failed" + refundAmountPaise, so the
+  // payment stays visible and verify can be retried (the refund
+  // helper re-reads amount_refunded first, so a retry never
+  // double-refunds). M17: the amounts are recorded on the failure
+  // path too, not only on success.
   const eventDead = (event.status && event.status !== "published") ||
     (event.endDate && !Number.isNaN(Date.parse(event.endDate)) && new Date(event.endDate).getTime() < Date.now());
-  const eventFull = reg.holdsSpot === false && Number(event.registeredCount || 0) >= Number(event.capacity || 0);
+  const eventFull = rowNeedsSpot(reg) && Number(event.registeredCount || 0) >= Number(event.capacity || 0);
   if (eventDead || eventFull) {
-    const rf = await refundRazorpayPayment(captured.id);
-    if (rf.ok) {
-      await saveRegistration({ ...reg, status: "cancelled", refundStatus: "initiated", refundId: rf.refundId, razorpayPaymentId: captured.id, razorpayOrderId: orderId, amountPaise: captured.amount, currency: "INR" });
+    const freshDead = await loadRegistration(registrationId);
+    if (freshDead && freshDead.status === "confirmed") {
+      if (freshDead.razorpayPaymentId === captured.id) {
+        sendJson(res, 200, { success: true, ticketCode: freshDead.ticketCode, alreadyConfirmed: true, registrationId: reg.id, paymentId: captured.id });
+        return;
+      }
+      // Confirmed with a DIFFERENT payment: this captured payment
+      // is orphaned — refund it, but leave the confirmed pass
+      // alone (it belongs to the other payment).
+      const rfOrphan = await refundRazorpayPayment(captured.id, reg.id);
+      sendJson(res, 409, { message: rfOrphan.ok ? "This registration is already confirmed with a different payment. Your payment has been refunded." : "This registration is already confirmed with a different payment. Your payment was captured — please contact the organizer for a refund." });
+      return;
+    }
+    if (freshDead && freshDead.status !== "pending") {
+      // Already cancelled (or otherwise processed): refund only if
+      // no refund is recorded yet, and never overwrite its state.
+      if (freshDead.refundId) {
+        sendJson(res, 409, { message: eventDead ? "This event is no longer open. Your payment has been refunded." : "This event is now at full capacity. Your payment has been refunded." });
+        return;
+      }
+    }
+    const baseDead = freshDead || reg;
+    if (baseDead.refundId) {
       sendJson(res, 409, { message: eventDead ? "This event is no longer open. Your payment has been refunded." : "This event is now at full capacity. Your payment has been refunded." });
       return;
     }
+    if (baseDead.refundStatus === "processing") {
+      sendJson(res, 409, { message: "A refund for this payment is already in progress." });
+      return;
+    }
+    // M17: full refund of the captured amount, fee 0.
+    const refundAmountPaise = Number(captured.amount) || 0;
+    await saveRegistration({ ...baseDead, refundStatus: "processing", refundAmountPaise, refundFeePaise: 0, razorpayPaymentId: captured.id, razorpayOrderId: orderId, amountPaise: captured.amount, currency: "INR" });
+    const rf = await refundRazorpayPayment(captured.id, reg.id);
+    if (rf.ok) {
+      // M16: re-read fresh before saving — a parallel verify may
+      // have confirmed this row (with a different payment) while
+      // the refund was in flight; saving the stale copy would
+      // clobber that confirmed pass with "cancelled". Only a
+      // still-pending row is overwritten; anything else keeps its
+      // current state (the refund for THIS payment already happened
+      // either way). The confirm path below already re-reads fresh
+      // — this was the one stale-copy save left.
+      const freshAfter = await loadRegistration(registrationId);
+      if (!freshAfter || freshAfter.status === "pending") {
+        await saveRegistration({ ...(freshAfter || baseDead), status: "cancelled", refundStatus: "initiated", refundId: rf.refundId, refundAmountPaise, refundFeePaise: 0, razorpayPaymentId: captured.id, razorpayOrderId: orderId, amountPaise: captured.amount, currency: "INR" });
+      }
+      sendJson(res, 409, { message: eventDead ? "This event is no longer open. Your payment has been refunded." : "This event is now at full capacity. Your payment has been refunded." });
+      return;
+    }
+    // Refund failed: record "failed" + the amount owed on the
+    // still-pending row (M17) and leave the row pending — the
+    // payment stays visible for the organizer and verify can retry.
+    await saveRegistration({ ...baseDead, refundStatus: "failed", refundAmountPaise, refundFeePaise: 0, razorpayPaymentId: captured.id, razorpayOrderId: orderId, amountPaise: captured.amount, currency: "INR" });
     sendJson(res, 409, { message: "This event cannot issue a pass right now. Your payment was captured — please contact the organizer for a refund." });
     return;
   }
   // Re-read + compare-and-swap: only a still-pending row may confirm,
-  // so two parallel verifies cannot mint two ticket codes for one pass.
-  const fresh = await loadRegistration(registrationId);
+  // so two parallel verifies (or verify + webhook racing) cannot mint
+  // two ticket codes for one pass.
+  const fresh = await loadRegistration(reg.id);
   if (!fresh) {
     sendJson(res, 404, { message: "Registration not found" });
     return;
@@ -732,7 +972,7 @@ async function handleVerifyPayment(req: any, res: any): Promise<void> {
   const confirmed: any = {
     ...fresh,
     status: "confirmed",
-    ticketCode: fresh.ticketCode || newTicketCode(),
+    ticketCode: fresh.ticketCode || (await newTicketCodeUnique()),
     paymentMethod: "razorpay",
     razorpayPaymentId: captured.id,
     razorpayOrderId: orderId,
@@ -742,9 +982,10 @@ async function handleVerifyPayment(req: any, res: any): Promise<void> {
   };
   let saved = await saveRegistrationIfPending(confirmed);
   if (!saved) {
-    // Either lost a race (the parallel verify confirmed first) or the
-    // CAS filter is unsupported here: re-read to tell which.
-    const again = await loadRegistration(registrationId);
+    // Either lost a race (the parallel verify/webhook confirmed
+    // first) or the CAS filter is unsupported here: re-read to tell
+    // which.
+    const again = await loadRegistration(reg.id);
     if (again && again.status === "confirmed" && again.razorpayPaymentId === captured.id) {
       sendJson(res, 200, { success: true, ticketCode: again.ticketCode, alreadyConfirmed: true, registrationId: reg.id, paymentId: captured.id });
       return;
@@ -757,11 +998,160 @@ async function handleVerifyPayment(req: any, res: any): Promise<void> {
       return;
     }
   }
-  try {
-    if (fresh.holdsSpot === false) await bumpEventCount(reg.eventId, 1);
-  } catch { /* count bump failure must not undo a paid confirmation */ }
+  // H4: gate the confirm on the RPC result. The eventFull
+  // pre-check above read a count that a parallel confirm may have
+  // changed since, so only the bump is authoritative. If it
+  // refuses (last seat just taken), roll the confirm back: refund
+  // the captured payment (claim-first, via the same H3 path as the
+  // dead/full branch — processing + full amount written before the
+  // Razorpay call) and cancel the row. If the refund itself fails,
+  // the confirmed pass STANDS and the failure is recorded on it
+  // (refundStatus "failed" + amount): taking the money AND the
+  // pass would be worse than overbooking by one seat, and the
+  // organizer can refund from the dashboard.
+  if (rowNeedsSpot(fresh)) {
+    let bumped = false;
+    try { bumped = await bumpEventCount(reg.eventId, 1); } catch { bumped = false; }
+    if (!bumped) {
+      const refundAmountPaise = Number(captured.amount) || 0;
+      await saveRegistration({ ...confirmed, refundStatus: "processing", refundAmountPaise, refundFeePaise: 0 });
+      const rf = await refundRazorpayPayment(captured.id, reg.id);
+      if (rf.ok) {
+        await saveRegistration({ ...confirmed, status: "cancelled", refundStatus: "initiated", refundId: rf.refundId, refundAmountPaise, refundFeePaise: 0 });
+        sendJson(res, 409, { message: "This event is now at full capacity. Your payment has been refunded." });
+        return;
+      }
+      await saveRegistration({ ...confirmed, refundStatus: "failed", refundAmountPaise, refundFeePaise: 0 });
+      sendJson(res, 200, { success: true, ticketCode: confirmed.ticketCode, registrationId: reg.id, paymentId: captured.id, refundFailed: true });
+      return;
+    }
+  }
   try { await sendConfirmationEmail(confirmed, event, req); } catch { /* best-effort */ }
   sendJson(res, 200, { success: true, ticketCode: confirmed.ticketCode, registrationId: reg.id, paymentId: captured.id });
+}
+
+// Razorpay webhook (audit #4 H6). No session — Razorpay calls this,
+// so the signature IS the authentication. Fail closed at every step:
+// no RAZORPAY_WEBHOOK_SECRET, no signature, or a bad signature all
+// refuse without touching any row. Unknown orders / non-pending
+// rows answer 200 {ignored} (not an error): Razorpay retries 5xx,
+// and retrying an event we will never act on would loop forever.
+// payment.captured re-verifies the payment against Razorpay itself
+// (status captured, same order, full order amount) and then confirms
+// through confirmCapturedPayment — the same CAS path verify-payment
+// uses, so a webhook racing the browser's verify cannot double-issue.
+// refund.created / refund.processed only mark refundStatus +
+// refundId on the row (they never change the ticket status — a
+// refund issued in the Razorpay dashboard does not cancel the pass
+// by itself; cancellation still goes through the app).
+// NOTE: "payment.refunded" is NOT a real Razorpay event — do not
+// add a handler for it. OWNER STEP (not done by code): register
+// https://locora-hyperlocal.vercel.app/api/payments?action=webhook
+// in the Razorpay dashboard with payment.captured, refund.created
+// and refund.processed, and set RAZORPAY_WEBHOOK_SECRET in Vercel.
+async function handleWebhook(req: any, res: any): Promise<void> {
+  const secret = getEnv("RAZORPAY_WEBHOOK_SECRET");
+  if (!secret) {
+    sendJson(res, 503, { message: "Webhook is not configured" });
+    return;
+  }
+  const signature = String(req.headers?.["x-razorpay-signature"] || req.headers?.["X-Razorpay-Signature"] || "");
+  const { raw, parsed } = await readRawBody(req);
+  if (!raw || !parsed || typeof parsed !== "object") {
+    sendJson(res, 400, { message: "Invalid webhook payload" });
+    return;
+  }
+  if (!(await verifyRazorpayWebhookSignature(secret, raw, signature))) {
+    sendJson(res, 401, { message: "Invalid webhook signature" });
+    return;
+  }
+  const eventName = String(parsed.event || "");
+  if (eventName === "payment.captured") {
+    const entity = parsed?.payload?.payment?.entity || {};
+    const paymentId = String(entity.id || "");
+    const orderId = String(entity.order_id || "");
+    if (!paymentId || !orderId) {
+      sendJson(res, 200, { received: true, ignored: "missing payment/order id" });
+      return;
+    }
+    const reg = await loadRegistrationByField("razorpayOrderId", orderId);
+    if (!reg) {
+      sendJson(res, 200, { received: true, ignored: "unknown order" });
+      return;
+    }
+    if (reg.status === "confirmed") {
+      if (reg.razorpayPaymentId === paymentId) {
+        sendJson(res, 200, { received: true, alreadyConfirmed: true, ticketCode: reg.ticketCode });
+        return;
+      }
+      sendJson(res, 200, { received: true, ignored: "already confirmed with a different payment" });
+      return;
+    }
+    if (reg.status !== "pending") {
+      sendJson(res, 200, { received: true, ignored: "registration not pending" });
+      return;
+    }
+    // Trust Razorpay's servers, not the webhook body: fetch the
+    // payment (and its order) and check captured status, order
+    // binding and amount before confirming anything.
+    const headers = { Authorization: razorpayAuthHeader() };
+    const payRes = await fetchJson(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, { headers });
+    if (!payRes.ok || !payRes.body) {
+      // 502 so Razorpay retries: this is a transient fetch failure,
+      // not a verdict on the payment.
+      sendJson(res, 502, { message: "Failed to verify payment with Razorpay" });
+      return;
+    }
+    const captured = payRes.body;
+    if (captured.status !== "captured" || captured.order_id !== orderId) {
+      sendJson(res, 200, { received: true, ignored: "payment not captured for this order" });
+      return;
+    }
+    const orderRes = await fetchJson(`https://api.razorpay.com/v1/orders/${encodeURIComponent(orderId)}`, { headers });
+    if (!orderRes.ok || !orderRes.body) {
+      sendJson(res, 502, { message: "Failed to verify payment order with Razorpay" });
+      return;
+    }
+    const orderAmount = Number(orderRes.body.amount);
+    if (!Number.isFinite(orderAmount) || orderAmount <= 0 || Number(captured.amount) !== orderAmount) {
+      sendJson(res, 200, { received: true, ignored: "payment amount does not match the order" });
+      return;
+    }
+    if (typeof reg.amountPaise === "number" && reg.amountPaise !== orderAmount) {
+      sendJson(res, 200, { received: true, ignored: "payment amount does not match the registration" });
+      return;
+    }
+    if (Number(captured.amount_refunded || 0) > 0) {
+      sendJson(res, 200, { received: true, ignored: "payment was refunded" });
+      return;
+    }
+    await confirmCapturedPayment(reg, captured, orderId, req, res);
+    return;
+  }
+  if (eventName === "refund.created" || eventName === "refund.processed") {
+    const entity = parsed?.payload?.refund?.entity || {};
+    const refundId = String(entity.id || "");
+    const paymentId = String(entity.payment_id || "");
+    if (!refundId || !paymentId) {
+      sendJson(res, 200, { received: true, ignored: "missing refund/payment id" });
+      return;
+    }
+    const reg = await loadRegistrationByField("razorpayPaymentId", paymentId);
+    if (!reg) {
+      sendJson(res, 200, { received: true, ignored: "unknown payment" });
+      return;
+    }
+    // Idempotent: re-deliveries overwrite the same fields.
+    const next = {
+      ...reg,
+      refundStatus: eventName === "refund.processed" ? "processed" : "initiated",
+      refundId,
+    };
+    await saveRegistration(next);
+    sendJson(res, 200, { received: true, refundStatus: next.refundStatus, refundId });
+    return;
+  }
+  sendJson(res, 200, { received: true, ignored: "unhandled event" });
 }
 
 export default async function handler(req: any, res: any): Promise<void> {
@@ -791,12 +1181,26 @@ export default async function handler(req: any, res: any): Promise<void> {
     }
     const url = new URL(req.url || "/api/payments", "http://localhost");
     const action = url.searchParams.get("action") || "";
+    // L3 (audit #4): mutations from another site are refused — see
+    // api/_lib/origin-check.ts. The Razorpay webhook is EXEMPT: it
+    // carries no browser Origin and authenticates with the
+    // X-Razorpay-Signature HMAC instead (verified in handleWebhook).
+    if (action !== "webhook" && !originAllowed(req)) {
+      sendJson(res, 403, { message: "Request origin not allowed" });
+      return;
+    }
     if (action === "create-order") {
       await handleCreateOrder(req, res);
       return;
     }
     if (action === "verify-payment") {
       await handleVerifyPayment(req, res);
+      return;
+    }
+    // No session: Razorpay authenticates with X-Razorpay-Signature
+    // (verified inside handleWebhook); it has no locora_session.
+    if (action === "webhook") {
+      await handleWebhook(req, res);
       return;
     }
     sendJson(res, 400, { message: "Unknown payments action" });

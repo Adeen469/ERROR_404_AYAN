@@ -48,7 +48,11 @@ import {
   dayLabel,
   fmtChatTime,
   isNearBottom,
+  lastVisibleKey,
+  PENDING_DEDUPE_WINDOW_MS,
   reconcileFailedPending,
+  safeLinkUrl,
+  newTempId,
 } from '../../services/messages-service';
 import {
   subscribeToPrivateChannel,
@@ -67,7 +71,9 @@ function quoteText(m: EventMessage): string {
 
 // WhatsApp-style quote above a reply's text, rendered from the
 // frozen server snapshot (never by re-reading the original).
-function QuoteView({
+// Memoised (M14): pure given its props — without this, every poll
+// tick / typing pulse re-renders every quote in the list.
+const QuoteView = React.memo(function QuoteView({
   m,
   meEmail,
   onJump,
@@ -102,16 +108,24 @@ function QuoteView({
       <span className="block text-[11px] leading-snug opacity-80 line-clamp-2 break-words">{body}</span>
     </button>
   );
-}
+});
 
-function AttachmentView({ m }: { m: EventMessage }) {
+// Memoised (M14): pure given its props.
+// L9 (audit #4): attachment links go through safeLinkUrl — only
+// https: / blob: URLs become anchors or media sources; anything else
+// renders as plain text (name + size, no link).
+const AttachmentView = React.memo(function AttachmentView({ m }: { m: EventMessage }) {
   const a = m.attachment;
   if (!a) return null;
+  const url = safeLinkUrl(a.url);
   if (a.type.startsWith('image/')) {
+    if (!url) {
+      return <span className="block text-xs opacity-80">{a.name} · {formatFileSize(a.size)}</span>;
+    }
     return (
-      <a href={a.url} target="_blank" rel="noreferrer" className="block">
+      <a href={url} target="_blank" rel="noreferrer" className="block">
         <img
-          src={a.url}
+          src={url}
           alt={a.name}
           className="max-h-64 max-w-full rounded-lg object-contain bg-[#F4F1EA]"
         />
@@ -122,18 +136,30 @@ function AttachmentView({ m }: { m: EventMessage }) {
     );
   }
   if (a.type.startsWith('video/')) {
+    if (!url) {
+      return <span className="block text-xs opacity-80">{a.name} · {formatFileSize(a.size)}</span>;
+    }
     return (
       <span className="block">
-        <video src={a.url} controls preload="metadata" className="max-h-64 max-w-full rounded-lg bg-black" />
+        <video src={url} controls preload="metadata" className="max-h-64 max-w-full rounded-lg bg-black" />
         <span className="text-[11px] opacity-80">
           {a.name} · {formatFileSize(a.size)}
         </span>
       </span>
     );
   }
+  if (!url) {
+    return (
+      <span className="inline-flex items-center gap-2 bg-white/10 border border-white/20 rounded-lg px-3 py-2">
+        <FileText className="w-4 h-4 shrink-0" />
+        <span className="text-xs font-medium break-all">{a.name}</span>
+        <span className="text-[11px] opacity-80 whitespace-nowrap">{formatFileSize(a.size)}</span>
+      </span>
+    );
+  }
   return (
     <a
-      href={a.url}
+      href={url}
       target="_blank"
       rel="noreferrer"
       className="inline-flex items-center gap-2 bg-white/10 hover:bg-white/20 border border-white/20 rounded-lg px-3 py-2 transition-colors"
@@ -144,7 +170,7 @@ function AttachmentView({ m }: { m: EventMessage }) {
       <Download className="w-3.5 h-3.5 shrink-0" />
     </a>
   );
-}
+});
 
 type ChatMessage = EventMessage & {
   pending?: boolean;
@@ -163,7 +189,9 @@ type ChatMessage = EventMessage & {
 // NEVER an empty-src img or empty-href anchor (the old code ran
 // the normal AttachmentView on a pending bubble whose url was '').
 // Failed bubbles keep a Retry button, like the private inbox.
-function PendingAttachment({ m, onRetry }: { m: ChatMessage; onRetry: () => void }) {
+// Memoised (M14): pure given its props (uploadProgress changes
+// re-render only that bubble).
+const PendingAttachment = React.memo(function PendingAttachment({ m, onRetry }: { m: ChatMessage; onRetry: () => void }) {
   const progress = typeof m.uploadProgress === 'number' ? m.uploadProgress : undefined;
   return (
     <span className="block mt-1 space-y-1">
@@ -203,7 +231,7 @@ function PendingAttachment({ m, onRetry }: { m: ChatMessage; onRetry: () => void
       )}
     </span>
   );
-}
+});
 
 export function CommunityChat({
   eventId,
@@ -239,7 +267,16 @@ export function CommunityChat({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
   const [confirmDelete, setConfirmDelete] = useState<EventMessage | null>(null);
-  const [realtimeLive, setRealtimeLive] = useState(false);
+  // M13: SEPARATE liveness flags for the private (full-payload) and
+  // ping (content-free) channels. The old code shared one
+  // `realtimeLive` flag between the two subscriptions, so a live
+  // ping channel misreported a dead private channel as "live" (and
+  // vice versa) — the poll interval and any status derived from it
+  // were wrong for the channel that actually mattered. Polling
+  // slows to the 30s safety net when EITHER channel is live.
+  const [privateLive, setPrivateLive] = useState(false);
+  const [pingLive, setPingLive] = useState(false);
+  const realtimeLive = privateLive || pingLive;
   // Typing indicators (names only, ephemeral): several members may
   // type at once in a group chat, so this is a set, not one name.
   const [typingNames, setTypingNames] = useState<string[]>([]);
@@ -249,16 +286,49 @@ export function CommunityChat({
   // backwards. Polls fetch only rows newer than the newest loaded.
   const [hasMore, setHasMore] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // M14: user-initiated loads surface their failure instead of
+  // failing silently — the error line + Retry below replace the old
+  // "button stays for a retry" with no explanation.
+  const [loadOlderError, setLoadOlderError] = useState('');
+  const [jumpError, setJumpError] = useState('');
   // Scroll guard: auto-scroll only when already near the bottom;
   // otherwise a "New messages" pill appears instead of yanking the
   // reader away from older history.
   const listRef = useRef<HTMLDivElement | null>(null);
   const nearBottomRef = useRef(true);
+  const lastSeenKeyRef = useRef('');
   const [newCount, setNewCount] = useState(0);
   const messagesRef = useRef<EventMessage[]>([]);
   messagesRef.current = messages;
   const pendingRef = useRef<ChatMessage[]>([]);
   pendingRef.current = pending;
+  // L9 (audit #4): every image preview is a blob: URL from
+  // URL.createObjectURL (handleSend). Revoke it the moment its bubble
+  // leaves the pending list — on success, on reconcile, on unmount —
+  // or every sent image leaks a blob URL for the life of the page.
+  // Failed bubbles stay pending (Retry reuses the preview), so their
+  // URLs stay alive until the send finally lands.
+  const pendingPreviewsRef = useRef(new Map<string, string>());
+  useEffect(() => {
+    const seen = new Set<string>();
+    for (const p of pending) {
+      seen.add(p.id);
+      if (p.localPreview) pendingPreviewsRef.current.set(p.id, p.localPreview);
+    }
+    for (const [id, url] of pendingPreviewsRef.current) {
+      if (!seen.has(id)) {
+        URL.revokeObjectURL(url);
+        pendingPreviewsRef.current.delete(id);
+      }
+    }
+  }, [pending]);
+  useEffect(
+    () => () => {
+      for (const url of pendingPreviewsRef.current.values()) URL.revokeObjectURL(url);
+      pendingPreviewsRef.current.clear();
+    },
+    [],
+  );
   const pollCountRef = useRef(0);
   const pollInFlight = useRef(false);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -360,13 +430,30 @@ export function CommunityChat({
     // now fetches only new rows (pollNew), not the whole history.
     const intervalMs = realtimeLive ? 30000 : 3000;
     const timer = setInterval(() => {
+      // L9 (audit #4): skip ticks while the tab is hidden — a
+      // background tab was polling every 3s forever. The
+      // visibilitychange listener below resumes with an immediate
+      // poll the moment the tab is visible again.
+      if (document.hidden) return;
       if (pollInFlight.current) return;
       pollInFlight.current = true;
       pollNew().finally(() => {
         pollInFlight.current = false;
       });
     }, intervalMs);
-    return () => clearInterval(timer);
+    const onVisible = () => {
+      if (!document.hidden && !pollInFlight.current) {
+        pollInFlight.current = true;
+        pollNew().finally(() => {
+          pollInFlight.current = false;
+        });
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [load, pollNew, realtimeLive]);
 
   // Apply one full-payload Realtime event to the local list (no
@@ -452,7 +539,7 @@ export function CommunityChat({
             if (ev.eventId === eventId && ev.name) showTyping(ev.name);
           }
         },
-        (s) => setRealtimeLive(s === 'SUBSCRIBED'),
+        (s) => setPrivateLive(s === 'SUBSCRIBED'),
       );
     });
     return () => {
@@ -477,7 +564,7 @@ export function CommunityChat({
       () => {
         pollNew();
       },
-      (s) => setRealtimeLive(s === 'SUBSCRIBED'),
+      (s) => setPingLive(s === 'SUBSCRIBED'),
       (t) => {
         if (isGlobal && t.name) showTyping(t.name);
       },
@@ -485,15 +572,61 @@ export function CommunityChat({
     return unsubscribe;
   }, [eventId, status, isGlobal, pollNew]);
 
+  // Server messages plus in-flight ones, oldest first. A pending
+  // bubble is dropped once its server copy shows up (a poll or a
+  // Realtime event can beat the post's own response by a hair); the
+  // createdAt guard keeps a genuinely repeated message from
+  // collapsing into the first copy. The window is the shared
+  // PENDING_DEDUPE_WINDOW_MS (60s) — the same window
+  // reconcileFailedPending uses, so a slow send never shows both
+  // copies (M10). (Declared here, above the scroll effect, because
+  // the effect keys on the visible tail.)
+  const visible: ChatMessage[] = [
+    ...messages,
+    ...pending.filter(
+      (p) =>
+        !messages.some(
+          (s) =>
+            s.senderEmail === p.senderEmail &&
+            (s.text || '') === (p.text || '') &&
+            (s.attachment?.name || null) === (p.attachment?.name || null) &&
+            Date.parse(s.createdAt) >= Date.parse(p.createdAt) &&
+            Date.parse(s.createdAt) - Date.parse(p.createdAt) < PENDING_DEDUPE_WINDOW_MS,
+        ),
+    ),
+  ].sort(
+    (a, b) => (a.createdAt || '').localeCompare(b.createdAt || '') || (a.id || '').localeCompare(b.id || ''),
+  );
+
+  // M10: identity of the visible tail (see lastVisibleKey). The
+  // scroll effect below keys on this, not on list length alone.
+  const tailKey = lastVisibleKey(visible);
+
   // Auto-scroll only when already near the bottom; otherwise count
   // the arrivals for the "New messages" pill.
+  // M10: count ARRIVALS only. This used to fire on any length
+  // increase, so prepending 50 older rows (loadOlder) counted a
+  // "new message" while reading history. The tail key only changes
+  // when a row is appended at the end — a prepend, a same-tail
+  // reload, an edit or a tombstone leaves it unchanged.
   useEffect(() => {
+    if (tailKey === lastSeenKeyRef.current) return;
+    lastSeenKeyRef.current = tailKey;
     if (nearBottomRef.current) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     } else {
       setNewCount((c) => c + 1);
     }
-  }, [messages.length, pending.length]);
+  }, [visible.length, tailKey]);
+
+  // Switching rooms (event / global) lands at the bottom, pill
+  // cleared, tail tracker reset — the first page of the new room
+  // is not an arrival.
+  useEffect(() => {
+    lastSeenKeyRef.current = '';
+    nearBottomRef.current = true;
+    setNewCount(0);
+  }, [eventId]);
 
   function jumpToBottom() {
     nearBottomRef.current = true;
@@ -532,10 +665,12 @@ export function CommunityChat({
   }
 
   // "Load older messages": one more page (50) before the oldest
-  // loaded row, prepended.
+  // loaded row, prepended. A failure shows an error + Retry (M14)
+  // instead of failing silently.
   async function loadOlder() {
     if (loadingOlder || !hasMore || messages.length === 0) return;
     setLoadingOlder(true);
+    setLoadOlderError('');
     try {
       const oldest = messages.reduce(
         (min, m) => ((m.createdAt || '') < min ? (m.createdAt as string) : min),
@@ -553,7 +688,7 @@ export function CommunityChat({
       });
       setHasMore(page.hasMore);
     } catch {
-      // Loading older is best-effort; the button stays for a retry.
+      setLoadOlderError('Could not load older messages.');
     } finally {
       setLoadingOlder(false);
     }
@@ -570,9 +705,18 @@ export function CommunityChat({
     if (unread.length === 0) return;
     const ids = unread.map((m) => m.id);
     messagesService.markMessagesRead(ids).then(() => {
+      // M12 double-count guard: the increment applies ONLY to rows
+      // still unseen at apply time. A double effect run (StrictMode)
+      // or two overlapping polls used to add +1 twice for the same
+      // read; the second apply now sees seenByMe and leaves the
+      // count alone. The server guards the same way (skips emails
+      // already in readBy, dedupes the list) and the read broadcast
+      // carries the authoritative seenCount.
       setMessages((prev) =>
         prev.map((m) =>
-          ids.includes(m.id) ? { ...m, seenByMe: true, seenCount: (m.seenCount || 0) + 1 } : m,
+          ids.includes(m.id) && !m.seenByMe
+            ? { ...m, seenByMe: true, seenCount: (m.seenCount || 0) + 1 }
+            : m,
         ),
       );
     });
@@ -588,6 +732,10 @@ export function CommunityChat({
   }
 
   function jumpToQuoted(id: string) {
+    // M14: a jump that still misses after a reload says so instead
+    // of doing nothing — the quoted message may have been deleted
+    // or never loaded.
+    setJumpError('');
     const highlight = (el: HTMLDivElement | null | undefined) => {
       if (!el) return false;
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -597,11 +745,22 @@ export function CommunityChat({
       return true;
     };
     if (highlight(messageRefs.current.get(id))) return;
-    load(true).finally(() => {
-      window.setTimeout(() => {
-        highlight(messageRefs.current.get(id));
-      }, 300);
-    });
+    let loadFailed = false;
+    load(true)
+      .catch(() => {
+        loadFailed = true;
+      })
+      .finally(() => {
+        window.setTimeout(() => {
+          if (!highlight(messageRefs.current.get(id))) {
+            setJumpError(
+              loadFailed
+                ? 'Could not load the quoted message.'
+                : 'Could not find that message — it may have been deleted.',
+            );
+          }
+        }, 300);
+      });
   }
 
   function canEdit(m: EventMessage): boolean {
@@ -623,7 +782,7 @@ export function CommunityChat({
     const sendingFile = file;
     const replyingTo = replyTo;
     const temp: ChatMessage = {
-      id: `temp-${Date.now()}`,
+      id: newTempId(),
       type: 'community',
       eventId,
       eventTitle,
@@ -731,10 +890,14 @@ export function CommunityChat({
       }
       setPending((prev) => prev.filter((p) => p.id !== temp.id));
       setMessages((prev) => (prev.some((m) => m.id === created.id) ? prev : [...prev, created]));
-      // The server already fanned the full payload out to every
-      // member's private channel (global: ping + refetch) — no
-      // client broadcast is needed anymore.
-      await load(true);
+      // M11: no full reload here. The created row is already
+      // appended above, and a full reload would replace the whole
+      // list with the newest 50 — wiping older pages the user
+      // already loaded and risking a scroll jump. The server already fanned the
+      // full payload out to every member's private channel (global:
+      // ping + refetch), so no client broadcast is needed either.
+      // The full reload stays reserved for the ping fallback
+      // (pollNew's periodic reload) and quote jumps.
     } catch (err: any) {
       // A failed send STAYS visible with a Retry button — it used to
       // vanish silently, which is why attachments looked like they
@@ -813,7 +976,8 @@ export function CommunityChat({
       }
       setPending((prev) => prev.filter((p) => p.id !== temp.id));
       setMessages((prev) => (prev.some((m) => m.id === created.id) ? prev : [...prev, created]));
-      await load(true);
+      // M11: no full reload — the created row is already appended
+      // (see handleSend).
     } catch (err: any) {
       setPending((prev) =>
         prev.map((p) => (p.id === temp.id ? { ...p, pending: false, failed: true } : p)),
@@ -848,34 +1012,14 @@ export function CommunityChat({
           x.id === target.id ? { ...x, text: '', attachment: null, deletedForEveryone: true } : x,
         ),
       );
-      // The server broadcasts the tombstone live to every member.
-      await load(true);
+      // M11: no full reload — the tombstone above is already
+      // showing, and the server broadcasts it live to every member
+      // (pollNew covers Realtime-off). A reload here would replace
+      // the whole list and drop older loaded pages.
     } catch (err: any) {
       setSendError(err?.message || 'Could not delete message.');
     }
   }
-
-  // Server messages plus in-flight ones, oldest first. A pending
-  // bubble is dropped once its server copy shows up (a poll or a
-  // Realtime event can beat the post's own response by a hair); the
-  // createdAt guard keeps a genuinely repeated message from
-  // collapsing into the first copy.
-  const visible: ChatMessage[] = [
-    ...messages,
-    ...pending.filter(
-      (p) =>
-        !messages.some(
-          (s) =>
-            s.senderEmail === p.senderEmail &&
-            (s.text || '') === (p.text || '') &&
-            (s.attachment?.name || null) === (p.attachment?.name || null) &&
-            Date.parse(s.createdAt) >= Date.parse(p.createdAt) &&
-            Date.parse(s.createdAt) - Date.parse(p.createdAt) < 30000,
-        ),
-    ),
-  ].sort(
-    (a, b) => (a.createdAt || '').localeCompare(b.createdAt || '') || (a.id || '').localeCompare(b.id || ''),
-  );
 
   return (
     <div className="p-6 bg-white rounded-xl border border-[#E5E1D8] space-y-4">
@@ -934,6 +1078,7 @@ export function CommunityChat({
       {status === 'member' && (
         <>
           {loadError && <p className="text-xs text-rose-600">{loadError}</p>}
+          {jumpError && <p className="text-xs text-rose-600">{jumpError}</p>}
           <div
             ref={listRef}
             onScroll={onListScroll}
@@ -949,6 +1094,16 @@ export function CommunityChat({
                 >
                   {loadingOlder ? 'Loading…' : 'Load older messages'}
                 </button>
+              </div>
+            )}
+            {loadOlderError && (
+              <div className="flex justify-center pb-1">
+                <p className="text-[11px] text-rose-600">
+                  {loadOlderError}{' '}
+                  <button type="button" onClick={loadOlder} className="font-semibold underline">
+                    Retry
+                  </button>
+                </p>
               </div>
             )}
             {visible.length === 0 && (
@@ -1010,6 +1165,7 @@ export function CommunityChat({
                           onChange={(e) => setEditDraft(e.target.value)}
                           rows={2}
                           maxLength={2000}
+                          aria-label="Edit message"
                           className="w-full text-sm border border-[#D0E2D9] rounded-lg p-2 focus:outline-hidden focus:ring-1 focus:ring-[#1E3F35]"
                         />
                         <div className="flex gap-2">
@@ -1174,6 +1330,7 @@ export function CommunityChat({
                 rows={2}
                 maxLength={2000}
                 placeholder="Message the community…"
+                aria-label="Message the community"
                 className="flex-1 text-sm border border-[#D0E2D9] rounded-lg p-2.5 focus:outline-hidden focus:ring-1 focus:ring-[#1E3F35] resize-none"
               />
               <button

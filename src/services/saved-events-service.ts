@@ -1,5 +1,4 @@
 import { EventItem } from '../types';
-import { DEMO_EVENTS } from '../mocks/demo-data';
 import { eventsService } from './events-service';
 import { isDemoMode, apiClient } from './api-client';
 

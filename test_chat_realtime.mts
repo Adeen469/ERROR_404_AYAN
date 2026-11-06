@@ -276,8 +276,8 @@ check("ui: custom threshold respected",
 
 // --- 6. Pagination params (live) ---
 const { pageOptsFromQuery }: any = new Function(`${jsFn(messages, "pageOptsFromQuery")}; return { pageOptsFromQuery };`)();
-check("paging: no params → null (old behaviour kept)",
-  pageOptsFromQuery({}) === null);
+check("paging: no params → default limit 50 (H8: every GET is paginated now)",
+  pageOptsFromQuery({})?.limit === 50);
 check("paging: limit honoured",
   pageOptsFromQuery({ limit: "25" })?.limit === 25);
 check("paging: bad limit → default 50",
@@ -301,7 +301,7 @@ check("send: server broadcasts via Supabase Realtime REST",
 check("send: independent reads parallelised",
   (messages.match(/Promise\.all/g) || []).length >= 4);
 check("send: GET ?action=channel issues the private channel",
-  messages.includes('action === "channel"') && messages.includes("privateChannelName(me)"));
+  messages.includes('action === "channel"') && messages.includes("privateChannelName(me, session.sessionVersion"));
 check("send: GET pagination wired",
   messages.includes("pageOptsFromQuery") &&
   messages.includes("loadMessagesForPage") &&
@@ -330,7 +330,7 @@ check("client: community subscribes to the private channel (event rooms)",
 check("client: community keeps the ping subscribe for global",
   community.includes("subscribeToCommunity("));
 check("client: ping fallback still exists when Realtime is absent",
-  realtime.includes("client = url && anon ? createClient(url, anon) : null") &&
+  realtime.includes("if (!url || !anon) return null") &&
   page.includes("realtimeLive ? 30000 : 3000") &&
   community.includes("realtimeLive ? 30000 : 3000"));
 
@@ -369,13 +369,18 @@ check("client: full-payload handler exists in realtime-service",
 // --- 11. Instant-clear + stored-but-response-lost reconcile (2026-11-06) ---
 // The generic signature cannot be extracted verbatim (extractFn looks
 // for `function name(`), so de-genericise the copy first — the body
-// is pure and uses no other helper.
+// is pure and uses no other helper except the module-level
+// PENDING_DEDUPE_WINDOW_MS (M10: one shared dedupe window), whose
+// real definition is brought into the evaluated scope below so the
+// extracted function stays honest.
 const servicePlain = service.replace(
   /export function reconcileFailedPending<[\s\S]*?>\(/,
   "export function reconcileFailedPending(",
 );
+const windowDecl = servicePlain.match(/export const PENDING_DEDUPE_WINDOW_MS = [^;]+;/);
+if (!windowDecl) throw new Error("PENDING_DEDUPE_WINDOW_MS not found");
 const { reconcileFailedPending }: any = new Function(
-  `${jsFn(servicePlain, "reconcileFailedPending")}\nreturn { reconcileFailedPending };`,
+  `${windowDecl[0].replace("export ", "")}\n${jsFn(servicePlain, "reconcileFailedPending")}\nreturn { reconcileFailedPending };`,
 )();
 const ME = "me@example.com";
 const T0 = "2026-11-06T12:26:00.000Z";

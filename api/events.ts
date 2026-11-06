@@ -1,4 +1,4 @@
-// Shared server helpers for Locora security fix — NO IMPORTS, NO node:crypto.
+// Shared server helpers for Locora security fix — NO node:crypto; ONE import (H2 rate-limit, see below).
 // This file is inlined into each api/*.ts function because this project's
 // Vercel functions have historically been self-contained (no static imports:
 // the previous _lib import and the node:crypto import both failed live with
@@ -8,6 +8,12 @@
 // SESSION_SECRET, SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY come only from
 // Vercel env vars. If SESSION_SECRET is missing, session verification fails
 // closed (null) and login/signup/Google callback must refuse to issue a session.
+// H2 (audit #4): the ONLY static import in this file — the shared
+// rate-limit module (api/_lib/rate-limit.ts). See its header for the
+// live _lib-import risk + the live-test step after deploy.
+import { checkRateLimit, getClientIp } from "./_lib/rate-limit";
+import { originAllowed, isMutationMethod } from "./_lib/origin-check";
+
 export const ADMIN_EMAILS = ["mr.adeen946@gmail.com", "ayan.work937@gmail.com"];
 
 export function getEnv(name: string): string {
@@ -52,17 +58,6 @@ export function parseCookies(req: any): Record<string, string> {
   return out;
 }
 
-export function getClientIp(req: any): string {
-  // Last entry, not first: the first x-forwarded-for entry is
-  // client-controlled and trivially spoofed to dodge per-IP limits;
-  // Vercel appends the real connecting IP last.
-  const fwd = req.headers?.["x-forwarded-for"] || "";
-  if (typeof fwd === "string" && fwd.trim()) {
-    const parts = fwd.split(",").map((s: string) => s.trim()).filter(Boolean);
-    if (parts.length) return parts[parts.length - 1];
-  }
-  return req.headers?.["x-real-ip"] || "unknown";
-}
 
 function bytesToB64url(bytes: Uint8Array): string {
   let bin = "";
@@ -251,36 +246,6 @@ export function randomTokenHex(bytes = 32): string {
   return bytesToHex(randomBytes(bytes));
 }
 
-// ---- Rate limiting (Supabase-backed counter, table rate_limits) ----
-export async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
-  try {
-    if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
-    const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
-    const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
-    if (!ok) {
-      if (status === 404 || status === 400) return { allowed: false, retryAfter: 0, tableMissing: true };
-      return { allowed: true, retryAfter: 0, tableMissing: false };
-    }
-    const now = Date.now();
-    const row = Array.isArray(body) && body.length > 0 ? body[0].data : null;
-    const windowStart = row && typeof row.windowStart === "number" ? row.windowStart : 0;
-    const count = row && typeof row.count === "number" ? row.count : 0;
-    if (windowStart && now - windowStart < windowMs && count >= limit) {
-      return { allowed: false, retryAfter: Math.ceil((windowStart + windowMs - now) / 1000), tableMissing: false };
-    }
-    const fresh = !windowStart || now - windowStart >= windowMs;
-    const next = { count: fresh ? 1 : count + 1, windowStart: fresh ? now : windowStart };
-    const up = await fetchJson(`${supabaseBase()}/rest/v1/rate_limits`, {
-      method: "POST",
-      headers: { ...supabaseHeaders(), Prefer: "resolution=merge-duplicates,return=representation" },
-      body: JSON.stringify({ id: key, data: next }),
-    });
-    if (!up.ok && (up.status === 404 || up.status === 400)) return { allowed: false, retryAfter: 0, tableMissing: true };
-    return { allowed: true, retryAfter: 0, tableMissing: false };
-  } catch {
-    return { allowed: true, retryAfter: 0, tableMissing: false };
-  }
-}
 
 // ---- Events / organiser helpers ----
 export function organizerEmailOf(event: any): string {
@@ -309,7 +274,24 @@ async function mayManageEventActive(event: any, email: string): Promise<boolean>
 // Full refund of a captured Razorpay payment (used by DELETE for
 // confirmed paid passes). Mirrors api/payments.ts (import-free files
 // cannot share code).
-async function refundRazorpayPayment(paymentId: string): Promise<{ ok: boolean; refundId?: string }> {
+// H3 (audit #4): the CALLER writes refundStatus "processing" (+ the
+// full amount, M17) to the row BEFORE calling this, and finalises
+// it after. This helper itself guards the retry side: on every call
+// it FIRST re-reads the payment from Razorpay and checks
+// amount_refunded, and only then POSTs — so a retry after a lost
+// response never double-refunds. It also sends
+// `Idempotency-Key: refund-<registrationId>` when the caller passes
+// registrationId. IDEMPOTENCY WARNING (verified 2026-11-06 against
+// Razorpay's public docs): Razorpay documents idempotency keys ONLY
+// for Payouts (`X-Payout-Idempotency`) and Route transfers
+// (`X-Transfer-Idempotency`); no public doc says the standard
+// Payments refund endpoint honours `Idempotency-Key`. The header is
+// sent best-effort and is NOT relied on — the pre-read above + the
+// processing claim are the real double-refund guards, and a live
+// Razorpay test is still owed to prove whether the header has any
+// effect on refunds. Razorpay itself also refuses a second FULL
+// refund with 400 ("already been fully refunded").
+async function refundRazorpayPayment(paymentId: string, registrationId?: string): Promise<{ ok: boolean; refundId?: string; alreadyRefunded?: boolean }> {
   try {
     const keyId = getEnv("RAZORPAY_KEY_ID");
     const secret = getEnv("RAZORPAY_KEY_SECRET");
@@ -321,9 +303,39 @@ async function refundRazorpayPayment(paymentId: string): Promise<{ ok: boolean; 
       if (Buf) auth = `Basic ${Buf.from(raw, "utf-8").toString("base64")}`;
     }
     if (!auth) return { ok: false };
+    // Retry guard first: read the payment from Razorpay. If it is
+    // already fully refunded, recover the existing refund id
+    // (GET /payments/:id/refunds) and return success WITHOUT
+    // posting a second refund.
+    try {
+      const pay = await fetchJson(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, {
+        headers: { Authorization: auth },
+      });
+      if (pay.ok && pay.body) {
+        const already = Number(pay.body.amount_refunded || 0);
+        const target = Number(pay.body.amount || 0);
+        if (target > 0 && already >= target) {
+          let existingRefundId: string | undefined;
+          try {
+            const list = await fetchJson(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}/refunds?count=10`, {
+              headers: { Authorization: auth },
+            });
+            const items = Array.isArray(list.body?.items) ? list.body.items : [];
+            const match = items.find((r: any) => r && Number(r.amount || 0) >= target) || items[0];
+            if (match?.id) existingRefundId = match.id;
+          } catch { /* refund id stays unknown; the row still records initiated */ }
+          return { ok: true, refundId: existingRefundId, alreadyRefunded: true };
+        }
+      }
+      // A failed pre-read must not block the refund: Razorpay
+      // refuses a duplicate FULL refund itself (400), and the
+      // processing claim means only one attempt is in flight.
+    } catch { /* fall through to the POST below */ }
+    const headers: Record<string, string> = { Authorization: auth, "Content-Type": "application/json" };
+    if (registrationId) headers["Idempotency-Key"] = `refund-${registrationId}`;
     const res = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}/refund`, {
       method: "POST",
-      headers: { Authorization: auth, "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({}),
     });
     const body = await res.json().catch(() => null);
@@ -335,6 +347,14 @@ async function refundRazorpayPayment(paymentId: string): Promise<{ ok: boolean; 
 }
 
 const SITE_URL = "https://locora-hyperlocal.vercel.app";
+
+// L7 (audit #4): the maximum ticket price for an event, in rupees.
+// Prices were validated only as "zero or more", so a typo (or a
+// crafted body) could list a ₹10,00,00,000 ticket. ₹10,00,000 is far
+// above any real community-event ticket and still leaves headroom for
+// premium workshops; the same cap applies to create, edit, and the
+// per-choice extras (which already cap at ₹1,00,000 each).
+const MAX_EVENT_PRICE_RUPEES = 1000000;
 
 // Recommendation emails (new event created): every user whose saved
 // profile interests include this event's category gets one mail
@@ -476,6 +496,82 @@ export function esc(s: string): string {
   return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+// M8 (audit #4): allowlists for event POST/PATCH. Exported so they
+// are unit-testable (see test_auditfix_e.mts).
+export const EVENT_CATEGORIES = [
+  "Technology & Hackathons",
+  "Workshops & Learning",
+  "Live Music & Culture",
+  "Fitness & Outdoors",
+  "Food & Community",
+  "Art & Creative",
+  "Volunteering & Impact",
+];
+export const EVENT_STATUSES = ["published", "draft", "cancelled", "completed"];
+
+// Cover images are either bundled site assets (relative paths) or
+// https photos (Unsplash presets). Anything else — javascript:,
+// data: URIs, protocol-relative // URLs — is refused.
+function isSafeCoverImage(u: string): boolean {
+  if (!u) return true;
+  if (u.startsWith("/")) return !u.startsWith("//") && u.length <= 500;
+  try {
+    const parsed = new URL(u);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && u.length <= 500;
+  } catch {
+    return false;
+  }
+}
+
+// Validates the M8 fields when present (undefined = not supplied, so
+// POST defaults and PATCH no-change both pass). Returns an error
+// string, or null when the supplied values are all allowed.
+export function validateEventMeta(input: {
+  status?: unknown; category?: unknown; slug?: unknown; summary?: unknown; coverImage?: unknown;
+}): string | null {
+  if (input.status !== undefined && EVENT_STATUSES.indexOf(String(input.status)) === -1) {
+    return "Invalid event status";
+  }
+  if (input.category !== undefined && EVENT_CATEGORIES.indexOf(String(input.category)) === -1) {
+    return "Unknown event category";
+  }
+  if (typeof input.slug === "string" && input.slug !== "") {
+    if (input.slug.length > 100) return "Slug must be 100 characters or fewer";
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(input.slug)) {
+      return "Slug must be lowercase letters, numbers and hyphens only";
+    }
+  }
+  if (typeof input.summary === "string" && input.summary.length > 300) {
+    return "Summary must be 300 characters or fewer";
+  }
+  if (typeof input.coverImage === "string" && input.coverImage.trim() !== "" && !isSafeCoverImage(input.coverImage.trim())) {
+    return "Cover image must be an http(s) URL or a site-relative path";
+  }
+  return null;
+}
+
+// Organizer allowlist: only these fields are ever stored from a
+// caller-supplied organizer object — everything else (role flags,
+// ids, payment handles, arbitrary keys) is stripped. Name/email are
+// forced by the caller afterwards (profile name / session email);
+// eventsCount / totalAttendeesServed are display counters, kept
+// only as finite numbers >= 0.
+export function allowlistedOrganizer(input: any): any {
+  const o = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const str = (v: any, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+  const num = (v: any) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Math.floor(Number(v)) : 0);
+  return {
+    id: str(o.id, 80) || "org-community",
+    name: str(o.name, 80),
+    slug: str(o.slug, 100) || "community-organizer",
+    avatar: str(o.avatar, 500),
+    bio: str(o.bio, 500),
+    location: str(o.location, 200),
+    eventsCount: num(o.eventsCount),
+    totalAttendeesServed: num(o.totalAttendeesServed),
+  };
+}
+
 // Category registration options (Workshops & Learning, Live Music &
 // Culture): the organizer defines choices per group (f-1/f-2/f-3);
 // the attendee picks one per group at registration. The group keys
@@ -589,17 +685,44 @@ async function fetchEvent(id: string): Promise<any | null> {
   return rows.length > 0 ? rows[0].data : null;
 }
 
-async function fetchAllEvents(): Promise<any[]> {
-  const res = await fetch(
-    supabaseBase() + "/rest/v1/events?select=data&order=created_at.desc&limit=1000",
-    { headers: supabaseHeaders() },
-  );
-  const rows = await res.json().catch(() => null);
-  if (!res.ok || !Array.isArray(rows)) {
-    const detail = rows && rows.message ? rows.message : "Supabase query failed";
-    throw new Error(detail);
+async function fetchAllEvents(query?: any): Promise<any[]> {
+  // Sweep G (audit #4 final sweep): push the exact-match category
+  // filter server-side when Discover is filtered by one. The
+  // in-memory applyFilters below still runs unchanged, and its
+  // category test is the same exact === on the untrimmed value, so
+  // the result (rows, totals, order) is identical — the server just
+  // ships fewer rows. Only category is pushed: the free-text query,
+  // the case-insensitive location filters and the date/price filters
+  // cannot be expressed as exact PostgREST matches without changing
+  // semantics, so they stay in-memory; an unfiltered list still
+  // loads up to 1,000 rows (a full server-side search/pagination
+  // rewrite is the remaining step, not this sweep). The filter uses
+  // idx_events_category in db-indexes.sql. If the filtered fetch is
+  // ever rejected, fall back to the unfiltered read rather than
+  // failing Discover.
+  const cat = typeof query?.category === "string" ? query.category : "";
+  const catFilter =
+    cat && cat !== "All" && cat !== "All Categories"
+      ? `&data->>category=eq.${encodeURIComponent(cat)}`
+      : "";
+  const tryFetch = async (extra: string): Promise<{ rows: any[] | null; detail: string }> => {
+    const res = await fetch(
+      supabaseBase() + `/rest/v1/events?select=data&order=created_at.desc&limit=1000${extra}`,
+      { headers: supabaseHeaders() },
+    );
+    const rows = await res.json().catch(() => null);
+    if (!res.ok || !Array.isArray(rows)) {
+      return { rows: null, detail: rows && rows.message ? rows.message : "Supabase query failed" };
+    }
+    return { rows: rows.map((r: any) => r.data).filter(Boolean), detail: "" };
+  };
+  if (catFilter) {
+    const filtered = await tryFetch(catFilter);
+    if (filtered.rows !== null) return filtered.rows;
   }
-  return rows.map((r: any) => r.data).filter(Boolean);
+  const all = await tryFetch("");
+  if (all.rows === null) throw new Error(all.detail);
+  return all.rows;
 }
 
 function applyFilters(events: any[], query: any): any[] {
@@ -694,8 +817,14 @@ function applyFilters(events: any[], query: any): any[] {
 export default async function handler(req: any, res: any) {
   if (!getEnv("SUPABASE_URL") || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) {
     return sendJson(res, 503, {
-      message: "Shared events database is not configured on the server. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel (Production) and redeploy. See SHARED_EVENTS_SETUP.md.",
+      message: "Shared events database is not configured on the server.",
     });
+  }
+
+  // L3 (audit #4): mutations from another site are refused — see
+  // api/_lib/origin-check.ts. GETs are exempt (public reads).
+  if (isMutationMethod(req) && !originAllowed(req)) {
+    return sendJson(res, 403, { message: "Request origin not allowed" });
   }
 
   if (req.method === "GET") {
@@ -723,7 +852,7 @@ export default async function handler(req: any, res: any) {
       if (singleId && firstQuery(req.query, "payment") === "1") {
         return sendJson(res, 404, { message: "Manual payments are no longer supported" });
       }
-      const fetchPromise = singleId ? fetchEvent(singleId) : fetchAllEvents();
+      const fetchPromise = singleId ? fetchEvent(singleId) : fetchAllEvents(req.query);
       const [rl, viewer, fetched] = await Promise.all([rlPromise, viewerPromise, fetchPromise]);
       if (!rl.allowed && !rl.tableMissing) {
         return sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rl.retryAfter) });
@@ -819,6 +948,12 @@ export default async function handler(req: any, res: any) {
       if (description.length > 5000) return sendJson(res, 400, { message: "Description must be 5000 characters or fewer" });
       const venueName = typeof p.venueName === "string" ? p.venueName : "Community Hall";
       if (venueName.length > 200) return sendJson(res, 400, { message: "Venue name must be 200 characters or fewer" });
+      // M8: status/category/slug/summary/coverImage allowlists.
+      // (status is forced to "published" below, so it is validated
+      // as the constant here; category/slug/summary/coverImage come
+      // from the body.)
+      const metaError = validateEventMeta({ status: "published", category: p.category, slug: p.slug, summary: p.summary, coverImage: p.coverImage });
+      if (metaError) return sendJson(res, 400, { message: metaError });
       // Optional exact map link: must be an http(s) URL when given.
       const mapUrl = typeof p.mapUrl === "string" ? p.mapUrl.trim() : "";
       if (mapUrl) {
@@ -858,7 +993,7 @@ export default async function handler(req: any, res: any) {
         options = Object.keys(v.value || {}).length > 0 ? v.value : undefined;
       }
       const price = p.price === undefined || p.price === null || p.price === "" ? 0 : Number(p.price);
-      if (!Number.isFinite(price) || price < 0) return sendJson(res, 400, { message: "Price must be zero or more" });
+      if (!Number.isFinite(price) || price < 0 || price > MAX_EVENT_PRICE_RUPEES) return sendJson(res, 400, { message: "Price must be between 0 and ₹10,00,000" });
       const capacity = p.capacity === undefined || p.capacity === null || p.capacity === "" ? 50 : Number(p.capacity);
       if (!Number.isInteger(capacity) || capacity < 1 || capacity > 10000) return sendJson(res, 400, { message: "Capacity must be between 1 and 10000" });
       const startRaw = p.startDate || new Date(Date.now() + 86400000 * 7).toISOString();
@@ -881,10 +1016,10 @@ export default async function handler(req: any, res: any) {
         }
       } catch { /* profile lookup failure falls back to the body name */ }
       const event = {
-        id, title, slug: p.slug || slugify(title),
-        summary: p.summary || (description ? description.slice(0, 140) : "Local community gathering."),
+        id, title, slug: typeof p.slug === "string" && p.slug ? p.slug : slugify(title),
+        summary: typeof p.summary === "string" && p.summary ? p.summary : (description ? description.slice(0, 140) : "Local community gathering."),
         description, category: p.category || "Food & Community",
-        coverImage: p.coverImage || "", startDate: startRaw,
+        coverImage: typeof p.coverImage === "string" ? p.coverImage.trim() : "", startDate: startRaw,
         endDate: endRaw,
         venueName, address: typeof p.address === "string" ? p.address.slice(0, 300) : "100 Main Street",
         mapUrl: mapUrl || undefined,
@@ -896,7 +1031,9 @@ export default async function handler(req: any, res: any) {
         // No upiId on new events: the manual UPI flow is gone, so
         // there is nothing to collect one for. (Legacy rows keep
         // theirs stored, still stripped for non-owners above.)
-        requireAttendeeDetails: p.requireAttendeeDetails ?? true,
+        // M8: requireAttendeeDetails is a boolean flag, never a
+        // caller-supplied truthy value of another type.
+        requireAttendeeDetails: typeof p.requireAttendeeDetails === "boolean" ? p.requireAttendeeDetails : true,
         // Team participation (validated above; undefined for every
         // other category, so nothing is stored there).
         participation,
@@ -905,7 +1042,10 @@ export default async function handler(req: any, res: any) {
         options,
         capacity, registeredCount: 0, status: "published",
         organizer: {
-          ...(p.organizer || { id: "org-community", name: organizerName, slug: "community-organizer", avatar: "", bio: "Community organizer.", location: "Metro City", eventsCount: 0, totalAttendeesServed: 0 }),
+          // M8: organizer fields are allowlisted — a crafted body
+          // cannot smuggle extra keys (roles, payment handles) onto
+          // the stored organizer. Name/email are forced server-side.
+          ...allowlistedOrganizer(p.organizer),
           name: organizerName,
           email: session.email,
         },
@@ -983,6 +1123,15 @@ export default async function handler(req: any, res: any) {
           updates.mapUrl = m;
         }
       }
+      // M8: status/category/slug/summary/coverImage allowlists on
+      // edits too (only the supplied fields are checked).
+      const metaError = validateEventMeta(updates);
+      if (metaError) return sendJson(res, 400, { message: metaError });
+      if (typeof updates.coverImage === "string") updates.coverImage = updates.coverImage.trim();
+      // M8: requireAttendeeDetails is a boolean flag on edit too.
+      if (updates.requireAttendeeDetails !== undefined) {
+        updates.requireAttendeeDetails = updates.requireAttendeeDetails === true;
+      }
       // Team participation edit (same rules as POST): an object with
       // mode + min/max team size, or null to clear it. A non-object
       // value is refused; the merged-category check below strips the
@@ -1022,7 +1171,7 @@ export default async function handler(req: any, res: any) {
       }
       if (updates.price !== undefined) {
         const pr = Number(updates.price);
-        if (!Number.isFinite(pr) || pr < 0) return sendJson(res, 400, { message: "Price must be zero or more" });
+        if (!Number.isFinite(pr) || pr < 0 || pr > MAX_EVENT_PRICE_RUPEES) return sendJson(res, 400, { message: "Price must be between 0 and ₹10,00,000" });
       }
       if (updates.capacity !== undefined) {
         const cap = Number(updates.capacity);
@@ -1044,7 +1193,14 @@ export default async function handler(req: any, res: any) {
         const orgName = typeof safeUpdates.organizer.name === "string" && safeUpdates.organizer.name.trim()
           ? safeUpdates.organizer.name.trim().slice(0, 80)
           : (existing.organizer?.name || "Community Organizer");
-        safeUpdates.organizer = { ...safeUpdates.organizer, name: orgName, email: existing.organizer?.email || existing.createdByEmail };
+        // M8: organizer fields are allowlisted on edit too — the
+        // stored organizer keeps only the allowed keys, with the
+        // name from above and the email forced to the stored owner.
+        safeUpdates.organizer = {
+          ...allowlistedOrganizer(safeUpdates.organizer),
+          name: orgName,
+          email: existing.organizer?.email || existing.createdByEmail,
+        };
       }
       // isFeatured is admin-only (server-enforced): previously PATCH
       // stripped it always, so the Home featured section could never
@@ -1094,12 +1250,20 @@ export default async function handler(req: any, res: any) {
       // cancels all active registrations, refunds confirmed Razorpay
       // passes, and emails every affected attendee (all best-effort
       // except the event delete itself, which is last).
-      const regRes = await fetchJson(
-        `${supabaseBase()}/rest/v1/registrations?select=id,data&limit=1000`,
-        { headers: supabaseHeaders() },
-      );
-      const rows = regRes.ok && Array.isArray(regRes.body) ? regRes.body.map((r: any) => r.data).filter(Boolean) : [];
-      const affected = rows.filter((r: any) => r.eventId === singleId && (r.status === "pending" || r.status === "confirmed"));
+      // H8: load this event's registrations in pages with a
+      // targeted eventId filter — not one full-table read.
+      const rows: any[] = [];
+      for (let page = 0; page < 10; page++) {
+        const regRes = await fetchJson(
+          `${supabaseBase()}/rest/v1/registrations?select=id,data&data->>eventId=eq.${encodeURIComponent(singleId)}&limit=1000&offset=${page * 1000}`,
+          { headers: supabaseHeaders() },
+        );
+        if (!regRes.ok) break;
+        const pageRows = Array.isArray(regRes.body) ? regRes.body.map((r: any) => r.data).filter(Boolean) : [];
+        rows.push(...pageRows);
+        if (pageRows.length < 1000) break;
+      }
+      const affected = rows.filter((r: any) => r.status === "pending" || r.status === "confirmed");
       let cancelledCount = 0;
       let refundedCount = 0;
       const refundFailed: string[] = [];
@@ -1108,14 +1272,43 @@ export default async function handler(req: any, res: any) {
       for (const r of affected) {
         const next: any = { ...r, status: "cancelled", cancelledReason: "event_deleted" };
         if (r.status === "confirmed" && r.paymentMethod === "razorpay" && r.razorpayPaymentId && !r.refundId) {
-          const rf = await refundRazorpayPayment(r.razorpayPaymentId);
-          if (rf.ok) {
-            next.refundStatus = "initiated";
-            next.refundId = rf.refundId;
-            refundedCount++;
-          } else {
-            next.refundStatus = "failed";
+          // M17: an organizer-deleted event is refunded IN FULL
+          // (never the 10% attendee-cancel rate) — the amount is
+          // the stored snapshot, fee 0. H3: the claim is written
+          // FIRST (cancelled + refundStatus "processing" + the
+          // amounts, one PATCH) and only then is Razorpay called;
+          // the final PATCH below finalises it with "initiated" +
+          // refundId (or "failed" + the amount owed). A failed
+          // refund NEVER un-cancels the row — the event is deleted
+          // either way, and the failed record is what the organizer
+          // resolves in the Razorpay dashboard. A row already
+          // "processing" is left alone (another attempt is in
+          // flight); a zero-amount row has nothing to refund.
+          const refundAmountPaise = Number(r.amountPaise) || 0;
+          if (r.refundStatus === "processing") {
+            next.refundStatus = "processing";
+            next.refundAmountPaise = refundAmountPaise;
+            next.refundFeePaise = 0;
             refundFailed.push(r.razorpayPaymentId);
+          } else if (refundAmountPaise > 0) {
+            next.refundStatus = "processing";
+            next.refundAmountPaise = refundAmountPaise;
+            next.refundFeePaise = 0;
+            try {
+              await fetchJson(
+                `${supabaseBase()}/rest/v1/registrations?id=eq.${encodeURIComponent(r.id)}`,
+                { method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: next }) },
+              );
+            } catch { /* claim is best-effort ordering; the final PATCH below still records the outcome */ }
+            const rf = await refundRazorpayPayment(r.razorpayPaymentId, r.id);
+            if (rf.ok) {
+              next.refundStatus = "initiated";
+              if (rf.refundId) next.refundId = rf.refundId;
+              refundedCount++;
+            } else {
+              next.refundStatus = "failed";
+              refundFailed.push(r.razorpayPaymentId);
+            }
           }
         }
         const patched = await fetchJson(

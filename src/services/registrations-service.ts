@@ -3,7 +3,6 @@
 // locora_session JWT cookie only; those body/query fields are ignored
 // server-side. getMyRegistrations() calls /registrations with no params.
 import { AttendeeRegistration, EventItem } from '../types';
-import { DEMO_EVENTS } from '../mocks/demo-data';
 import { eventsService } from './events-service';
 import { authService } from './auth-service';
 import { apiClient, ApiError, isDemoMode } from './api-client';

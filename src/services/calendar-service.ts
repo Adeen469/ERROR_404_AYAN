@@ -14,8 +14,11 @@ export interface CalendarAddResult {
 }
 
 // Which Google Calendar event Locora created for each Locora event, kept
-// in this browser only. The server never needs this mapping: it inserts
-// by event id and deletes by the Google event id the browser hands back.
+// in this browser only as a convenience hint. The server is authoritative:
+// it records every id it creates (calendar_connections.created_event_ids)
+// and DELETE only ever removes a recorded id, so the hint is never
+// trusted on its own. No caller id is ever sent: the server identifies
+// the caller from the signed-in session alone (audit #4 C2).
 const MAPPING_KEY = 'locora_calendar_event_ids';
 
 function readMapping(): Record<string, string> {
@@ -28,9 +31,9 @@ function readMapping(): Record<string, string> {
 }
 
 export const calendarService = {
-  async getStatus(userId: string): Promise<CalendarStatus> {
+  async getStatus(): Promise<CalendarStatus> {
     try {
-      return await apiClient.get<CalendarStatus>('/calendar/status', { userId });
+      return await apiClient.get<CalendarStatus>('/calendar/status');
     } catch {
       return { connected: false, google_email: null };
     }
@@ -38,29 +41,28 @@ export const calendarService = {
 
   // Full-page redirect to Google's consent screen. After consent the
   // callback sends the user back to `returnTo` (same-site paths only).
-  connectCalendar(userId: string, returnTo = '/profile'): void {
-    const url =
-      `/api/auth/google-calendar?userId=${encodeURIComponent(userId)}` +
-      `&returnTo=${encodeURIComponent(returnTo)}`;
+  connectCalendar(returnTo = '/profile'): void {
+    const url = `/api/auth/google-calendar?returnTo=${encodeURIComponent(returnTo)}`;
     window.location.href = url;
   },
 
-  async disconnectCalendar(userId: string): Promise<boolean> {
+  async disconnectCalendar(): Promise<boolean> {
     try {
-      await apiClient.delete('/calendar/status', { userId });
+      await apiClient.delete('/calendar/status');
       return true;
     } catch {
       return false;
     }
   },
 
-  async addEventToCalendar(userId: string, eventId: string): Promise<CalendarAddResult> {
-    return apiClient.post<CalendarAddResult>('/calendar/events', { userId, eventId });
+  async addEventToCalendar(eventId: string): Promise<CalendarAddResult> {
+    return apiClient.post<CalendarAddResult>('/calendar/events', { eventId });
   },
 
-  async removeEventFromCalendar(userId: string, calendarEventId: string): Promise<boolean> {
+  async removeEventFromCalendar(eventId: string): Promise<boolean> {
     try {
-      await apiClient.delete('/calendar/events', { userId, calendarEventId });
+      const calendarEventId = readMapping()[eventId] || undefined;
+      await apiClient.delete('/calendar/events', { eventId, calendarEventId });
       return true;
     } catch {
       return false;

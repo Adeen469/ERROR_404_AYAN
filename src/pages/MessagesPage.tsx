@@ -25,7 +25,11 @@ import {
   dayLabel,
   fmtChatTime,
   isNearBottom,
+  lastVisibleKey,
+  PENDING_DEDUPE_WINDOW_MS,
   reconcileFailedPending,
+  safeLinkUrl,
+  newTempId,
 } from '../services/messages-service';
 import {
   subscribeToPrivateChannel,
@@ -84,14 +88,25 @@ interface PendingDelete {
   timer: number;
 }
 
-function AttachmentView({ m }: { m: EventMessage }) {
+// Memoised (audit #4 M14): pure given its props — without this,
+// every poll tick / typing pulse re-renders every attachment in
+// the list.
+// L9 (audit #4): attachment links go through safeLinkUrl — only
+// https: / blob: URLs become anchors or media sources. A tampered or
+// legacy row carrying a javascript: / data: URL renders as plain text
+// (name + size, no link) instead of a clickable anchor.
+const AttachmentView = React.memo(function AttachmentView({ m }: { m: EventMessage }) {
   const a = m.attachment;
   if (!a) return null;
+  const url = safeLinkUrl(a.url);
   if (a.type.startsWith('image/')) {
+    if (!url) {
+      return <span className="block text-xs opacity-80">{a.name} · {formatFileSize(a.size)}</span>;
+    }
     return (
-      <a href={a.url} target="_blank" rel="noreferrer" className="block">
+      <a href={url} target="_blank" rel="noreferrer" className="block">
         <img
-          src={a.url}
+          src={url}
           alt={a.name}
           className="max-h-64 max-w-full rounded-lg object-contain bg-[#F4F1EA]"
         />
@@ -100,16 +115,28 @@ function AttachmentView({ m }: { m: EventMessage }) {
     );
   }
   if (a.type.startsWith('video/')) {
+    if (!url) {
+      return <span className="block text-xs opacity-80">{a.name} · {formatFileSize(a.size)}</span>;
+    }
     return (
       <span className="block">
-        <video src={a.url} controls preload="metadata" className="max-h-64 max-w-full rounded-lg bg-black" />
+        <video src={url} controls preload="metadata" className="max-h-64 max-w-full rounded-lg bg-black" />
         <span className="text-[11px] opacity-80">{a.name} · {formatFileSize(a.size)}</span>
+      </span>
+    );
+  }
+  if (!url) {
+    return (
+      <span className="inline-flex items-center gap-2 bg-white/10 border border-white/20 rounded-lg px-3 py-2">
+        <FileText className="w-4 h-4 shrink-0" />
+        <span className="text-xs font-medium break-all">{a.name}</span>
+        <span className="text-[11px] opacity-80 whitespace-nowrap">{formatFileSize(a.size)}</span>
       </span>
     );
   }
   return (
     <a
-      href={a.url}
+      href={url}
       target="_blank"
       rel="noreferrer"
       className="inline-flex items-center gap-2 bg-white/10 hover:bg-white/20 border border-white/20 rounded-lg px-3 py-2 transition-colors"
@@ -120,7 +147,7 @@ function AttachmentView({ m }: { m: EventMessage }) {
       <Download className="w-3.5 h-3.5 shrink-0" />
     </a>
   );
-}
+});
 
 function quoteText(m: EventMessage): string {
   if (m.deletedForEveryone) return 'This message was deleted';
@@ -134,7 +161,8 @@ function quoteText(m: EventMessage): string {
 // original — so it still reads correctly after the original is edited.
 // Tapping it jumps to the original; a deleted / missing original
 // shows "This message was deleted" and does nothing on tap.
-function QuoteView({
+// Memoised (audit #4 M14): pure given its props.
+const QuoteView = React.memo(function QuoteView({
   m,
   meEmail,
   onJump,
@@ -169,7 +197,7 @@ function QuoteView({
       </span>
     </button>
   );
-}
+});
 
 export function MessagesPage() {
   const [searchParams] = useSearchParams();
@@ -225,16 +253,49 @@ export function MessagesPage() {
   // backwards. Polls fetch only rows newer than the newest loaded.
   const [hasMore, setHasMore] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // M14: user-initiated loads surface their failure instead of
+  // failing silently — the error line + Retry replace the old
+  // "button stays for a retry" with no explanation.
+  const [loadOlderError, setLoadOlderError] = useState('');
+  const [jumpError, setJumpError] = useState('');
   // Scroll guard: auto-scroll only when already near the bottom;
   // otherwise a "New messages" pill appears instead of yanking the
   // reader away from older history.
   const listRef = useRef<HTMLDivElement | null>(null);
   const nearBottomRef = useRef(true);
+  const lastSeenKeyRef = useRef('');
   const [newCount, setNewCount] = useState(0);
   const messagesRef = useRef<EventMessage[]>([]);
   messagesRef.current = messages;
   const pendingRef = useRef<ChatMessage[]>([]);
   pendingRef.current = pending;
+  // L9 (audit #4): every image preview is a blob: URL from
+  // URL.createObjectURL (handleSend). Revoke it the moment its bubble
+  // leaves the pending list — on success, on reconcile, on unmount —
+  // or every sent image leaks a blob URL for the life of the page.
+  // Failed bubbles stay pending (Retry reuses the preview), so their
+  // URLs stay alive until the send finally lands.
+  const pendingPreviewsRef = useRef(new Map<string, string>());
+  useEffect(() => {
+    const seen = new Set<string>();
+    for (const p of pending) {
+      seen.add(p.id);
+      if (p.localPreview) pendingPreviewsRef.current.set(p.id, p.localPreview);
+    }
+    for (const [id, url] of pendingPreviewsRef.current) {
+      if (!seen.has(id)) {
+        URL.revokeObjectURL(url);
+        pendingPreviewsRef.current.delete(id);
+      }
+    }
+  }, [pending]);
+  useEffect(
+    () => () => {
+      for (const url of pendingPreviewsRef.current.values()) URL.revokeObjectURL(url);
+      pendingPreviewsRef.current.clear();
+    },
+    [],
+  );
   const pollCountRef = useRef(0);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   // Bubble elements by message id, for quote jumps (jumpToQuoted).
@@ -341,13 +402,30 @@ export function MessagesPage() {
     // not the whole history.
     const intervalMs = realtimeLive ? 30000 : 3000;
     const timer = setInterval(() => {
+      // L9 (audit #4): skip ticks while the tab is hidden — a
+      // background tab was polling every 3s forever. The
+      // visibilitychange listener below resumes with an immediate
+      // poll the moment the tab is visible again.
+      if (document.hidden) return;
       if (pollInFlight.current) return;
       pollInFlight.current = true;
       pollNew().finally(() => {
         pollInFlight.current = false;
       });
     }, intervalMs);
-    return () => clearInterval(timer);
+    const onVisible = () => {
+      if (!document.hidden && !pollInFlight.current) {
+        pollInFlight.current = true;
+        pollNew().finally(() => {
+          pollInFlight.current = false;
+        });
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [loadMessages, pollNew, realtimeLive]);
 
   // Apply one full-payload Realtime event to the local list (no
@@ -440,7 +518,23 @@ export function MessagesPage() {
             setMessages((prev) => prev.map((m) => (m.id === ev.id ? { ...m, read: true } : m)));
           } else if (ev.type === 'typing') {
             if (!ev.threadKey) return;
-            setTyping({ name: ev.name, threadKey: ev.threadKey });
+            // H9: the server sends the HASHED thread key
+            // (threadKeyHash — payloads never carry emails), but the
+            // selected thread's key is the RAW `eventId|a|b` key.
+            // Comparing the two never matched, so typing never
+            // showed. Normalise here: resolve the hash to the raw
+            // key via a known message from that thread; if the
+            // thread has no loaded message yet, keep the hash and
+            // the render below compares against the hash too.
+            const known = messagesRef.current.find(
+              (m) => threadKeyHash(m.eventId, m.senderEmail, m.recipientEmail) === ev.threadKey,
+            );
+            setTyping({
+              name: ev.name,
+              threadKey: known
+                ? threadKey(known.eventId, known.senderEmail, known.recipientEmail)
+                : ev.threadKey,
+            });
             if (typingTimer.current !== null) window.clearTimeout(typingTimer.current);
             typingTimer.current = window.setTimeout(() => setTyping(null), 3000);
           }
@@ -542,7 +636,10 @@ export function MessagesPage() {
   // first. A pending bubble is dropped once its server copy shows up
   // (the 3s poll can beat the post's own response by a hair); the
   // createdAt guard keeps a genuinely repeated message ("Hi", "Hi")
-  // from collapsing into the first copy.
+  // from collapsing into the first copy. The window is the shared
+  // PENDING_DEDUPE_WINDOW_MS (60s) — the same window
+  // reconcileFailedPending uses, so a slow send never shows both
+  // copies (M10).
   const visibleMessages: ChatMessage[] = selected
     ? [
         ...selected.messages,
@@ -555,11 +652,15 @@ export function MessagesPage() {
                 (s.text || '') === (p.text || '') &&
                 (s.attachment?.name || null) === (p.attachment?.name || null) &&
                 Date.parse(s.createdAt) >= Date.parse(p.createdAt) &&
-                Date.parse(s.createdAt) - Date.parse(p.createdAt) < 30000,
+                Date.parse(s.createdAt) - Date.parse(p.createdAt) < PENDING_DEDUPE_WINDOW_MS,
             ),
         ),
       ].sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
     : [];
+
+  // M10: identity of the visible tail (see lastVisibleKey). The
+  // scroll effect below keys on this, not on list length alone.
+  const tailKey = lastVisibleKey(visibleMessages);
 
   // The undo toast shows the most recent pending delete.
   const toastDelete =
@@ -633,17 +734,26 @@ export function MessagesPage() {
   // Auto-scroll only when already near the bottom; otherwise count
   // the arrivals for the "New messages" pill instead of yanking the
   // reader away from older history.
+  // M10: count ARRIVALS only. This used to fire on any length
+  // increase, so prepending 50 older rows (loadOlder) counted a
+  // "new message" while reading history. The tail key only changes
+  // when a row is appended at the end — a prepend, a same-tail
+  // reload, an edit or a tombstone leaves it unchanged, so the
+  // effect returns early and counts nothing.
   useEffect(() => {
+    if (tailKey === lastSeenKeyRef.current) return;
+    lastSeenKeyRef.current = tailKey;
     if (nearBottomRef.current) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     } else {
       setNewCount((c) => c + 1);
     }
-  }, [visibleMessages.length]);
+  }, [visibleMessages.length, tailKey]);
 
   // Switching threads always lands at the bottom, pill cleared.
   useEffect(() => {
     nearBottomRef.current = true;
+    lastSeenKeyRef.current = '';
     setNewCount(0);
     bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
   }, [selectedKey]);
@@ -663,9 +773,12 @@ export function MessagesPage() {
   // "Load older messages": one more page (50) before the oldest
   // loaded row, prepended. The scroll position stays roughly where
   // it was (the list grows upwards, the reader keeps reading).
+  // A failure shows an error + Retry (M14) instead of failing
+  // silently.
   async function loadOlder() {
     if (loadingOlder || !hasMore || messages.length === 0) return;
     setLoadingOlder(true);
+    setLoadOlderError('');
     try {
       const oldest = messages.reduce(
         (min, m) => ((m.createdAt || '') < min ? (m.createdAt as string) : min),
@@ -683,7 +796,7 @@ export function MessagesPage() {
       });
       setHasMore(page.hasMore);
     } catch {
-      // Loading older is best-effort; the button stays for a retry.
+      setLoadOlderError('Could not load older messages.');
     } finally {
       setLoadingOlder(false);
     }
@@ -721,10 +834,11 @@ export function MessagesPage() {
   // Tap a quote to jump to the original message: scroll it into view
   // and highlight it for 2s. If it is not in the loaded list (e.g. a
   // poll has not picked it up yet), reload once and retry; if it is
-  // still missing (deleted, or not in this thread) do nothing — the
-  // quote itself already says "This message was deleted" when the
-  // server scrubbed its snapshot.
+  // still missing (deleted, or not in this thread) show an error
+  // (M14) instead of doing nothing — the quote itself already says
+  // "This message was deleted" when the server scrubbed its snapshot.
   function jumpToQuoted(id: string) {
+    setJumpError('');
     const highlight = (el: HTMLDivElement | null | undefined) => {
       if (!el) return false;
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -737,16 +851,26 @@ export function MessagesPage() {
     // The quote may be older than the loaded page: fetch the full
     // list once (rare path) and retry the jump.
     if (!currentUser?.email) return;
+    // L9 (audit #4): the full-list reload used to force hasMore=false,
+    // hiding "Load older messages" even when older pages still exist
+    // (getMessages caps at 10 pages / 500 messages). Preserve the
+    // previous value — a genuinely complete list clears it on the next
+    // "Load older" tap, which returns an empty page.
+    const hadMore = hasMore;
     messagesService
       .getMessages(currentUser.email)
       .then((list) => {
         setMessages(list);
-        setHasMore(false);
+        setHasMore(hadMore);
         window.setTimeout(() => {
-          highlight(messageRefs.current.get(id));
+          if (!highlight(messageRefs.current.get(id))) {
+            setJumpError('Could not find that message — it may have been deleted.');
+          }
         }, 300);
       })
-      .catch(() => {});
+      .catch(() => {
+        setJumpError('Could not load the quoted message.');
+      });
   }
 
   // Block state is per-session: the server does not expose blocks on
@@ -854,7 +978,7 @@ export function MessagesPage() {
     const sendingFile = file;
     const replyingTo = replyTo;
     const temp: ChatMessage = {
-      id: `temp-${Date.now()}`,
+      id: newTempId(),
       eventId: selected.eventId,
       eventTitle: selected.eventTitle,
       senderEmail: currentUser.email,
@@ -1278,6 +1402,19 @@ export function MessagesPage() {
                     </button>
                   </div>
                 )}
+                {loadOlderError && (
+                  <div className="flex justify-center pb-1">
+                    <p className="text-[11px] text-rose-600">
+                      {loadOlderError}{' '}
+                      <button type="button" onClick={loadOlder} className="font-semibold underline">
+                        Retry
+                      </button>
+                    </p>
+                  </div>
+                )}
+                {jumpError && (
+                  <p className="text-[11px] text-rose-600 text-center">{jumpError}</p>
+                )}
                 {visibleMessages.length === 0 ? (
                   <p className="text-xs text-[#5F635D] text-center pt-8">
                     No messages yet. Say hello — the organizer will get an email alert.
@@ -1309,6 +1446,21 @@ export function MessagesPage() {
                               : 'bg-[#F4F1EA] text-[#1E2320] rounded-bl-md'
                           }${highlightId === m.id ? ' ring-2 ring-[#C25E00]' : ''}`}
                           style={{ WebkitTouchCallout: 'none' } as React.CSSProperties}
+                          // L9 (audit #4): reply was pointer-only
+                          // (double-click / right-click / swipe). The
+                          // bubble is now keyboard-focusable: Enter
+                          // starts a reply, exactly like double-click.
+                          // The target guard keeps Enter inside the
+                          // edit textarea / quote button from replying.
+                          tabIndex={0}
+                          aria-label={`Message from ${mine ? 'you' : m.senderName || m.senderEmail}. Press Enter to reply.`}
+                          onKeyDown={(e) => {
+                            if (e.target !== e.currentTarget) return;
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              startReply(m);
+                            }
+                          }}
                           onContextMenu={(e) => {
                             e.preventDefault();
                             clearPress();
@@ -1325,6 +1477,7 @@ export function MessagesPage() {
                                 value={editDraft}
                                 onChange={(e) => setEditDraft(e.target.value)}
                                 rows={2}
+                                aria-label="Edit message"
                                 className="w-full text-xs bg-white border border-[#E2DFD8] rounded-lg p-2 text-[#1E2320] resize-none"
                               />
                               <div className="flex gap-2 justify-end">
@@ -1426,7 +1579,9 @@ export function MessagesPage() {
               </div>
 
               <div className="p-3 border-t border-[#EBE7DF] space-y-2">
-                {typing && typing.threadKey === selected.key && (
+                {typing &&
+                  (typing.threadKey === selected.key ||
+                    typing.threadKey === threadKeyHash(selected.eventId, meEmail, selected.otherEmail)) && (
                   <p className="text-[11px] text-[#5F635D] italic">{typing.name} is typing…</p>
                 )}
                 {/* Reply quote bar (WhatsApp-style): shows the message
@@ -1478,6 +1633,7 @@ export function MessagesPage() {
                     <input
                       type="file"
                       className="hidden"
+                      aria-label="Attach a file"
                       accept=".jpg,.jpeg,.png,.gif,.webp,.mp4,.webm,.mov,.pdf,.doc,.docx,.xls,.xlsx,.xlsm"
                       onChange={(e) => {
                         const picked = e.target.files?.[0] || null;
@@ -1509,6 +1665,7 @@ export function MessagesPage() {
                       }
                     }}
                     placeholder="Write a message…"
+                    aria-label="Write a message"
                     rows={1}
                     className="flex-1 min-w-0 text-xs bg-white border border-[#E2DFD8] rounded-lg p-2.5 text-[#1E2320] focus:border-[#1E3F35] resize-none"
                   />

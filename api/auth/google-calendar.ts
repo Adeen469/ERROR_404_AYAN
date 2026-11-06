@@ -1,5 +1,11 @@
 // GET /api/auth/google-calendar — starts the Google Calendar connect flow.
 //
+// SECURITY (audit #4 C2): the caller is identified ONLY by the signed-in
+// Locora session (locora_session cookie). Any client-supplied userId is
+// ignored: the storage key baked into `state` is the locora_users row id
+// for the session email. No session -> 401. The callback refuses a
+// state.userId that does not match the signed-in session's user (403).
+//
 // This reuses the SAME Google OAuth client and the SAME Authorized
 // redirect URI as sign-in (/api/auth/callback/google), so no new redirect
 // URI has to be registered in Google Cloud Console. The difference from
@@ -43,7 +49,123 @@ function randomToken(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export default function handler(req: any, res: any) {
+// ---- Session verification (same HMAC scheme as api/phone-otp.ts) ----
+// Self-contained on purpose: _lib imports have failed live with
+// FUNCTION_INVOCATION_FAILED, so this file verifies the session itself.
+function norm(email: string): string {
+  return (email || "").trim().toLowerCase();
+}
+
+function isEmail(s: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s || "");
+}
+
+function parseCookies(req: any): Record<string, string> {
+  const out: Record<string, string> = {};
+  const header = req.headers?.cookie || "";
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx > -1) out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
+  }
+  return out;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+function bytesToB64url(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+function b64urlToBytes(text: string): Uint8Array {
+  const b64 = text.replace(/-/g, "+").replace(/_/g, "/") + "==".slice(0, (4 - (text.length % 4)) % 4);
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function b64urlDecode(text: string): string {
+  return new TextDecoder().decode(b64urlToBytes(text));
+}
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await (globalThis as any).crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return bytesToHex(new Uint8Array(digest));
+}
+async function hmacB64url(secret: string, data: string): Promise<string> {
+  const key = await (globalThis as any).crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await (globalThis as any).crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
+  return bytesToB64url(new Uint8Array(sig));
+}
+function ctEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+function supabaseHeaders(): Record<string, string> {
+  const key = getEnv("SUPABASE_SERVICE_ROLE_KEY");
+  return { apikey: key, Authorization: "Bearer " + key, "Content-Type": "application/json" };
+}
+function supabaseBase(): string {
+  return getEnv("SUPABASE_URL").replace(/\/$/, "");
+}
+async function fetchJson(url: string, init?: any): Promise<{ ok: boolean; status: number; body: any }> {
+  const res = await fetch(url, init);
+  let body: any = null;
+  try { body = await res.json(); } catch { body = null; }
+  return { ok: res.ok, status: res.status, body };
+}
+
+async function loadUserByEmail(email: string): Promise<{ id: string; data: any } | null> {
+  const { ok, body } = await fetchJson(
+    `${supabaseBase()}/rest/v1/locora_users?select=id,data&data->>email=eq.${encodeURIComponent(norm(email))}`,
+    { headers: supabaseHeaders() },
+  );
+  if (!ok || !Array.isArray(body) || body.length === 0) return null;
+  return body[0];
+}
+
+async function verifySession(req: any): Promise<{ email: string } | null> {
+  try {
+    const secret = getEnv("SESSION_SECRET");
+    if (!secret) return null;
+    const token = parseCookies(req).locora_session;
+    if (!token) return null;
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const expected = await hmacB64url(secret, parts[0] + "." + parts[1]);
+    if (!ctEqual(expected, parts[2])) return null;
+    const payload = JSON.parse(b64urlDecode(parts[1]));
+    if (!payload.email || !isEmail(payload.email) || !payload.exp || payload.exp * 1000 < Date.now()) return null;
+    const email = norm(payload.email);
+    try {
+      const tokenHash = await sha256Hex(token);
+      const rev = await fetchJson(`${supabaseBase()}/rest/v1/revoked_tokens?id=eq.${encodeURIComponent(tokenHash)}&select=data`, { headers: supabaseHeaders() });
+      if (rev.ok && Array.isArray(rev.body) && rev.body.length > 0) {
+        const exp = rev.body[0].data?.expiresAt;
+        if (!exp || new Date(exp).getTime() > Date.now()) return null;
+      }
+    } catch {}
+    try {
+      const userRow = await loadUserByEmail(email);
+      if (userRow && userRow.data && typeof userRow.data.sessionVersion === "number") {
+        const stored = userRow.data.sessionVersion;
+        if (payload.v === undefined) {
+          if (stored > 0) return null;
+        } else if (payload.v !== stored) {
+          return null;
+        }
+      }
+    } catch {}
+    return { email };
+  } catch {
+    return null;
+  }
+}
+
+export default async function handler(req: any, res: any) {
   if (req.method !== "GET") {
     res.writeHead(405, { "Content-Type": "text/plain; charset=utf-8" });
     return res.end("Method not allowed");
@@ -58,15 +180,20 @@ export default function handler(req: any, res: any) {
     );
   }
 
-  // The Locora user id comes from the signed-in session in the browser
-  // (authService.getCurrentUser().id). It is only used as the storage key
-  // for that user's own calendar connection — never to impersonate
-  // anyone else, since Google still asks THAT Google account to consent.
-  const userId = typeof req.query?.userId === "string" ? req.query.userId : "";
-  if (!userId || userId.length > 128) {
-    res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
-    return res.end("Missing or invalid userId. Connect from your profile page while signed in.");
+  // C2: only a signed-in user may start the connect flow, and the user
+  // id baked into `state` comes from that session — never from the
+  // request. A client-supplied userId query param is ignored entirely.
+  const session = await verifySession(req);
+  if (!session) {
+    res.writeHead(401, { "Content-Type": "text/plain; charset=utf-8" });
+    return res.end("Sign in required. Please sign in, then connect Google Calendar from your profile page.");
   }
+  const userRow = await loadUserByEmail(session.email).catch(() => null);
+  if (!userRow || !userRow.id) {
+    res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+    return res.end("Your account could not be verified. Please sign out and sign in again, then try connecting from your profile page.");
+  }
+  const userId = userRow.id;
 
   // Only allow same-site return paths, never an external URL.
   const rawReturnTo =

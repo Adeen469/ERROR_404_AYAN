@@ -63,13 +63,21 @@ export function RegistrationsPage() {
       // initiated — state it, don't guess.
       const refundPaise = cancelled?.refundAmountPaise;
       const refundFailed = cancelled?.refundStatus === 'failed';
+      // L9 (audit #4): the toast states the refund AND the reason for
+      // its size, from the server row (fee > 0 means the 10% fee kept
+      // for cancelling more than 24h after purchase; fee 0 means a
+      // full refund for cancelling within 24h).
+      const refundFee = cancelled?.refundFeePaise || 0;
+      const refundReason = refundFee > 0
+        ? ' You cancelled more than 24 hours after purchase, so a 10% cancellation fee applies.'
+        : ' You cancelled within 24 hours of purchase, so the full amount is refunded.';
       toast({
         type: 'info',
         title: cancelTarget.status === 'pending' ? 'Payment Request Withdrawn' : 'RSVP Cancelled',
         description: refundPaise
           ? refundFailed
             ? `Your registration for "${liveEventOf(cancelTarget).title.slice(0, 30)}..." was cancelled. The refund of ${formatPaise(refundPaise)} could not be initiated automatically — please contact the organizer so they can refund it from the Razorpay dashboard.`
-            : `Your registration for "${liveEventOf(cancelTarget).title.slice(0, 30)}..." was cancelled. A refund of ${formatPaise(refundPaise)} has been initiated to your original payment method.`
+            : `Your registration for "${liveEventOf(cancelTarget).title.slice(0, 30)}..." was cancelled. A refund of ${formatPaise(refundPaise)} has been initiated to your original payment method.${refundReason}`
           : `Your registration for "${liveEventOf(cancelTarget).title.slice(0, 30)}..." was cancelled.`,
       });
     } catch {
@@ -82,16 +90,21 @@ export function RegistrationsPage() {
     }
   };
 
-  // Refund preview for the cancel dialog (client-side preview only —
-  // the server computes the real refund on cancel). Paid confirmed
-  // passes only; free/pending rows get no refund line.
+  // Refund preview for the cancel dialog (client-side ESTIMATED
+  // preview only — M14: labelled "estimated" because it is computed
+  // in the browser from the stored row and can drift from the
+  // server quote; the server computes the real refund on cancel.
+  // No server quote endpoint was built for this: there is no cheap
+  // existing endpoint that returns a quote, and a new endpoint
+  // would be a bigger change than the label for the same drift).
+  // Paid confirmed passes only; free/pending rows get no refund line.
   const cancelRefundQuote =
     cancelTarget && cancelTarget.status === 'confirmed' ? getRefundQuote(cancelTarget) : null;
   const cancelRefundMessage = !cancelRefundQuote
     ? `Are you sure you want to cancel your RSVP for "${cancelTarget ? liveEventOf(cancelTarget).title : ''}"? Your spot will be made available to other attendees immediately.`
     : cancelRefundQuote.isFull
-      ? `Are you sure you want to cancel your RSVP for "${cancelTarget ? liveEventOf(cancelTarget).title : ''}"? You will get a full refund of ${formatPaise(cancelRefundQuote.refundAmountPaise)}. Your ticket will be cancelled immediately.`
-      : `Are you sure you want to cancel your RSVP for "${cancelTarget ? liveEventOf(cancelTarget).title : ''}"? You will get ${formatPaise(cancelRefundQuote.refundAmountPaise)} back (90%). A 10% cancellation fee of ${formatPaise(cancelRefundQuote.refundFeePaise)} applies because it has been more than 24 hours since you bought the ticket. Your ticket will be cancelled immediately.`;
+      ? `Are you sure you want to cancel your RSVP for "${cancelTarget ? liveEventOf(cancelTarget).title : ''}"? You will get an estimated full refund of ${formatPaise(cancelRefundQuote.refundAmountPaise)}. Your ticket will be cancelled immediately.`
+      : `Are you sure you want to cancel your RSVP for "${cancelTarget ? liveEventOf(cancelTarget).title : ''}"? You will get an estimated ${formatPaise(cancelRefundQuote.refundAmountPaise)} back (90%). A 10% cancellation fee of ${formatPaise(cancelRefundQuote.refundFeePaise)} applies because it has been more than 24 hours since you bought the ticket. Your ticket will be cancelled immediately.`;
 
   // Upcoming = confirmed passes plus payments awaiting Razorpay completion.
   // Past = cancelled, rejected, and waitlisted records.

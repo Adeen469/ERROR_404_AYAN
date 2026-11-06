@@ -33,6 +33,12 @@
 // the same table the Telegram flow used; verified rows keep the same
 // { email, phone, status: "verified", verifiedAt } shape.
 
+// H2 (audit #4): the ONLY static import in this file — the shared
+// rate-limit module (api/_lib/rate-limit.ts). See its header for the
+// live _lib-import risk + the live-test step after deploy.
+import { checkRateLimit } from "./_lib/rate-limit";
+import { originAllowed } from "./_lib/origin-check";
+
 function getEnv(name: string): string {
   try {
     const v = (process as any)?.env?.[name];
@@ -171,6 +177,19 @@ function ctEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+// L6 (audit #4): the stored OTP hash was an unsalted SHA-256 of
+// `token:phone:otp` — a leaked phone_verifications row could be
+// brute-forced offline (6 digits). It is now an HMAC-SHA256 keyed by
+// SESSION_SECRET (the same server secret that signs sessions), so the
+// row alone is useless without the secret. NOTE: rows stored before
+// this change carry the old hash and fail verification — the user
+// just sends a fresh code (codes live 10 minutes anyway).
+async function otpHashFor(token: string, ten: string, otp: string): Promise<string> {
+  const secret = getEnv("SESSION_SECRET");
+  if (!secret) throw new Error("SESSION_SECRET is not configured");
+  return hmacB64url(secret, `otp:${token}:${ten}:${otp}`);
+}
+
 async function loadUserByEmail(email: string): Promise<{ id: string; data: any } | null> {
   const { ok, body } = await fetchJson(
     `${supabaseBase()}/rest/v1/locora_users?select=id,data&data->>email=eq.${encodeURIComponent(norm(email))}`,
@@ -218,34 +237,6 @@ async function verifySession(req: any): Promise<{ email: string } | null> {
   }
 }
 
-async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<{ allowed: boolean; retryAfter: number; tableMissing: boolean }> {
-  try {
-    if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
-    const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
-    const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
-    if (!ok) {
-      if (status === 404 || status === 400) return { allowed: false, retryAfter: 0, tableMissing: true };
-      return { allowed: true, retryAfter: 0, tableMissing: false };
-    }
-    const now = Date.now();
-    const row = Array.isArray(body) && body.length > 0 ? body[0].data : null;
-    const windowStart = row && typeof row.windowStart === "number" ? row.windowStart : 0;
-    const count = row && typeof row.count === "number" ? row.count : 0;
-    if (windowStart && now - windowStart < windowMs && count >= limit) {
-      return { allowed: false, retryAfter: Math.ceil((windowStart + windowMs - now) / 1000), tableMissing: false };
-    }
-    const fresh = !windowStart || now - windowStart >= windowMs;
-    const next = { count: fresh ? 1 : count + 1, windowStart: fresh ? now : windowStart };
-    await fetchJson(`${supabaseBase()}/rest/v1/rate_limits`, {
-      method: "POST",
-      headers: { ...supabaseHeaders(), Prefer: "resolution=merge-duplicates,return=representation", "Content-Type": "application/json" },
-      body: JSON.stringify({ id: key, data: next }),
-    });
-    return { allowed: true, retryAfter: 0, tableMissing: false };
-  } catch {
-    return { allowed: true, retryAfter: 0, tableMissing: false };
-  }
-}
 
 async function loadRows(): Promise<any[]> {
   const { ok, body } = await fetchJson(
@@ -255,6 +246,44 @@ async function loadRows(): Promise<any[]> {
   if (!ok) throw new Error("phone_verifications table read failed");
   if (!Array.isArray(body)) return [];
   return body.map((row: any) => ({ token: row.token, ...(row.data || {}) }));
+}
+
+// Sweep G (audit #4 final sweep): targeted lookups. send/verify/
+// status used to load the WHOLE phone_verifications table on every
+// call and find the row in memory. Rows are keyed by the token
+// column (verify/status — token is the table's primary key) or by
+// data->>email (send — covered by idx_phone_verifications_email in
+// db-indexes.sql). Either helper falls back to the full read if the
+// filtered query is ever rejected, and still throws when the table
+// itself is missing, so the callers' 503 paths are unchanged.
+async function loadRowByToken(token: string): Promise<any | null> {
+  try {
+    const { ok, body } = await fetchJson(
+      `${supabaseBase()}/rest/v1/${TABLE}?token=eq.${encodeURIComponent(token)}&select=token,data`,
+      { headers: supabaseHeaders() },
+    );
+    if (!ok) throw new Error("filtered phone_verifications read failed");
+    if (!Array.isArray(body) || body.length === 0) return null;
+    const row = body[0];
+    return { token: row.token, ...(row.data || {}) };
+  } catch {
+    const rows = await loadRows();
+    return rows.find((r) => r.token === token) || null;
+  }
+}
+
+async function loadRowsByEmail(email: string): Promise<any[]> {
+  try {
+    const { ok, body } = await fetchJson(
+      `${supabaseBase()}/rest/v1/${TABLE}?select=token,data&data->>email=eq.${encodeURIComponent(email)}`,
+      { headers: supabaseHeaders() },
+    );
+    if (!ok) throw new Error("filtered phone_verifications read failed");
+    if (!Array.isArray(body)) return [];
+    return body.map((row: any) => ({ token: row.token, ...(row.data || {}) }));
+  } catch {
+    return loadRows();
+  }
 }
 
 async function insertRow(token: string, data: any): Promise<void> {
@@ -357,10 +386,16 @@ export default async function handler(req: any, res: any): Promise<void> {
       sendJson(res, 405, { message: "Method not allowed" });
       return;
     }
+    // L3 (audit #4): mutations from another site are refused — see
+    // api/_lib/origin-check.ts.
+    if (!originAllowed(req)) {
+      sendJson(res, 403, { message: "Request origin not allowed" });
+      return;
+    }
     const body = await readBody(req);
 
     if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) {
-      sendJson(res, 503, { message: "Verification is not set up yet (Supabase env missing)" });
+      sendJson(res, 503, { message: "Verification is not set up yet" });
       return;
     }
 
@@ -386,25 +421,37 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       if (!getEnv("FAST2SMS_API_KEY")) {
-        sendJson(res, 503, { message: "SMS verification is not set up yet (Fast2SMS key missing — see FAST2SMS_OTP_SETUP.md)" });
+        // L5 (audit #4): no gateway internals in the user-facing message.
+        sendJson(res, 503, { message: "SMS verification is not set up yet" });
         return;
       }
+      // H2 (audit #4): fail CLOSED — OTP send is an auth mutation;
+      // without the rate_limits table there is no send cap, so refuse
+      // (503) rather than send unlimited SMS. GETs stay fail-open.
       const rlEmail = await checkRateLimit(`phoneotp:send:${session.email}`, 5, 60 * 60 * 1000);
-      if (!rlEmail.allowed && !rlEmail.tableMissing) {
+      if (rlEmail.tableMissing) {
+        sendJson(res, 503, { message: "SMS verification is temporarily unavailable. Please try again shortly." });
+        return;
+      }
+      if (!rlEmail.allowed) {
         sendJson(res, 429, { message: "Too many OTP requests. Try again later." });
         return;
       }
       const rlPhone = await checkRateLimit(`phoneotp:send:phone:${ten}`, 5, 60 * 60 * 1000);
-      if (!rlPhone.allowed && !rlPhone.tableMissing) {
+      if (rlPhone.tableMissing) {
+        sendJson(res, 503, { message: "SMS verification is temporarily unavailable. Please try again shortly." });
+        return;
+      }
+      if (!rlPhone.allowed) {
         sendJson(res, 429, { message: "Too many OTP requests for this number. Try again later." });
         return;
       }
       let rows: any[];
       try {
-        rows = await loadRows();
+        rows = await loadRowsByEmail(email);
       } catch {
         sendJson(res, 503, {
-          message: "Verification table is not set up yet (see FAST2SMS_OTP_SETUP.md)",
+          message: "Verification is temporarily unavailable. Please try again shortly.",
         });
         return;
       }
@@ -420,7 +467,7 @@ export default async function handler(req: any, res: any): Promise<void> {
       }
       const token = generateToken();
       const otp = generateOtp();
-      const otpHash = await sha256Hex(`${token}:${ten}:${otp}`);
+      const otpHash = await otpHashFor(token, ten, otp);
       try {
         await insertRow(token, {
           email,
@@ -432,7 +479,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         });
       } catch {
         sendJson(res, 503, {
-          message: "Verification table is not set up yet (see FAST2SMS_OTP_SETUP.md)",
+          message: "Verification is temporarily unavailable. Please try again shortly.",
         });
         return;
       }
@@ -443,8 +490,12 @@ export default async function handler(req: any, res: any): Promise<void> {
         try {
           await deleteRow(token);
         } catch {}
+        // Sweep G: the gateway error text used to be returned to the
+        // user ("Could not send the SMS: <gateway detail>") — it
+        // stays in server logs now.
+        try { console.warn("Fast2SMS send failed:", err instanceof Error ? err.message : err); } catch {}
         sendJson(res, 502, {
-          message: `Could not send the SMS: ${err instanceof Error ? err.message : "gateway error"}`,
+          message: "Could not send the SMS. Please try again shortly.",
         });
         return;
       }
@@ -464,16 +515,29 @@ export default async function handler(req: any, res: any): Promise<void> {
         sendJson(res, 400, { message: "Enter the 6-digit code" });
         return;
       }
-      let rows: any[];
+      // H2 (audit #4): NEW limit — verify previously had no
+      // rate-limit call at all (only the per-token 5-attempt cap
+      // below). 20/hour per email mirrors the confirm-style 20/hour
+      // used by reset:confirm / verify:confirm in api/auth.ts.
+      // Fail CLOSED (503) when the rate_limits table is missing.
+      const rlVerify = await checkRateLimit(`phoneotp:verify:${session.email}`, 20, 60 * 60 * 1000);
+      if (rlVerify.tableMissing) {
+        sendJson(res, 503, { message: "SMS verification is temporarily unavailable. Please try again shortly." });
+        return;
+      }
+      if (!rlVerify.allowed) {
+        sendJson(res, 429, { message: "Too many verification attempts. Try again later." });
+        return;
+      }
+      let row: any | null;
       try {
-        rows = await loadRows();
+        row = await loadRowByToken(token);
       } catch {
         sendJson(res, 503, {
-          message: "Verification table is not set up yet (see FAST2SMS_OTP_SETUP.md)",
+          message: "Verification is temporarily unavailable. Please try again shortly.",
         });
         return;
       }
-      const row = rows.find((r) => r.token === token) || null;
       if (!row) {
         sendJson(res, 400, { message: "This code request is no longer valid. Send a new OTP." });
         return;
@@ -505,7 +569,7 @@ export default async function handler(req: any, res: any): Promise<void> {
         return;
       }
       const ten = indianTenDigits(row.phone || "") || digits(row.phone || "");
-      const candidate = await sha256Hex(`${token}:${ten}:${otp}`);
+      const candidate = await otpHashFor(token, ten, otp);
       if (!row.otpHash || !ctEqual(candidate, row.otpHash)) {
         const nextAttempts = attempts + 1;
         const locked = nextAttempts >= MAX_OTP_ATTEMPTS;
@@ -536,23 +600,43 @@ export default async function handler(req: any, res: any): Promise<void> {
     }
 
     if (body.action === "status") {
+      // M17: status is not public — it needs a valid session, and the
+      // row's email must be the session email. A token belonging to
+      // another account is refused 403, same as send/verify.
+      const session = await verifySession(req);
+      if (!session) {
+        sendJson(res, 401, { message: "Sign in required" });
+        return;
+      }
+      // Sweep G: status is a POST that can flip an expired row, and
+      // it previously had no rate limit while send/verify did.
+      // Fail-open per session (the client calls it once on mount to
+      // resume an OTP); 60/10min matches msg:patch.
+      const rlStatus = await checkRateLimit(`phoneotp:status:${session.email}`, 60, 10 * 60 * 1000);
+      if (!rlStatus.allowed && !rlStatus.tableMissing) {
+        sendJson(res, 429, { message: "Too many requests. Try again shortly." }, { "Retry-After": String(rlStatus.retryAfter) });
+        return;
+      }
       const token = typeof body.token === "string" ? body.token.trim() : "";
       if (!token) {
         sendJson(res, 400, { message: "Token required" });
         return;
       }
-      let rows: any[];
+      let row: any | null;
       try {
-        rows = await loadRows();
+        row = await loadRowByToken(token);
       } catch {
         sendJson(res, 503, {
-          message: "Verification table is not set up yet (see FAST2SMS_OTP_SETUP.md)",
+          message: "Verification is temporarily unavailable. Please try again shortly.",
         });
         return;
       }
-      const row = rows.find((r) => r.token === token) || null;
       if (!row) {
         sendJson(res, 200, { status: "not_found" });
+        return;
+      }
+      if (norm(row.email || "") !== session.email) {
+        sendJson(res, 403, { message: "You can only check your own verification status" });
         return;
       }
       if (row.status === "verified") {

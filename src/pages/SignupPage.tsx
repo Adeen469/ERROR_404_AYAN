@@ -15,6 +15,11 @@ export function SignupPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  // H1: set once sign-up succeeds — the account exists but is
+  // unverified and has NO session, so the user must check email first.
+  const [pendingVerificationEmail, setPendingVerificationEmail] = useState('');
+  const [resendMessage, setResendMessage] = useState('');
+  const [resending, setResending] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -22,8 +27,10 @@ export function SignupPage() {
       setError('Please fill in all required fields.');
       return;
     }
-    if (password.length < 6) {
-      setError('Password must be at least 6 characters.');
+    // L6 (audit #4, user-authorised 2026-11-06): new sign-ups need at
+    // least 8 characters — mirrors the server rule in api/auth.ts.
+    if (password.length < 8) {
+      setError('Password must be at least 8 characters.');
       return;
     }
     setError('');
@@ -32,11 +39,22 @@ export function SignupPage() {
     try {
       // Every new account starts as an attendee. Organizer access is
       // requested from the profile page and granted by an admin.
-      const user = await authService.signup(name.trim(), email.trim(), password);
+      // H1: sign-up does NOT sign the user in — the account is
+      // unverified until the emailed link is clicked.
+      const result = await authService.signup(name.trim(), email.trim(), password);
+      if (result.needsVerification) {
+        setPendingVerificationEmail(email.trim());
+        toast({
+          type: 'success',
+          title: 'Account Created',
+          description: 'Check your email to verify your account.',
+        });
+        return;
+      }
       toast({
         type: 'success',
         title: 'Account Created',
-        description: `Welcome to Locora, ${user.name}!`,
+        description: `Welcome to Locora, ${result.user.name}!`,
       });
       navigate('/dashboard');
     } catch (err: unknown) {
@@ -45,6 +63,20 @@ export function SignupPage() {
       setLoading(false);
     }
   };
+
+  async function handleResend() {
+    if (!pendingVerificationEmail || resending) return;
+    setResending(true);
+    setResendMessage('');
+    try {
+      await authService.resendVerification(pendingVerificationEmail);
+      setResendMessage('If an account exists for that email, a new verification link has been sent. It expires in 24 hours.');
+    } catch {
+      setResendMessage('Could not resend the link right now. Try again in a few minutes.');
+    } finally {
+      setResending(false);
+    }
+  }
 
   return (
     <div className="max-w-md mx-auto px-4 py-12 sm:py-16 space-y-6">
@@ -58,6 +90,36 @@ export function SignupPage() {
         </p>
       </div>
 
+      {/* H1: sign-up succeeded but the account is unverified — no
+          session was issued, so show "check your email" instead of the
+          form. The link expires in 24 hours and can only be used once. */}
+      {pendingVerificationEmail ? (
+        <div className="bg-white p-6 sm:p-8 rounded-2xl border border-[#E5E1D8] shadow-xs space-y-4 text-center">
+          <h2 className="font-editorial text-xl font-bold text-[#1E2320]">Check your email</h2>
+          <p className="text-xs text-[#5F635D] leading-relaxed">
+            We sent a verification link to <span className="font-semibold text-[#1E2320]">{pendingVerificationEmail}</span>.
+            Click it within 24 hours to activate your account — check your spam folder if you don&apos;t see it.
+            You can sign in once your email is verified.
+          </p>
+          {resendMessage && (
+            <div className="p-3 bg-[#EAF1ED] border border-[#D0E2D9] rounded-xl text-xs text-[#1E3F35]">{resendMessage}</div>
+          )}
+          <button
+            type="button"
+            onClick={handleResend}
+            disabled={resending}
+            className="w-full py-2.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-60 cursor-pointer"
+          >
+            {resending ? 'Sending…' : 'Resend verification email'}
+          </button>
+          <p className="text-xs text-[#5F635D]">
+            Already verified?{' '}
+            <Link to="/login" className="text-[#1E3F35] font-semibold hover:underline">
+              Sign in
+            </Link>
+          </p>
+        </div>
+      ) : (
       <form
         onSubmit={handleSubmit}
         className="bg-white p-6 sm:p-8 rounded-2xl border border-[#E5E1D8] shadow-xs space-y-4"
@@ -112,7 +174,7 @@ export function SignupPage() {
               type={showPassword ? 'text' : 'password'}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="At least 6 characters"
+              placeholder="At least 8 characters"
               required
               className="w-full pl-9 pr-10 py-2.5 text-xs bg-white border border-[#E2DFD8] rounded-lg text-[#1E2320] focus:border-[#1E3F35]"
             />
@@ -172,6 +234,7 @@ export function SignupPage() {
           }}
         />
       </form>
+      )}
 
       <p className="text-center text-xs text-[#5F635D]">
         Already have an account?{' '}
