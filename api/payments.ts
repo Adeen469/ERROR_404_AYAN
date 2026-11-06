@@ -66,8 +66,154 @@
 // plus the L3 origin check (api/_lib/origin-check.ts). See the
 // rate-limit header for the live _lib-import risk + the live-test
 // step after deploy.
-import { checkRateLimit, getClientIp } from "./_lib/rate-limit";
-import { originAllowed } from "./_lib/origin-check";
+// INLINED from api/_lib/rate-limit.ts — deployed functions in this
+// project must NOT import from api/_lib: every function that did
+// failed live with FUNCTION_INVOCATION_FAILED while _lib-free
+// functions kept working (see that file's header for the history).
+// The canonical module stays in api/_lib as the reference; keep
+// this copy identical to it (the audit tests enforce the match).
+const { checkRateLimit, getClientIp } = (() => {
+  function getEnv(name: string): string {
+    try {
+      const env = (globalThis as any).process?.env;
+      return (env && env[name]) || "";
+    } catch {
+      return "";
+    }
+  }
+
+  function supabaseBase(): string {
+    return getEnv("SUPABASE_URL").replace(/\/$/, "");
+  }
+
+  function supabaseHeaders(): Record<string, string> {
+    const key = getEnv("SUPABASE_SERVICE_ROLE_KEY");
+    return { apikey: key, Authorization: `Bearer ${key}`, "Content-Type": "application/json", Prefer: "return=representation" };
+  }
+
+  async function fetchJson(url: string, init?: any): Promise<{ ok: boolean; status: number; body: any }> {
+    const res = await fetch(url, init);
+    let body: any = null;
+    try { body = await res.json(); } catch { body = null; }
+    return { ok: res.ok, status: res.status, body };
+  }
+
+  function getClientIp(req: any): string {
+    // Last entry, not first: the first x-forwarded-for entry is
+    // client-controlled and trivially spoofed to dodge per-IP limits;
+    // Vercel appends the real connecting IP last.
+    const fwd = req.headers?.["x-forwarded-for"] || "";
+    if (typeof fwd === "string" && fwd.trim()) {
+      const parts = fwd.split(",").map((s: string) => s.trim()).filter(Boolean);
+      if (parts.length) return parts[parts.length - 1];
+    }
+    return req.headers?.["x-real-ip"] || "unknown";
+  }
+
+  interface RateLimitResult { allowed: boolean; retryAfter: number; tableMissing: boolean; }
+
+  async function checkRateLimit(key: string, limit: number, windowMs: number): Promise<RateLimitResult> {
+    try {
+      if (!supabaseBase() || !getEnv("SUPABASE_SERVICE_ROLE_KEY")) return { allowed: false, retryAfter: 0, tableMissing: true };
+      // Atomic path first: rate_limit_hit RPC (rate-limit-rpc.sql).
+      // Any failure (function missing, table missing inside the
+      // function, transient error) falls through to the upsert path
+      // below, which is the authority on whether the table exists.
+      try {
+        const rpc = await fetchJson(`${supabaseBase()}/rest/v1/rpc/rate_limit_hit`, {
+          method: "POST",
+          headers: supabaseHeaders(),
+          body: JSON.stringify({ p_key: key, p_limit: limit, p_window_ms: windowMs }),
+        });
+        if (rpc.ok && rpc.body && typeof rpc.body === "object" && typeof rpc.body.allowed === "boolean") {
+          return {
+            allowed: rpc.body.allowed,
+            retryAfter: typeof rpc.body.retryAfter === "number" ? rpc.body.retryAfter : 0,
+            tableMissing: false,
+          };
+        }
+      } catch {
+        // Fall through to the upsert path.
+      }
+      // Fallback path (pre-H2 behaviour, unchanged): read-modify-write
+      // upsert. Correct except a perfectly simultaneous pair at the
+      // limit can both pass; the RPC above removes that race.
+      const url = `${supabaseBase()}/rest/v1/rate_limits?id=eq.${encodeURIComponent(key)}&select=data`;
+      const { ok, status, body } = await fetchJson(url, { headers: supabaseHeaders() });
+      if (!ok) {
+        if (status === 404 || status === 400) return { allowed: false, retryAfter: 0, tableMissing: true };
+        return { allowed: true, retryAfter: 0, tableMissing: false };
+      }
+      const now = Date.now();
+      const row = Array.isArray(body) && body.length > 0 ? body[0].data : null;
+      const windowStart = row && typeof row.windowStart === "number" ? row.windowStart : 0;
+      const count = row && typeof row.count === "number" ? row.count : 0;
+      if (windowStart && now - windowStart < windowMs && count >= limit) {
+        return { allowed: false, retryAfter: Math.ceil((windowStart + windowMs - now) / 1000), tableMissing: false };
+      }
+      const fresh = !windowStart || now - windowStart >= windowMs;
+      const next = { count: fresh ? 1 : count + 1, windowStart: fresh ? now : windowStart };
+      const up = await fetchJson(`${supabaseBase()}/rest/v1/rate_limits`, {
+        method: "POST",
+        headers: { ...supabaseHeaders(), Prefer: "resolution=merge-duplicates,return=representation" },
+        body: JSON.stringify({ id: key, data: next }),
+      });
+      if (!up.ok && (up.status === 404 || up.status === 400)) return { allowed: false, retryAfter: 0, tableMissing: true };
+      return { allowed: true, retryAfter: 0, tableMissing: false };
+    } catch {
+      return { allowed: true, retryAfter: 0, tableMissing: false };
+    }
+  }
+  return { checkRateLimit, getClientIp };
+})();
+
+// INLINED from api/_lib/origin-check.ts — same no-_lib-import rule
+// as the rate-limit block above; keep identical to the canonical
+// module (the audit tests enforce the match).
+const { originAllowed } = (() => {
+  const LOCORA_SITE_ORIGIN = "https://locora-hyperlocal.vercel.app";
+
+  function originOf(value: string | undefined | null): string | null {
+    if (!value) return null;
+    try {
+      return new URL(value).origin;
+    } catch {
+      return null;
+    }
+  }
+
+  function isTrustedOrigin(origin: string): boolean {
+    if (origin === LOCORA_SITE_ORIGIN) return true;
+    // Vercel preview deployments of this repo (e.g. locora-*.vercel.app).
+    if (/^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin)) return true;
+    // Local dev servers (Vite on :5173, `bun run` / server.ts on :3000, …).
+    if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) return true;
+    return false;
+  }
+
+  // True when the request is allowed to mutate: no Origin/Referer at
+  // all (non-browser caller), or the carried Origin — Referer when
+  // there is no Origin — is a trusted site origin.
+  function originAllowed(req: any): boolean {
+    const headers = req?.headers || {};
+    const origin = typeof headers.origin === "string" ? headers.origin : "";
+    const referer = typeof headers.referer === "string" ? headers.referer : "";
+    const carried = origin || referer;
+    if (!carried) return true;
+    // "null" is what sandboxed iframes / opaque origins send: never trusted.
+    if (carried === "null") return false;
+    const parsed = originOf(carried);
+    if (!parsed) return false;
+    return isTrustedOrigin(parsed);
+  }
+
+  // True for state-changing methods (the ones the check applies to).
+  function isMutationMethod(req: any): boolean {
+    const m = String(req?.method || "").toUpperCase();
+    return m === "POST" || m === "PATCH" || m === "PUT" || m === "DELETE";
+  }
+  return { originAllowed };
+})();
 
 export function getEnv(name: string): string {
   try {
@@ -78,12 +224,13 @@ export function getEnv(name: string): string {
   }
 }
 
-export function sendJson(res: any, status: number, obj: any): void {
+export function sendJson(res: any, status: number, obj: any, extraHeaders?: Record<string, string>): void {
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "strict-origin-when-cross-origin",
     "Cache-Control": "no-store",
+    ...(extraHeaders || {}),
   });
   res.end(JSON.stringify(obj));
 }
