@@ -138,13 +138,16 @@ export function ChatWidget() {
         <div
           role="dialog"
           aria-label="Chat with Loco"
-          className="fixed bottom-24 right-5 z-50 flex h-[560px] w-[380px] max-w-[calc(100vw-2.5rem)] flex-col overflow-hidden rounded-2xl border border-[#E7E3DB] bg-white shadow-2xl max-sm:inset-x-3 max-sm:bottom-3 max-sm:right-3 max-sm:h-[72vh] max-sm:w-auto"
+          className="fixed bottom-24 right-5 z-50 flex h-[620px] w-[420px] max-w-[calc(100vw-2.5rem)] flex-col overflow-hidden rounded-2xl border border-[#E7E3DB] bg-white shadow-2xl max-sm:inset-x-3 max-sm:bottom-3 max-sm:right-3 max-sm:h-[78vh] max-sm:w-auto"
         >
           {/* Header */}
           <div className="flex items-center gap-3 border-b border-[#E7E3DB] bg-[#FAF8F5] px-4 py-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#1E3F35] font-editorial text-lg text-white" aria-hidden="true">
-              L
-            </div>
+            <img
+              src="/locora-logo.png"
+              alt=""
+              aria-hidden="true"
+              className="h-10 w-10 shrink-0 rounded-full object-cover"
+            />
             <div className="min-w-0 flex-1">
               <p className="font-editorial text-base leading-tight text-[#1E2320]">Loco</p>
               <p className="flex items-center gap-1.5 text-xs text-[#5F635D]">

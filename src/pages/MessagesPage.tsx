@@ -1692,12 +1692,12 @@ export function MessagesPage() {
                       style={{ WebkitTouchCallout: 'none' } as React.CSSProperties}
                     >
                       {isAi ? (
-                        <span
-                          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#1E3F35] font-editorial text-base text-white"
+                        <img
+                          src="/locora-logo.png"
+                          alt=""
                           aria-hidden="true"
-                        >
-                          L
-                        </span>
+                          className="h-10 w-10 shrink-0 rounded-full object-cover"
+                        />
                       ) : (
                         <Avatar
                           src=""
@@ -1798,12 +1798,12 @@ export function MessagesPage() {
                   >
                     <ArrowLeft className="w-4 h-4" />
                   </button>
-                  <span
-                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#1E3F35] font-editorial text-base text-white"
+                  <img
+                    src="/locora-logo.png"
+                    alt=""
                     aria-hidden="true"
-                  >
-                    L
-                  </span>
+                    className="h-10 w-10 shrink-0 rounded-full object-cover"
+                  />
                   <div className="min-w-0">
                     <p className="font-editorial text-[15px] leading-tight text-[#1E2320] truncate">Loco</p>
                     <p className="flex items-center gap-1.5 text-[11px] text-[#5F635D]">
