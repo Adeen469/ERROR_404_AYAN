@@ -474,5 +474,20 @@ check("speed: DM send awaits the overlapped read (no second fetch after the stor
   dmSlice.includes("const recipientVersion = await recipientVersionPromise;") &&
   !dmSlice.includes("await loadSessionVersion("));
 
+// --- Send-path latency, round 2: the rate-limit check joins the
+// parallel load batch (it used to be a serial round trip before
+// every send), and the DM idempotency scan checks the already-loaded
+// history before paying for a targeted lookup ---
+check("speed: DM send runs the rate-limit check inside the parallel load batch",
+  dmSlice.includes("const [rl, profile, loadedEvent, history] = await Promise.all([") &&
+  !dmSlice.includes("const rlSend = await checkRateLimit"));
+check("speed: community send runs the rate-limit check inside the parallel load batch",
+  commSlice.includes("const [rl, profile, loadedEvent, loadedRegs] = await Promise.all([") &&
+  !commSlice.includes("const rlCommunity = await checkRateLimit"));
+check("speed: DM idempotency scans the loaded history before the targeted lookup",
+  dmSlice.indexOf('existing.find((m: any) => m.type !== "community" && m.idempotencyKey') >= 0 &&
+  dmSlice.indexOf("loadMessageByIdempotencyKey({ eventId, key: idempotencyKey") >
+    dmSlice.indexOf('existing.find((m: any) => m.type !== "community" && m.idempotencyKey'));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
