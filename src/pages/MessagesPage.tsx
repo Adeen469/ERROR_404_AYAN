@@ -3,12 +3,15 @@ import { Link, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft,
   Download,
+  Eraser,
   FileText,
   MessageCircle,
   Paperclip,
+  Pin,
   Reply,
   Search,
   Send,
+  Trash2,
   X,
 } from 'lucide-react';
 import { Modal } from '../components/ui/Modal';
@@ -37,6 +40,19 @@ import {
   type RealtimeFullEvent,
   type RealtimeMessage,
 } from '../services/realtime-service';
+import {
+  sendChatbotMessage,
+  CHATBOT_SUGGESTIONS,
+  MAX_CHATBOT_SENT_HISTORY,
+} from '../services/chatbot-service';
+import {
+  loadPrefs,
+  savePrefs,
+  sortThreadsByPin,
+  isThreadHidden,
+  isMessageCleared,
+  type ThreadPrefs,
+} from '../utils/conversation-prefs';
 import Avatar from '../components/ui/Avatar';
 
 function fmtTime(iso: string): string {
@@ -58,6 +74,38 @@ function snippetOf(m: EventMessage): string {
   if (m.text && m.text.trim()) return m.text.trim();
   if (m.attachment) return `Sent an attachment: ${m.attachment.name}`;
   return 'Message';
+}
+
+// Loco inside Messages (WhatsApp's "message yourself"): a built-in
+// AI conversation, not a server thread. Its history lives in
+// localStorage on this device only — it never goes to /api/messages
+// and never counts toward unread.
+const AI_THREAD_KEY = 'loco-ai';
+const AI_HISTORY_KEY = 'locora_messages_ai_history';
+const AI_MAX_STORED = 50;
+
+type AiChatMsg = { role: 'user' | 'assistant'; text: string; ts: number };
+
+function loadAiHistory(): AiChatMsg[] {
+  try {
+    const raw = window.localStorage.getItem(AI_HISTORY_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (m: any) =>
+          m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string',
+      )
+      .map((m: any) => ({
+        role: m.role as 'user' | 'assistant',
+        text: m.text,
+        ts: typeof m.ts === 'number' ? m.ts : Date.now(),
+      }))
+      .slice(-AI_MAX_STORED);
+  } catch {
+    return [];
+  }
 }
 
 // A message still on its way out (or failed): shown instantly so
@@ -207,6 +255,32 @@ export function MessagesPage() {
   // page is open used to leave it acting as the previous user.
   const [currentUser, setCurrentUser] = useState(() => authService.getCurrentUser());
   useEffect(() => authService.subscribe((u) => setCurrentUser(u)), []);
+  // Local-only prefs (pin / delete / clear) persist on this device.
+  useEffect(() => {
+    savePrefs(prefs);
+  }, [prefs]);
+  // AI chat history persists on this device only.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(AI_HISTORY_KEY, JSON.stringify(aiMessages.slice(-AI_MAX_STORED)));
+    } catch {
+      // Storage full or unavailable — the chat still works for the session.
+    }
+  }, [aiMessages]);
+  // The AI pane always lands at the bottom on a new message.
+  useEffect(() => {
+    const el = aiListRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [aiMessages, aiSending]);
+  // Escape closes the conversation menu.
+  useEffect(() => {
+    if (!threadMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setThreadMenu(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [threadMenu]);
   const [messages, setMessages] = useState<EventMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -239,6 +313,26 @@ export function MessagesPage() {
   } | null>(null);
   const [toastHiddenId, setToastHiddenId] = useState<string | null>(null);
   const pressTimer = useRef<number | null>(null);
+  // Conversation-list prefs (pin / delete / clear): local only,
+  // localStorage-backed — the server never sees them.
+  const [prefs, setPrefs] = useState<ThreadPrefs>(() => loadPrefs());
+  // Loco AI chat (inside Messages): history lives on this device.
+  const [aiMessages, setAiMessages] = useState<AiChatMsg[]>(() => loadAiHistory());
+  const [aiSending, setAiSending] = useState(false);
+  const aiListRef = useRef<HTMLDivElement | null>(null);
+  // Right-click / long-press menu on a conversation row.
+  const [threadMenu, setThreadMenu] = useState<{ x: number; y: number; key: string } | null>(null);
+  const [confirmThreadDelete, setConfirmThreadDelete] = useState<{
+    key: string;
+    name: string;
+  } | null>(null);
+  const [confirmThreadClear, setConfirmThreadClear] = useState<{
+    key: string;
+    name: string;
+  } | null>(null);
+  const threadPressTimer = useRef<number | null>(null);
+  const threadTouchStart = useRef<{ x: number; y: number } | null>(null);
+  const threadLongPressFired = useRef(false);
   const pollInFlight = useRef(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   // Reply state: the message being quoted in the composer. The quote
@@ -629,16 +723,51 @@ export function MessagesPage() {
   const visibleServerMessages = messages.filter(
     (m) => !pendingDeletes.some((d) => d.id === m.id),
   );
-  const threads = groupThreads(visibleServerMessages, meEmail);
-  const allThreads: MessageThread[] = pendingThread
+  // Clear chat hides every message at or before the clear moment, on
+  // this device only. Filter before grouping so the row snippet,
+  // lastAt and unread all follow the visible messages.
+  const clearedMessages = visibleServerMessages.filter((m) => {
+    const key = threadKey(m.eventId, m.senderEmail, m.recipientEmail);
+    return !isMessageCleared(m.createdAt || '', prefs.clearedAt[key]);
+  });
+  const threads = groupThreads(clearedMessages, meEmail);
+  const threadsWithPending: MessageThread[] = pendingThread
     ? threads.some((t) => t.key === pendingThread.key)
       ? threads
       : [pendingThread, ...threads]
     : threads;
+  // Delete hides the row until a newer message arrives in that thread.
+  const unhiddenThreads = threadsWithPending.filter(
+    (t) => !isThreadHidden(t.key, t.lastAt, prefs.hidden),
+  );
+  const sortedRealThreads = sortThreadsByPin(unhiddenThreads, prefs.pinned);
+  // The Loco AI chat is a built-in entry, not a server thread: it is
+  // always first, never counts as unread, and never goes to
+  // /api/messages. Its own clear-chat timestamp filters its history.
+  const aiClearedAt = prefs.clearedAt[AI_THREAD_KEY];
+  const visibleAiMessages =
+    aiClearedAt === undefined
+      ? aiMessages
+      : aiMessages.filter((m) => m.ts > aiClearedAt);
+  const aiThread: MessageThread = {
+    key: AI_THREAD_KEY,
+    eventId: '',
+    eventTitle: 'AI Assistant',
+    otherEmail: '',
+    otherName: 'Loco',
+    messages: [],
+    lastAt:
+      visibleAiMessages.length > 0
+        ? new Date(visibleAiMessages[visibleAiMessages.length - 1].ts).toISOString()
+        : '',
+    unread: 0,
+  };
+  const allThreads: MessageThread[] = [aiThread, ...sortedRealThreads];
   const selected = allThreads.find((t) => t.key === selectedKey) || null;
+  const isAiSelected = selectedKey === AI_THREAD_KEY;
   const threadQueryNorm = threadQuery.trim().toLowerCase();
-  const visibleThreads = threadQueryNorm
-    ? allThreads.filter((t) => {
+  const filteredRealThreads = threadQueryNorm
+    ? sortedRealThreads.filter((t) => {
         const last = t.messages.length > 0 ? snippetOf(t.messages[t.messages.length - 1]) : '';
         return (
           t.otherName.toLowerCase().includes(threadQueryNorm) ||
@@ -646,8 +775,11 @@ export function MessagesPage() {
           last.toLowerCase().includes(threadQueryNorm)
         );
       })
-    : allThreads;
-  const totalUnread = allThreads.reduce((n, t) => n + (t.unread || 0), 0);
+    : sortedRealThreads;
+  // Loco stays at the top even while searching — it is a built-in
+  // entry, not a server conversation.
+  const visibleThreads = [aiThread, ...filteredRealThreads];
+  const totalUnread = sortedRealThreads.reduce((n, t) => n + (t.unread || 0), 0);
 
   // Server messages plus in-flight ones for this thread, oldest
   // first. A pending bubble is dropped once its server copy shows up
@@ -1137,6 +1269,126 @@ export function MessagesPage() {
     setMenu(null);
   }
 
+  // ---- Conversation list menu (pin / delete / clear) ----
+  // All local, localStorage-backed: the server never sees them.
+  function openThreadMenu(key: string, clientX: number, clientY: number) {
+    const width = 224;
+    const height = 200;
+    setThreadMenu({
+      x: Math.max(8, Math.min(clientX, window.innerWidth - width - 8)),
+      y: Math.max(8, Math.min(clientY, window.innerHeight - height - 8)),
+      key,
+    });
+  }
+
+  function closeThreadMenu() {
+    setThreadMenu(null);
+  }
+
+  function clearThreadPress() {
+    if (threadPressTimer.current !== null) {
+      window.clearTimeout(threadPressTimer.current);
+      threadPressTimer.current = null;
+    }
+  }
+
+  function onThreadTouchStart(e: React.TouchEvent, key: string) {
+    const touch = e.touches[0];
+    clearThreadPress();
+    threadTouchStart.current = { x: touch.clientX, y: touch.clientY };
+    threadLongPressFired.current = false;
+    threadPressTimer.current = window.setTimeout(() => {
+      threadLongPressFired.current = true;
+      if (typeof navigator.vibrate === 'function') {
+        try {
+          navigator.vibrate(10);
+        } catch {
+          /* vibration unsupported — the menu still opens */
+        }
+      }
+      openThreadMenu(key, touch.clientX, touch.clientY);
+    }, 500);
+  }
+
+  // A scroll (move > 10px) cancels the long-press menu timer, so
+  // swiping through the list never also opens the menu.
+  function onThreadTouchMove(e: React.TouchEvent) {
+    const start = threadTouchStart.current;
+    if (!start) return;
+    const touch = e.touches[0];
+    if (Math.abs(touch.clientX - start.x) > 10 || Math.abs(touch.clientY - start.y) > 10) {
+      clearThreadPress();
+      threadTouchStart.current = null;
+    }
+  }
+
+  function onThreadTouchEnd() {
+    threadTouchStart.current = null;
+    clearThreadPress();
+  }
+
+  function togglePinThread(key: string) {
+    closeThreadMenu();
+    setPrefs((prev) => ({
+      ...prev,
+      pinned: prev.pinned.includes(key)
+        ? prev.pinned.filter((k) => k !== key)
+        : [...prev.pinned, key],
+    }));
+  }
+
+  function askDeleteThread(key: string, name: string) {
+    closeThreadMenu();
+    setConfirmThreadDelete({ key, name });
+  }
+
+  function confirmDeleteThreadNow() {
+    if (!confirmThreadDelete) return;
+    const { key } = confirmThreadDelete;
+    setConfirmThreadDelete(null);
+    setPrefs((prev) => ({ ...prev, hidden: { ...prev.hidden, [key]: Date.now() } }));
+    if (pendingThread && pendingThread.key === key) setPendingThread(null);
+    if (selectedKey === key) {
+      setSelectedKey(null);
+      setMobileView('list');
+    }
+  }
+
+  function askClearThread(key: string, name: string) {
+    closeThreadMenu();
+    setConfirmThreadClear({ key, name });
+  }
+
+  function confirmClearThreadNow() {
+    if (!confirmThreadClear) return;
+    const { key } = confirmThreadClear;
+    setConfirmThreadClear(null);
+    setPrefs((prev) => ({ ...prev, clearedAt: { ...prev.clearedAt, [key]: Date.now() } }));
+  }
+
+  // ---- Loco AI chat (inside Messages) ----
+  // Same /api/chatbot call as the floating widget, via the shared
+  // helper. A failed provider is the friendly fallback text, never
+  // a raw error — and the keys are the same ones the widget uses, so
+  // if they are rejected, Loco here shows the same fallback.
+  async function handleAiSend(rawText?: string) {
+    const text = (rawText ?? draft).trim();
+    if (!text || aiSending) return;
+    const userMsg: AiChatMsg = { role: 'user', text, ts: Date.now() };
+    const history = [...visibleAiMessages, userMsg]
+      .slice(-MAX_CHATBOT_SENT_HISTORY)
+      .map((m) => ({ role: m.role, text: m.text }));
+    setAiMessages((prev) => [...prev, userMsg]);
+    setDraft('');
+    setAiSending(true);
+    try {
+      const reply = await sendChatbotMessage(text, history);
+      setAiMessages((prev) => [...prev, { role: 'assistant', text: reply, ts: Date.now() }]);
+    } finally {
+      setAiSending(false);
+    }
+  }
+
   function clearPress() {
     if (pressTimer.current !== null) {
       window.clearTimeout(pressTimer.current);
@@ -1348,84 +1600,121 @@ export function MessagesPage() {
                 </div>
               ))}
             </div>
-          ) : allThreads.length === 0 ? (
-            <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-3">
-              <div className="w-14 h-14 rounded-full bg-[#F4F1EA] flex items-center justify-center">
-                <MessageCircle className="w-6 h-6 text-[#1E3F35]" />
-              </div>
-              <p className="text-xs font-semibold text-[#1E2320]">No messages yet</p>
-              <p className="text-[11px] text-[#5F635D] leading-relaxed">
-                Open an event and tap “Message organizer” to start a conversation.
-              </p>
-              <Link
-                to="/discover"
-                className="inline-block px-4 py-2 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors"
-              >
-                Discover events
-              </Link>
-            </div>
-          ) : visibleThreads.length === 0 ? (
-            <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-2">
-              <p className="text-xs font-semibold text-[#1E2320]">
-                No conversations match “{threadQuery.trim()}”
-              </p>
-              <button
-                type="button"
-                onClick={() => setThreadQuery('')}
-                className="text-[11px] font-semibold text-[#1E3F35] hover:underline"
-              >
-                Clear search
-              </button>
-            </div>
           ) : (
             <ul className="flex-1 overflow-y-auto divide-y divide-[#EBE7DF]">
-              {visibleThreads.map((t) => (
-                <li key={t.key}>
+              {visibleThreads.map((t) => {
+                const isAi = t.key === AI_THREAD_KEY;
+                const isPinned = prefs.pinned.includes(t.key);
+                const lastSnippet = isAi
+                  ? visibleAiMessages.length > 0
+                    ? visibleAiMessages[visibleAiMessages.length - 1].text
+                    : 'Ask me anything about Locora'
+                  : t.messages.length > 0
+                    ? snippetOf(t.messages[t.messages.length - 1])
+                    : 'No messages yet';
+                return (
+                  <li
+                    key={t.key}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      clearThreadPress();
+                      openThreadMenu(t.key, e.clientX, e.clientY);
+                    }}
+                    onTouchStart={(e) => onThreadTouchStart(e, t.key)}
+                    onTouchMove={onThreadTouchMove}
+                    onTouchEnd={onThreadTouchEnd}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        // A long-press that opened the menu must not
+                        // also select the row on release.
+                        if (threadLongPressFired.current) {
+                          threadLongPressFired.current = false;
+                          return;
+                        }
+                        selectThread(t.key);
+                      }}
+                      className={`w-full text-left px-4 py-3 flex gap-3 hover:bg-[#FAF8F5] transition-colors select-none ${
+                        t.key === selectedKey ? 'bg-[#F4F1EA] shadow-[inset_3px_0_0_#1E3F35]' : ''
+                      }`}
+                      style={{ WebkitTouchCallout: 'none' } as React.CSSProperties}
+                    >
+                      {isAi ? (
+                        <span
+                          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#1E3F35] font-editorial text-base text-white"
+                          aria-hidden="true"
+                        >
+                          L
+                        </span>
+                      ) : (
+                        <Avatar
+                          src=""
+                          name={t.otherName}
+                          className="w-10 h-10 rounded-full shrink-0"
+                          initialClassName="text-sm"
+                        />
+                      )}
+                      <span className="flex-1 min-w-0">
+                        <span className="flex items-center gap-2">
+                          <span className="text-[13px] font-semibold text-[#1E2320] truncate">{t.otherName}</span>
+                          {isPinned && <Pin className="h-3 w-3 shrink-0 text-[#8C887E]" aria-label="Pinned" />}
+                          {t.lastAt && (
+                            <span className="ml-auto text-[10px] text-[#8C887E] whitespace-nowrap shrink-0">
+                              {fmtTime(t.lastAt)}
+                            </span>
+                          )}
+                        </span>
+                        <span className="block text-[11px] font-medium text-[#1E3F35]/80 truncate mt-0.5">
+                          {t.eventTitle}
+                        </span>
+                        <span className="flex items-center justify-between gap-2 mt-0.5">
+                          <span
+                            className={`block text-[11px] truncate ${
+                              t.unread > 0 ? 'font-semibold text-[#1E2320]' : 'text-[#5F635D]'
+                            }`}
+                          >
+                            {lastSnippet}
+                          </span>
+                          {t.unread > 0 && (
+                            <span className="shrink-0 min-w-5 h-5 px-1.5 rounded-full bg-[#1E3F35] text-white text-[10px] font-bold flex items-center justify-center">
+                              {t.unread > 99 ? '99+' : t.unread}
+                            </span>
+                          )}
+                        </span>
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+              {sortedRealThreads.length === 0 && !threadQueryNorm && (
+                <li className="px-4 py-6 text-center space-y-2">
+                  <p className="text-xs font-semibold text-[#1E2320]">No messages yet</p>
+                  <p className="text-[11px] text-[#5F635D] leading-relaxed">
+                    Open an event and tap “Message organizer” to start a conversation.
+                  </p>
+                  <Link
+                    to="/discover"
+                    className="inline-block px-4 py-2 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors"
+                  >
+                    Discover events
+                  </Link>
+                </li>
+              )}
+              {threadQueryNorm && filteredRealThreads.length === 0 && (
+                <li className="px-4 py-6 text-center space-y-2">
+                  <p className="text-xs font-semibold text-[#1E2320]">
+                    No conversations match “{threadQuery.trim()}”
+                  </p>
                   <button
                     type="button"
-                    onClick={() => selectThread(t.key)}
-                    className={`w-full text-left px-4 py-3 flex gap-3 hover:bg-[#FAF8F5] transition-colors ${
-                      t.key === selectedKey ? 'bg-[#F4F1EA] shadow-[inset_3px_0_0_#1E3F35]' : ''
-                    }`}
+                    onClick={() => setThreadQuery('')}
+                    className="text-[11px] font-semibold text-[#1E3F35] hover:underline"
                   >
-                    <Avatar
-                      src=""
-                      name={t.otherName}
-                      className="w-10 h-10 rounded-full shrink-0"
-                      initialClassName="text-sm"
-                    />
-                    <span className="flex-1 min-w-0">
-                      <span className="flex items-center justify-between gap-2">
-                        <span className="text-[13px] font-semibold text-[#1E2320] truncate">{t.otherName}</span>
-                        {t.lastAt && (
-                          <span className="text-[10px] text-[#8C887E] whitespace-nowrap shrink-0">
-                            {fmtTime(t.lastAt)}
-                          </span>
-                        )}
-                      </span>
-                      <span className="block text-[11px] font-medium text-[#1E3F35]/80 truncate mt-0.5">
-                        {t.eventTitle}
-                      </span>
-                      <span className="flex items-center justify-between gap-2 mt-0.5">
-                        <span
-                          className={`block text-[11px] truncate ${
-                            t.unread > 0 ? 'font-semibold text-[#1E2320]' : 'text-[#5F635D]'
-                          }`}
-                        >
-                          {t.messages.length > 0
-                            ? snippetOf(t.messages[t.messages.length - 1])
-                            : 'No messages yet'}
-                        </span>
-                        {t.unread > 0 && (
-                          <span className="shrink-0 min-w-5 h-5 px-1.5 rounded-full bg-[#1E3F35] text-white text-[10px] font-bold flex items-center justify-center">
-                            {t.unread > 99 ? '99+' : t.unread}
-                          </span>
-                        )}
-                      </span>
-                    </span>
+                    Clear search
                   </button>
                 </li>
-              ))}
+              )}
             </ul>
           )}
         </div>
@@ -1448,6 +1737,31 @@ export function MessagesPage() {
             </div>
           ) : (
             <>
+              {isAiSelected ? (
+                <div className="px-4 py-3 border-b border-[#EBE7DF] bg-white flex items-center gap-3 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setMobileView('list')}
+                    className="md:hidden p-1.5 -ml-1 rounded-lg hover:bg-[#F4F1EA] text-[#5F635D]"
+                    aria-label="Back to conversations"
+                  >
+                    <ArrowLeft className="w-4 h-4" />
+                  </button>
+                  <span
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#1E3F35] font-editorial text-base text-white"
+                    aria-hidden="true"
+                  >
+                    L
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-[13px] font-semibold text-[#1E2320] truncate">Loco</p>
+                    <p className="flex items-center gap-1.5 text-[11px] text-[#5F635D]">
+                      <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />
+                      Locora assistant · Online
+                    </p>
+                  </div>
+                </div>
+              ) : (
               <div className="px-4 py-3 border-b border-[#EBE7DF] bg-white flex items-center gap-3 shrink-0">
                 <button
                   type="button"
@@ -1478,7 +1792,61 @@ export function MessagesPage() {
                   </button>
                 )}
               </div>
+              )}
 
+              {isAiSelected ? (
+                <div ref={aiListRef} className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-3 min-h-0 bg-[#FAF8F5]">
+                  {visibleAiMessages.length === 0 && !aiSending ? (
+                    <div className="rounded-2xl border border-[#E7E3DB] bg-white p-4 max-w-md mx-auto mt-4">
+                      <p className="font-editorial text-base text-[#1E2320]">Hi, I&apos;m Loco 👋</p>
+                      <p className="mt-1 text-sm leading-relaxed text-[#5F635D]">
+                        Ask me anything about Locora — finding events, creating one, teams, refunds, or your bookings.
+                      </p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {CHATBOT_SUGGESTIONS.map((s) => (
+                          <button
+                            key={s}
+                            type="button"
+                            onClick={() => void handleAiSend(s)}
+                            className="rounded-full border border-[#1E3F35]/30 bg-[#FAF8F5] px-3 py-1.5 text-xs font-medium text-[#1E3F35] transition hover:bg-[#1E3F35] hover:text-white"
+                          >
+                            {s}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    visibleAiMessages.map((m, i) => (
+                      <div
+                        key={`${m.ts}-${i}`}
+                        className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                      >
+                        <div
+                          className={
+                            m.role === 'user'
+                              ? 'max-w-[85%] rounded-2xl rounded-br-sm bg-[#1E3F35] px-3 py-2 text-sm leading-relaxed text-white'
+                              : 'max-w-[85%] rounded-2xl rounded-bl-sm border border-[#E5E1D8] bg-white px-3 py-2 text-sm leading-relaxed text-[#1E2320]'
+                          }
+                        >
+                          <span className="whitespace-pre-wrap break-words">{m.text}</span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                  {aiSending && (
+                    <div className="flex justify-start">
+                      <div
+                        className="flex items-center gap-1 rounded-2xl rounded-bl-sm border border-[#E7E3DB] bg-white px-3 py-2.5"
+                        aria-label="Loco is typing"
+                      >
+                        <span className="h-2 w-2 animate-bounce rounded-full bg-[#5F635D]" />
+                        <span className="h-2 w-2 animate-bounce rounded-full bg-[#5F635D] [animation-delay:150ms]" />
+                        <span className="h-2 w-2 animate-bounce rounded-full bg-[#5F635D] [animation-delay:300ms]" />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
               <div
                 ref={listRef}
                 onScroll={onListScroll}
@@ -1671,7 +2039,41 @@ export function MessagesPage() {
                 )}
                 <div ref={bottomRef} />
               </div>
+              )}
 
+              {isAiSelected ? (
+              <div className="p-3 sm:p-4 border-t border-[#EBE7DF] bg-white space-y-2 shrink-0">
+                <div className="flex items-end gap-2">
+                  <textarea
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        void handleAiSend();
+                      }
+                    }}
+                    placeholder="Ask about Locora…"
+                    aria-label="Message Loco"
+                    rows={1}
+                    disabled={aiSending}
+                    className="flex-1 min-w-0 text-xs bg-white border border-[#E2DFD8] rounded-2xl p-2.5 text-[#1E2320] focus:border-[#1E3F35] resize-none disabled:opacity-60"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleAiSend()}
+                    disabled={!draft.trim() || aiSending}
+                    className="p-2.5 rounded-full border border-[#1E3F35] bg-[#1E3F35] hover:bg-[#163028] text-white disabled:opacity-60 transition-colors shrink-0"
+                    aria-label="Send message"
+                  >
+                    <Send className="w-4 h-4" />
+                  </button>
+                </div>
+                <p className="text-[10px] text-[#8C887E]">
+                  Loco answers questions about Locora only — it never sees your private info.
+                </p>
+              </div>
+              ) : (
               <div className="p-3 sm:p-4 border-t border-[#EBE7DF] bg-white space-y-2 shrink-0">
                 {typing &&
                   (typing.threadKey === selected.key ||
@@ -1777,6 +2179,7 @@ export function MessagesPage() {
                   Attachments: video, image, PDF, Word or spreadsheet, max 20MB each.
                 </p>
               </div>
+              )}
             </>
           )}
         </div>
@@ -1855,6 +2258,65 @@ export function MessagesPage() {
         </>
       )}
 
+      {/* Conversation menu: pin / delete / clear chat. All local —
+          the server never sees them. Loco gets Pin and Clear only. */}
+      {threadMenu && (
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            onClick={closeThreadMenu}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              closeThreadMenu();
+            }}
+          />
+          <div
+            className="fixed z-50 w-56 bg-white rounded-xl border border-[#E5E1D8] shadow-xl py-1"
+            style={{ left: threadMenu.x, top: threadMenu.y }}
+          >
+            <button
+              type="button"
+              onClick={() => togglePinThread(threadMenu.key)}
+              className="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-[#1E2320] hover:bg-[#F4F1EA]"
+            >
+              <Pin className="w-3.5 h-3.5" />
+              {prefs.pinned.includes(threadMenu.key) ? 'Unpin' : 'Pin'}
+            </button>
+            {threadMenu.key !== AI_THREAD_KEY && (
+              <button
+                type="button"
+                onClick={() => {
+                  const t = allThreads.find((x) => x.key === threadMenu.key);
+                  askDeleteThread(threadMenu.key, t?.otherName || 'this conversation');
+                }}
+                className="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-red-700 hover:bg-[#F4F1EA]"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Delete
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                const t = allThreads.find((x) => x.key === threadMenu.key);
+                askClearThread(threadMenu.key, t?.otherName || 'this conversation');
+              }}
+              className="flex w-full items-center gap-2 px-4 py-2 text-left text-xs text-[#1E2320] hover:bg-[#F4F1EA]"
+            >
+              <Eraser className="w-3.5 h-3.5" />
+              Clear chat
+            </button>
+            <button
+              type="button"
+              onClick={closeThreadMenu}
+              className="block w-full px-4 py-2 text-left text-xs text-[#1E2320] hover:bg-[#F4F1EA]"
+            >
+              Close
+            </button>
+          </div>
+        </>
+      )}
+
       {/* Delete confirmation: nothing is deleted until you confirm. */}
       <Modal
         isOpen={!!confirmDelete}
@@ -1881,6 +2343,68 @@ export function MessagesPage() {
             className="px-4 py-2 text-xs font-semibold bg-red-700 hover:bg-red-800 text-white rounded-lg transition-colors"
           >
             Delete
+          </button>
+        </div>
+      </Modal>
+
+      {/* Delete conversation: hides the row on this device until a
+          new message arrives in that thread. */}
+      <Modal
+        isOpen={!!confirmThreadDelete}
+        onClose={() => setConfirmThreadDelete(null)}
+        title="Delete conversation?"
+        description={
+          confirmThreadDelete
+            ? `“${confirmThreadDelete.name}” will be hidden on this device. It comes back if a new message arrives in this chat.`
+            : ''
+        }
+        maxWidth="sm"
+      >
+        <div className="flex gap-2 justify-end">
+          <button
+            type="button"
+            onClick={() => setConfirmThreadDelete(null)}
+            className="px-4 py-2 text-xs font-semibold text-[#1E2320] bg-[#F4F1EA] hover:bg-[#EBE7DF] rounded-lg transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={confirmDeleteThreadNow}
+            className="px-4 py-2 text-xs font-semibold bg-red-700 hover:bg-red-800 text-white rounded-lg transition-colors"
+          >
+            Delete
+          </button>
+        </div>
+      </Modal>
+
+      {/* Clear chat: hides every message up to now, on this device
+          only. New messages still show. */}
+      <Modal
+        isOpen={!!confirmThreadClear}
+        onClose={() => setConfirmThreadClear(null)}
+        title="Clear chat?"
+        description={
+          confirmThreadClear
+            ? `All messages in “${confirmThreadClear.name}” will be hidden on this device. New messages will still show.`
+            : ''
+        }
+        maxWidth="sm"
+      >
+        <div className="flex gap-2 justify-end">
+          <button
+            type="button"
+            onClick={() => setConfirmThreadClear(null)}
+            className="px-4 py-2 text-xs font-semibold text-[#1E2320] bg-[#F4F1EA] hover:bg-[#EBE7DF] rounded-lg transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={confirmClearThreadNow}
+            className="px-4 py-2 text-xs font-semibold bg-[#1E3F35] hover:bg-[#163028] text-white rounded-lg transition-colors"
+          >
+            Clear
           </button>
         </div>
       </Modal>

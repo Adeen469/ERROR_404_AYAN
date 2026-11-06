@@ -1,6 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { MessageCircle, Send, X } from 'lucide-react';
 import { useLocation } from 'react-router-dom';
+import {
+  sendChatbotMessage,
+  CHATBOT_SUGGESTIONS,
+  MAX_CHATBOT_SENT_HISTORY,
+} from '../services/chatbot-service';
 
 // Loco — the Locora assistant, floating on every page except the auth
 // pages. Lazy-loaded from App.tsx so it never bloats first paint.
@@ -12,10 +17,7 @@ type ChatMsg = { role: 'user' | 'assistant'; text: string; ts: number };
 
 const AUTH_PATHS = ['/login', '/signup', '/forgot-password', '/reset-password', '/logout', '/verify-email'];
 const STORAGE_KEY = 'locora_chat_history';
-const SUGGESTIONS = ['How do I create an event?', 'How do refunds work?', 'How do teams work?'];
 const MAX_STORED = 20;
-const MAX_SENT_HISTORY = 8;
-const FALLBACK_TEXT = "I'm having trouble right now — please try again in a moment.";
 
 function loadStored(): ChatMsg[] {
   try {
@@ -66,29 +68,13 @@ export function ChatWidget() {
     const text = (rawText ?? input).trim();
     if (!text || sending) return;
     const userMsg: ChatMsg = { role: 'user', text, ts: Date.now() };
-    const history = [...messages, userMsg].slice(-MAX_SENT_HISTORY).map((m) => ({ role: m.role, text: m.text }));
+    const history = [...messages, userMsg].slice(-MAX_CHATBOT_SENT_HISTORY).map((m) => ({ role: m.role, text: m.text }));
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setSending(true);
-    try {
-      const res = await fetch('/api/chatbot', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, history }),
-      });
-      let reply = FALLBACK_TEXT;
-      try {
-        const data = await res.json();
-        if (data && typeof data.reply === 'string' && data.reply.trim()) reply = data.reply.trim();
-      } catch {
-        // Non-JSON response — keep the friendly fallback.
-      }
-      setMessages((prev) => [...prev, { role: 'assistant', text: reply, ts: Date.now() }]);
-    } catch {
-      setMessages((prev) => [...prev, { role: 'assistant', text: FALLBACK_TEXT, ts: Date.now() }]);
-    } finally {
-      setSending(false);
-    }
+    const reply = await sendChatbotMessage(text, history);
+    setMessages((prev) => [...prev, { role: 'assistant', text: reply, ts: Date.now() }]);
+    setSending(false);
   };
 
   return (
@@ -141,7 +127,7 @@ export function ChatWidget() {
                   Ask me anything about Locora — finding events, creating one, teams, refunds, or your bookings.
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  {SUGGESTIONS.map((s) => (
+                  {CHATBOT_SUGGESTIONS.map((s) => (
                     <button
                       key={s}
                       type="button"
