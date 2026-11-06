@@ -239,6 +239,7 @@ export function CommunityChat({
   isRegistered,
   isOwner,
   mode = 'event',
+  fullHeight = false,
 }: {
   eventId: string;
   eventTitle: string;
@@ -250,6 +251,10 @@ export function CommunityChat({
   // "event": one group chat per event (membership-gated).
   // "global": the site-wide room (any signed-in user).
   mode?: 'event' | 'global';
+  // Global page only: the chat fills the viewport like MessagesPage
+  // (full-bleed, full height, inner scroll, pinned composer).
+  // Event-page usage keeps the card sizing — never pass this there.
+  fullHeight?: boolean;
 }) {
   const isGlobal = mode === 'global';
   const [currentUser, setCurrentUser] = useState(() => authService.getCurrentUser());
@@ -1022,8 +1027,14 @@ export function CommunityChat({
   }
 
   return (
-    <div className="bg-white rounded-2xl border border-[#E5E1D8] shadow-sm overflow-hidden">
-      <div className="px-5 sm:px-6 pt-5 sm:pt-6 pb-4 flex items-start gap-3">
+    <div
+      className={
+        fullHeight
+          ? 'flex flex-col bg-white border-b border-[#E5E1D8] overflow-hidden h-[calc(100dvh-4rem-1px)]'
+          : 'bg-white rounded-2xl border border-[#E5E1D8] shadow-sm overflow-hidden'
+      }
+    >
+      <div className={`px-5 sm:px-6 pt-5 sm:pt-6 pb-4 flex items-start gap-3${fullHeight ? ' shrink-0' : ''}`}>
         <div className="w-10 h-10 rounded-full bg-[#1E3F35] text-white flex items-center justify-center shrink-0">
           <Users className="w-5 h-5" />
         </div>
@@ -1036,7 +1047,13 @@ export function CommunityChat({
           </p>
         </div>
       </div>
-      <div className="px-5 sm:px-6 pb-5 sm:pb-6 space-y-4">
+      <div
+        className={
+          fullHeight
+            ? 'flex-1 min-h-0 flex flex-col px-5 sm:px-6 pb-5 sm:pb-6 space-y-4'
+            : 'px-5 sm:px-6 pb-5 sm:pb-6 space-y-4'
+        }
+      >
 
       {status === 'loading' && (
         <div className="space-y-3" aria-label="Loading the community chat">
@@ -1089,7 +1106,11 @@ export function CommunityChat({
           <div
             ref={listRef}
             onScroll={onListScroll}
-            className="space-y-3 max-h-[65vh] overflow-y-auto pr-1 bg-[#FAF8F5] rounded-xl p-3 sm:p-4"
+            className={
+              fullHeight
+                ? 'space-y-3 flex-1 min-h-0 overflow-y-auto pr-1 bg-[#FAF8F5] rounded-xl p-3 sm:p-4'
+                : 'space-y-3 max-h-[65vh] overflow-y-auto pr-1 bg-[#FAF8F5] rounded-xl p-3 sm:p-4'
+            }
           >
             {hasMore && (
               <div className="flex justify-center pb-1">
@@ -1257,7 +1278,7 @@ export function CommunityChat({
             <div ref={bottomRef} />
           </div>
 
-          <div className="border-t border-[#E5E1D8] pt-4 space-y-2">
+          <div className={`border-t border-[#E5E1D8] pt-4 space-y-2${fullHeight ? ' shrink-0' : ''}`}>
             {replyTo && (
               <div className="flex items-start justify-between gap-2 bg-[#F4F1EA] border border-[#E2DFD8] rounded-lg px-3 py-2">
                 <div className="min-w-0">

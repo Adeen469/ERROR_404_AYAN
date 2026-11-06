@@ -101,14 +101,20 @@ function ChatWidgetSlot() {
   return <ChatWidget />;
 }
 
-// Messages is a full-height WhatsApp-style page: the chat already
-// fills the viewport, so the footer's usual 80px top margin would
-// leave an empty band between the chat and the footer. On /messages
-// the footer sits flush under the chat instead; every other page
-// keeps the margin.
+// Messages and Community are full-height WhatsApp-style pages: the
+// chat already fills the viewport, so the footer's usual 80px top
+// margin would leave an empty band between the chat and the footer.
+// On /messages and /community the footer sits flush under the chat
+// instead; every other page keeps the margin.
 function FooterSlot() {
   const { pathname } = useLocation();
-  if (pathname === '/messages' || pathname.startsWith('/messages/')) return <Footer flush />;
+  if (
+    pathname === '/messages' ||
+    pathname.startsWith('/messages/') ||
+    pathname === '/community' ||
+    pathname.startsWith('/community/')
+  )
+    return <Footer flush />;
   return <Footer />;
 }
 
