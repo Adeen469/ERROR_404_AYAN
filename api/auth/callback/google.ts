@@ -810,8 +810,26 @@ export default async function handler(req: any, res: any) {
     if (!existingGoogleUser) {
       await fetchJson(`${supabaseBase()}/rest/v1/locora_users`, {
         method: "POST", headers: supabaseHeaders(),
-        body: JSON.stringify({ id: profile.id, data: { email: norm(profile.email), name: profile.name, role: profile.role, authProvider: "google", sessionVersion: 0, createdAt: profile.createdAt } }),
+        body: JSON.stringify({ id: profile.id, data: { email: norm(profile.email), name: profile.name, role: profile.role, authProvider: "google", avatar: profile.avatar, sessionVersion: 0, createdAt: profile.createdAt } }),
       });
+    } else {
+      // Persist the Google picture on the row for EXISTING users too.
+      // The profile handed to the SPA carries googleUser.picture, but
+      // the row was the only server-side copy and it never stored an
+      // avatar — so GET /me (publicProfile: profile.avatar ||
+      // d.avatar || "") answered avatar:"" and validateSession
+      // overwrote the browser's copy seconds after sign-in, wiping
+      // the picture for every Google user. Store the fresh picture
+      // whenever the row's effective avatar differs (first heal,
+      // Google-side picture change); best-effort like the insert.
+      const d = existingGoogleUser.data || {};
+      const storedAvatar = (d.profile && d.profile.avatar) || d.avatar || "";
+      if (storedAvatar !== profile.avatar) {
+        await fetchJson(`${supabaseBase()}/rest/v1/locora_users?id=eq.${encodeURIComponent(existingGoogleUser.id)}`, {
+          method: "PATCH", headers: supabaseHeaders(),
+          body: JSON.stringify({ data: { ...d, avatar: profile.avatar } }),
+        });
+      }
     }
   } catch {}
   const profileJson = escapeForScript(JSON.stringify(profile));

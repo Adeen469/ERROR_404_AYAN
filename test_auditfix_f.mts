@@ -320,5 +320,20 @@ check("labels: Home has no 'Handpicked' eyebrow above Featured Gatherings",
 check("labels: Community has no 'Site-wide room' eyebrow above its heading",
   !read("src/pages/CommunityPage.tsx").includes("Site-wide room"));
 
+// --- Google avatar persistence (owner report, 2026-11-06) ---
+// The callback hands the SPA a profile WITH the Google picture, but
+// the locora_users row never stored it, so GET /me answered
+// avatar:"" and validateSession wiped the browser copy seconds
+// after sign-in. The row must carry the picture from day one and be
+// healed on later sign-ins when it is missing or stale.
+const googleCallbackTs = read("api/auth/callback/google.ts");
+check("google avatar: the new-user row insert stores the Google picture",
+  googleCallbackTs.includes('authProvider: "google", avatar: profile.avatar'));
+check("google avatar: existing rows are healed when the stored avatar differs",
+  googleCallbackTs.includes("storedAvatar !== profile.avatar") &&
+  googleCallbackTs.includes("data: { ...d, avatar: profile.avatar }"));
+check("google avatar: /me serves the stored row avatar",
+  read("api/auth.ts").includes("avatar: profile.avatar || d.avatar"));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
