@@ -489,5 +489,17 @@ check("speed: DM idempotency scans the loaded history before the targeted lookup
   dmSlice.indexOf("loadMessageByIdempotencyKey({ eventId, key: idempotencyKey") >
     dmSlice.indexOf('existing.find((m: any) => m.type !== "community" && m.idempotencyKey'));
 
+// --- Messages must not read state before declaring it (2026-11-06) ---
+// ccba192 put four effects above the useState declarations they
+// depend on; the dependency arrays evaluate during render, so the
+// page threw "Cannot access ... before initialization" on every
+// open and landed on the error boundary. The declarations must stay
+// ABOVE the first effect that reads them.
+check("messages: prefs/aiMessages/threadMenu are declared before the effects that read them",
+  page.indexOf("const [prefs, setPrefs]") !== -1 &&
+  page.indexOf("const [prefs, setPrefs]") < page.indexOf("savePrefs(prefs)") &&
+  page.indexOf("const [aiMessages, setAiMessages]") < page.indexOf("aiMessages.slice(-AI_MAX_STORED)") &&
+  page.indexOf("const [threadMenu, setThreadMenu]") < page.indexOf("if (!threadMenu) return;"));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

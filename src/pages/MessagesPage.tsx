@@ -255,32 +255,6 @@ export function MessagesPage() {
   // page is open used to leave it acting as the previous user.
   const [currentUser, setCurrentUser] = useState(() => authService.getCurrentUser());
   useEffect(() => authService.subscribe((u) => setCurrentUser(u)), []);
-  // Local-only prefs (pin / delete / clear) persist on this device.
-  useEffect(() => {
-    savePrefs(prefs);
-  }, [prefs]);
-  // AI chat history persists on this device only.
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(AI_HISTORY_KEY, JSON.stringify(aiMessages.slice(-AI_MAX_STORED)));
-    } catch {
-      // Storage full or unavailable — the chat still works for the session.
-    }
-  }, [aiMessages]);
-  // The AI pane always lands at the bottom on a new message.
-  useEffect(() => {
-    const el = aiListRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [aiMessages, aiSending]);
-  // Escape closes the conversation menu.
-  useEffect(() => {
-    if (!threadMenu) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setThreadMenu(null);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [threadMenu]);
   const [messages, setMessages] = useState<EventMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -322,6 +296,38 @@ export function MessagesPage() {
   const aiListRef = useRef<HTMLDivElement | null>(null);
   // Right-click / long-press menu on a conversation row.
   const [threadMenu, setThreadMenu] = useState<{ x: number; y: number; key: string } | null>(null);
+  // These four effects used to sit at the top of the component,
+  // above the state they read — their dependency arrays are
+  // evaluated during render, so the page threw "Cannot access ...
+  // before initialization" on every open and landed on the error
+  // boundary. They live below the declarations now; do not move
+  // them back up. (Fix, 2026-11-06.)
+  // Local-only prefs (pin / delete / clear) persist on this device.
+  useEffect(() => {
+    savePrefs(prefs);
+  }, [prefs]);
+  // AI chat history persists on this device only.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(AI_HISTORY_KEY, JSON.stringify(aiMessages.slice(-AI_MAX_STORED)));
+    } catch {
+      // Storage full or unavailable — the chat still works for the session.
+    }
+  }, [aiMessages]);
+  // The AI pane always lands at the bottom on a new message.
+  useEffect(() => {
+    const el = aiListRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [aiMessages, aiSending]);
+  // Escape closes the conversation menu.
+  useEffect(() => {
+    if (!threadMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setThreadMenu(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [threadMenu]);
   const [confirmThreadDelete, setConfirmThreadDelete] = useState<{
     key: string;
     name: string;
