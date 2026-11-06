@@ -293,7 +293,6 @@ export function MessagesPage() {
   // Loco AI chat (inside Messages): history lives on this device.
   const [aiMessages, setAiMessages] = useState<AiChatMsg[]>(() => loadAiHistory());
   const [aiSending, setAiSending] = useState(false);
-  const aiListRef = useRef<HTMLDivElement | null>(null);
   // Right-click / long-press menu on a conversation row.
   const [threadMenu, setThreadMenu] = useState<{ x: number; y: number; key: string } | null>(null);
   // These four effects used to sit at the top of the component,
@@ -314,11 +313,8 @@ export function MessagesPage() {
       // Storage full or unavailable — the chat still works for the session.
     }
   }, [aiMessages]);
-  // The AI pane always lands at the bottom on a new message.
-  useEffect(() => {
-    const el = aiListRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [aiMessages, aiSending]);
+  // (AI auto-scroll lives with the other scroll effects below —
+  // it scrolls the window, so it must sit under the state it reads.)
   // Escape closes the conversation menu.
   useEffect(() => {
     if (!threadMenu) return;
@@ -366,7 +362,6 @@ export function MessagesPage() {
   // Scroll guard: auto-scroll only when already near the bottom;
   // otherwise a "New messages" pill appears instead of yanking the
   // reader away from older history.
-  const listRef = useRef<HTMLDivElement | null>(null);
   const nearBottomRef = useRef(true);
   const lastSeenKeyRef = useRef('');
   const [newCount, setNewCount] = useState(0);
@@ -906,23 +901,50 @@ export function MessagesPage() {
   }, [visibleMessages.length, tailKey]);
 
   // Switching threads always lands at the bottom, pill cleared.
+  // The AI pane has no bottomRef (its list is page-scrolled), so it
+  // scrolls the window to the document bottom instead.
   useEffect(() => {
     nearBottomRef.current = true;
     lastSeenKeyRef.current = '';
     setNewCount(0);
-    bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
+    if (selectedKey === AI_THREAD_KEY) {
+      window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'auto' });
+    } else {
+      bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
+    }
   }, [selectedKey]);
+
+  // The AI pane always lands at the bottom on a new message. The
+  // page itself scrolls now (no inner list container), so this
+  // scrolls the window — but never on mount or before the AI thread
+  // is open, or opening the page would yank the reader to the bottom.
+  const aiScrollInit = useRef(false);
+  useEffect(() => {
+    if (!isAiSelected) return;
+    if (!aiScrollInit.current) {
+      aiScrollInit.current = true;
+      return;
+    }
+    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
+  }, [aiMessages, aiSending, isAiSelected]);
+
+  // Page-scroll equivalent of the old inner-list scroll handler: the
+  // window is the scroller now, so near-bottom is measured against
+  // the document. Attached once; it only reads refs + setNewCount.
+  useEffect(() => {
+    const onScroll = () => {
+      const near = isNearBottom(document.documentElement);
+      nearBottomRef.current = near;
+      if (near) setNewCount(0);
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
 
   function jumpToBottom() {
     nearBottomRef.current = true;
     setNewCount(0);
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }
-
-  function onListScroll() {
-    const near = isNearBottom(listRef.current);
-    nearBottomRef.current = near;
-    if (near) setNewCount(0);
   }
 
   // "Load older messages": one more page (50) before the oldest
@@ -934,6 +956,10 @@ export function MessagesPage() {
     if (loadingOlder || !hasMore || messages.length === 0) return;
     setLoadingOlder(true);
     setLoadOlderError('');
+    // Page scroll: the prepended rows push the reader's position
+    // down by their height — remember the height now so the scroll
+    // can be put back by exactly that much below.
+    const prevHeight = document.documentElement.scrollHeight;
     try {
       const oldest = messages.reduce(
         (min, m) => ((m.createdAt || '') < min ? (m.createdAt as string) : min),
@@ -950,6 +976,12 @@ export function MessagesPage() {
         );
       });
       setHasMore(page.hasMore);
+      // Keep the message being read in place: scroll down by the
+      // height the prepended rows added, after React has rendered them.
+      window.setTimeout(() => {
+        const delta = document.documentElement.scrollHeight - prevHeight;
+        if (delta > 0) window.scrollBy(0, delta);
+      }, 0);
     } catch {
       setLoadOlderError('Could not load older messages.');
     } finally {
@@ -1571,10 +1603,15 @@ export function MessagesPage() {
         </div>
       )}
 
-      <div className="flex items-stretch bg-white rounded-2xl border border-[#E5E1D8] shadow-sm overflow-hidden h-[calc(100dvh-11.5rem)] min-h-[540px]">
+      {/* Page-scroll layout: the card grows with its content and the
+          whole page scrolls with the browser's main scrollbar — no
+          fixed height and no inner scroll container on either pane,
+          so the chat fits every resolution and the composer scrolls
+          with the page. */}
+      <div className="flex items-stretch bg-white rounded-2xl border border-[#E5E1D8] shadow-sm overflow-hidden">
         {/* Thread list */}
         <div
-          className={`w-full md:w-[340px] lg:w-[360px] shrink-0 flex flex-col min-h-0 border-r border-[#E5E1D8] ${
+          className={`w-full md:w-[340px] lg:w-[360px] shrink-0 flex flex-col border-r border-[#E5E1D8] ${
             mobileView === 'chat' ? 'hidden md:flex' : 'flex'
           }`}
         >
@@ -1598,7 +1635,7 @@ export function MessagesPage() {
             </div>
           </div>
           {loading ? (
-            <div className="flex-1 overflow-y-auto p-4 space-y-3" aria-label="Loading conversations">
+            <div className="p-4 space-y-3" aria-label="Loading conversations">
               {[0, 1, 2].map((i) => (
                 <div key={i} className="animate-pulse space-y-2">
                   <div className="h-3 w-2/3 bg-[#EBE7DF] rounded" />
@@ -1607,7 +1644,7 @@ export function MessagesPage() {
               ))}
             </div>
           ) : (
-            <ul className="flex-1 overflow-y-auto divide-y divide-[#EBE7DF]">
+            <ul className="divide-y divide-[#EBE7DF]">
               {visibleThreads.map((t) => {
                 const isAi = t.key === AI_THREAD_KEY;
                 const isPinned = prefs.pinned.includes(t.key);
@@ -1727,7 +1764,7 @@ export function MessagesPage() {
 
         {/* Chat pane */}
         <div
-          className={`w-full md:flex-1 min-w-0 flex flex-col min-h-0 ${
+          className={`w-full md:flex-1 min-w-0 flex flex-col ${
             mobileView === 'chat' ? 'flex' : 'hidden md:flex'
           }`}
         >
@@ -1754,13 +1791,13 @@ export function MessagesPage() {
                     <ArrowLeft className="w-4 h-4" />
                   </button>
                   <span
-                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#1E3F35] font-editorial text-base text-white"
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#1E3F35] font-editorial text-base text-white"
                     aria-hidden="true"
                   >
                     L
                   </span>
                   <div className="min-w-0">
-                    <p className="text-[13px] font-semibold text-[#1E2320] truncate">Loco</p>
+                    <p className="font-editorial text-[15px] leading-tight text-[#1E2320] truncate">Loco</p>
                     <p className="flex items-center gap-1.5 text-[11px] text-[#5F635D]">
                       <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />
                       Locora assistant · Online
@@ -1801,10 +1838,10 @@ export function MessagesPage() {
               )}
 
               {isAiSelected ? (
-                <div ref={aiListRef} className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-3 min-h-0 bg-[#FAF8F5]">
+                <div className="p-4 sm:p-5 space-y-3 bg-[#FAF8F5]">
                   {visibleAiMessages.length === 0 && !aiSending ? (
-                    <div className="rounded-2xl border border-[#E7E3DB] bg-white p-4 max-w-md mx-auto mt-4">
-                      <p className="font-editorial text-base text-[#1E2320]">Hi, I&apos;m Loco 👋</p>
+                    <div className="rounded-2xl border border-[#E7E3DB] bg-white p-5 max-w-md mx-auto mt-6">
+                      <p className="font-editorial text-base text-[#1E2320]">Hi, I&apos;m Loco</p>
                       <p className="mt-1 text-sm leading-relaxed text-[#5F635D]">
                         Ask me anything about Locora — finding events, creating one, teams, refunds, or your bookings.
                       </p>
@@ -1814,7 +1851,7 @@ export function MessagesPage() {
                             key={s}
                             type="button"
                             onClick={() => void handleAiSend(s)}
-                            className="rounded-full border border-[#1E3F35]/30 bg-[#FAF8F5] px-3 py-1.5 text-xs font-medium text-[#1E3F35] transition hover:bg-[#1E3F35] hover:text-white"
+                            className="rounded-full border border-[#1E3F35]/25 bg-[#FAF8F5] px-3.5 py-2 text-xs font-medium text-[#1E3F35] transition hover:bg-[#1E3F35] hover:text-white"
                           >
                             {s}
                           </button>
@@ -1830,8 +1867,8 @@ export function MessagesPage() {
                         <div
                           className={
                             m.role === 'user'
-                              ? 'max-w-[85%] rounded-2xl rounded-br-sm bg-[#1E3F35] px-3 py-2 text-sm leading-relaxed text-white'
-                              : 'max-w-[85%] rounded-2xl rounded-bl-sm border border-[#E5E1D8] bg-white px-3 py-2 text-sm leading-relaxed text-[#1E2320]'
+                              ? 'max-w-[85%] rounded-2xl rounded-br-sm bg-[#1E3F35] px-4 py-2.5 text-sm leading-relaxed text-white'
+                              : 'max-w-[85%] rounded-2xl rounded-bl-sm border border-[#E5E1D8] bg-white px-4 py-2.5 text-sm leading-relaxed text-[#1E2320] shadow-xs'
                           }
                         >
                           <span className="whitespace-pre-wrap break-words">{m.text}</span>
@@ -1842,7 +1879,7 @@ export function MessagesPage() {
                   {aiSending && (
                     <div className="flex justify-start">
                       <div
-                        className="flex items-center gap-1 rounded-2xl rounded-bl-sm border border-[#E7E3DB] bg-white px-3 py-2.5"
+                        className="flex items-center gap-1 rounded-2xl rounded-bl-sm border border-[#E7E3DB] bg-white px-4 py-3"
                         aria-label="Loco is typing"
                       >
                         <span className="h-2 w-2 animate-bounce rounded-full bg-[#5F635D]" />
@@ -1853,11 +1890,7 @@ export function MessagesPage() {
                   )}
                 </div>
               ) : (
-              <div
-                ref={listRef}
-                onScroll={onListScroll}
-                className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-3 min-h-0 bg-[#FAF8F5]"
-              >
+              <div className="p-4 sm:p-5 space-y-3 bg-[#FAF8F5]">
                 {hasMore && (
                   <div className="flex justify-center pb-1">
                     <button
@@ -2033,11 +2066,11 @@ export function MessagesPage() {
                   })
                 )}
                 {newCount > 0 && (
-                  <div className="sticky bottom-2 flex justify-center">
+                  <div className="pointer-events-none fixed bottom-6 left-1/2 z-30 flex -translate-x-1/2 justify-center">
                     <button
                       type="button"
                       onClick={jumpToBottom}
-                      className="px-3 py-1.5 text-[11px] font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-full shadow-lg"
+                      className="pointer-events-auto px-3 py-1.5 text-[11px] font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-full shadow-lg"
                     >
                       {newCount} new message{newCount === 1 ? '' : 's'} ↓
                     </button>
@@ -2063,13 +2096,13 @@ export function MessagesPage() {
                     aria-label="Message Loco"
                     rows={1}
                     disabled={aiSending}
-                    className="flex-1 min-w-0 text-xs bg-white border border-[#E2DFD8] rounded-2xl p-2.5 text-[#1E2320] focus:border-[#1E3F35] resize-none disabled:opacity-60"
+                    className="flex-1 min-w-0 text-xs bg-white border border-[#E2DFD8] rounded-2xl px-4 py-2.5 text-[#1E2320] focus:border-[#1E3F35] resize-none disabled:opacity-60"
                   />
                   <button
                     type="button"
                     onClick={() => void handleAiSend()}
                     disabled={!draft.trim() || aiSending}
-                    className="p-2.5 rounded-full border border-[#1E3F35] bg-[#1E3F35] hover:bg-[#163028] text-white disabled:opacity-60 transition-colors shrink-0"
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#1E3F35] text-white transition hover:bg-[#163028] disabled:opacity-60"
                     aria-label="Send message"
                   >
                     <Send className="w-4 h-4" />

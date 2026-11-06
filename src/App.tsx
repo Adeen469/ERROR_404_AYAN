@@ -92,6 +92,15 @@ function ScrollToTop() {
   return null;
 }
 
+// Loco's floating bubble is hidden on /messages: the page already
+// has Loco as a conversation there, so a second bubble would be
+// redundant. Everywhere else the widget mounts as before.
+function ChatWidgetSlot() {
+  const { pathname } = useLocation();
+  if (pathname === '/messages' || pathname.startsWith('/messages/')) return null;
+  return <ChatWidget />;
+}
+
 // Attendee pages used to have no route guard at all: a guest opening
 // /my-registrations or /messages got each page's own inconsistent
 // handling (one rendered an empty list). Now guests are sent to sign
@@ -229,7 +238,7 @@ export default function App() {
           </main>
           <Footer />
           <Suspense fallback={null}>
-            <ChatWidget />
+            <ChatWidgetSlot />
           </Suspense>
         </div>
       </ToastProvider>

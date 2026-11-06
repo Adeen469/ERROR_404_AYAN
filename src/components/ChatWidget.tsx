@@ -8,7 +8,9 @@ import {
 } from '../services/chatbot-service';
 
 // Loco — the Locora assistant, floating on every page except the auth
-// pages. Lazy-loaded from App.tsx so it never bloats first paint.
+// pages and /messages (the App shell hides it there — Messages already
+// has Loco as a conversation). Lazy-loaded from App.tsx so it never
+// bloats first paint.
 // Chats stay on this device only (localStorage); nothing about the
 // signed-in user is ever sent — just the typed message + recent chat
 // history. The server answers via Gemini, with Groq as fallback.
@@ -121,8 +123,8 @@ export function ChatWidget() {
           {/* Messages */}
           <div ref={listRef} className="flex-1 space-y-2 overflow-y-auto bg-[#FAF8F5] p-3">
             {messages.length === 0 && (
-              <div className="rounded-2xl border border-[#E7E3DB] bg-white p-4">
-                <p className="font-editorial text-base text-[#1E2320]">Hi, I&apos;m Loco 👋</p>
+              <div className="rounded-2xl border border-[#E7E3DB] bg-white p-5">
+                <p className="font-editorial text-base text-[#1E2320]">Hi, I&apos;m Loco</p>
                 <p className="mt-1 text-sm leading-relaxed text-[#5F635D]">
                   Ask me anything about Locora — finding events, creating one, teams, refunds, or your bookings.
                 </p>
@@ -132,7 +134,7 @@ export function ChatWidget() {
                       key={s}
                       type="button"
                       onClick={() => void send(s)}
-                      className="rounded-full border border-[#1E3F35]/30 bg-[#FAF8F5] px-3 py-1.5 text-xs font-medium text-[#1E3F35] transition hover:bg-[#1E3F35] hover:text-white"
+                      className="rounded-full border border-[#1E3F35]/25 bg-[#FAF8F5] px-3.5 py-2 text-xs font-medium text-[#1E3F35] transition hover:bg-[#1E3F35] hover:text-white"
                     >
                       {s}
                     </button>
@@ -145,8 +147,8 @@ export function ChatWidget() {
                 <div
                   className={
                     m.role === 'user'
-                      ? 'max-w-[80%] rounded-2xl rounded-br-sm bg-[#1E3F35] px-3 py-2 text-sm leading-relaxed text-white'
-                      : 'max-w-[80%] rounded-2xl rounded-bl-sm border border-[#E7E3DB] bg-white px-3 py-2 text-sm leading-relaxed text-[#1E2320]'
+                      ? 'max-w-[80%] rounded-2xl rounded-br-sm bg-[#1E3F35] px-4 py-2.5 text-sm leading-relaxed text-white'
+                      : 'max-w-[80%] rounded-2xl rounded-bl-sm border border-[#E7E3DB] bg-white px-4 py-2.5 text-sm leading-relaxed text-[#1E2320] shadow-xs'
                   }
                 >
                   <span className="whitespace-pre-wrap break-words">{m.text}</span>
@@ -155,7 +157,7 @@ export function ChatWidget() {
             ))}
             {sending && (
               <div className="flex justify-start">
-                <div className="flex items-center gap-1 rounded-2xl rounded-bl-sm border border-[#E7E3DB] bg-white px-3 py-2.5" aria-label="Loco is typing">
+                <div className="flex items-center gap-1 rounded-2xl rounded-bl-sm border border-[#E7E3DB] bg-white px-4 py-3" aria-label="Loco is typing">
                   <span className="h-2 w-2 animate-bounce rounded-full bg-[#5F635D]" />
                   <span className="h-2 w-2 animate-bounce rounded-full bg-[#5F635D] [animation-delay:150ms]" />
                   <span className="h-2 w-2 animate-bounce rounded-full bg-[#5F635D] [animation-delay:300ms]" />
