@@ -100,12 +100,12 @@ export interface EventItem {
   // Team participation config (Technology & Hackathons only; see
   // EventParticipation). Absent on older events and every other
   // category — those are individual-only. Never sent in ?slim=1 lists.
-  participation?: EventParticipation;
+  participation?: EventParticipation | null;
   // Category registration options (Workshops & Learning, Live Music &
   // Culture only; see EventOptions). Absent on older events and every
   // other category — those behave exactly as before. Never sent in
   // ?slim=1 lists.
-  options?: EventOptions;
+  options?: EventOptions | null;
   capacity: number;
   registeredCount: number;
   status: EventStatus;

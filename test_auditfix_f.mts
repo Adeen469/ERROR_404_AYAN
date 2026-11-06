@@ -44,10 +44,11 @@ check("L1: connect-src has no bare wss: (pinned wss://*.supabase.co)",
 check("L1: frame-src no longer lists api.razorpay.com (never framed)",
   !directive("frame-src").includes("api.razorpay.com") &&
   directive("frame-src").includes("https://checkout.razorpay.com"));
-check("L1: script-src keeps 'unsafe-inline' AND the file documents why a nonce/hash is impossible",
+check("L1: script-src keeps 'unsafe-inline' AND the CSP note documents why a nonce/hash is impossible",
   directive("script-src").includes("'unsafe-inline'") &&
-  (vercel._cspNote || "").includes("no static hash can ever match") &&
-  (vercel._cspNote || "").includes("no per-response nonce can be generated"));
+  !("_cspNote" in vercel) &&
+  read("SECURITY_FIX_SETUP.md").includes("no static hash can match") &&
+  read("SECURITY_FIX_SETUP.md").includes("no per-response nonce is possible"));
 check("L1: Google callback still serves its inline <script> (the reason 'unsafe-inline' stays)",
   read("api/auth/callback/google.ts").includes("<script>") &&
   read("api/auth/callback/google.ts").includes("escapeForScript(JSON.stringify(returnTo))"));
@@ -83,12 +84,14 @@ check("L3: isMutationMethod covers POST/PATCH/PUT/DELETE, not GET",
 const mutFiles = ["api/auth.ts", "api/messages.ts", "api/events.ts", "api/registrations.ts", "api/notify.ts", "api/organizer-access.ts"];
 for (const p of mutFiles) {
   check(`L3: ${p} enforces the origin check on mutations`,
-    read(p).includes('from "./_lib/origin-check"') &&
+    !read(p).includes('from "./_lib/origin-check"') &&
+    read(p).includes("INLINED from api/_lib/origin-check.ts") &&
     read(p).includes("originAllowed(req)") &&
     read(p).includes('message: "Request origin not allowed"'));
 }
 check("L3: phone-otp enforces the origin check (POST-only endpoint)",
-  read("api/phone-otp.ts").includes('from "./_lib/origin-check"') &&
+  !read("api/phone-otp.ts").includes('from "./_lib/origin-check"') &&
+  read("api/phone-otp.ts").includes("INLINED from api/_lib/origin-check.ts") &&
   read("api/phone-otp.ts").includes("originAllowed(req)"));
 check("L3: payments enforces the origin check but EXEMPTS the Razorpay webhook explicitly",
   read("api/payments.ts").includes('action !== "webhook" && !originAllowed(req)') &&

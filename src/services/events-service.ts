@@ -237,7 +237,7 @@ function getStoredEvents(): EventItem[] {
     let changed = false;
     const migrated = parsed.map((event: EventItem) => {
       const fixed = migrateCoverImage(event.coverImage);
-      if (fixed !== event.coverImage) {
+      if (fixed && fixed !== event.coverImage) {
         changed = true;
         return { ...event, coverImage: fixed };
       }

@@ -11,7 +11,7 @@
 // H2 (audit #4): the ONLY static import in this file — the shared
 // rate-limit module (api/_lib/rate-limit.ts). See its header for the
 // live _lib-import risk + the live-test step after deploy.
-import { checkRateLimit, getClientIp } from "../../_lib/rate-limit";
+import { checkRateLimit, getClientIp } from "../_lib/rate-limit";
 
 export const ADMIN_EMAILS = ["mr.adeen946@gmail.com", "ayan.work937@gmail.com"];
 

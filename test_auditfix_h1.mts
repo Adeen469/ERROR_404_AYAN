@@ -69,7 +69,7 @@ const linkFn: any = new Function(
 check("link: shape is /api/auth/verify-email?token=<raw> on the live domain",
   linkFn("abc123") === "https://locora-hyperlocal.vercel.app/api/auth/verify-email?token=abc123");
 check("link: token is URL-encoded", linkFn("a+b/c=d").includes("token=a%2Bb%2Fc%3Dd"));
-check("link: domain is derived from SITE_URL, not hardcoded per call", auth.includes("verificationLink(rawToken)") && (auth.match(/locora-hyperlocal\.vercel\.app/g) || []).length === 1);
+check("link: domain is derived from SITE_URL, not hardcoded per call", auth.includes("verificationLink(rawToken)") && (auth.replace(/\/\/ INLINED from api\/_lib\/[\s\S]*?\n\}\)\(\);\n/g, "").match(/locora-hyperlocal\.vercel\.app/g) || []).length === 1);
 
 // ---- Token crypto: hashToken / randomTokenHex (extracted + run) ----
 const cryptoFns = [

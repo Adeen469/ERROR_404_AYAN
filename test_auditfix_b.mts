@@ -16,6 +16,27 @@ function check(name: string, cond: boolean) {
 function countOcc(src: string, re: RegExp): number {
   return (src.match(re) || []).length;
 }
+// Remove the inlined api/_lib blocks (they sit between the INLINED
+// marker comment and a column-0 "})();") so source scans below only
+// see the handler's own code, exactly as when the helpers were imports.
+function stripInlined(src: string): string {
+  return src.replace(/\/\/ INLINED from api\/_lib\/[\s\S]*?\n\}\)\(\);\n/g, "");
+}
+function extractFn(src: string, name: string): string {
+  const start = src.indexOf(`function ${name}(`);
+  if (start < 0) return "";
+  let depth = 0;
+  for (let j = src.indexOf("{", start); j < src.length; j++) {
+    if (src[j] === "{") depth++;
+    else if (src[j] === "}") { depth--; if (depth === 0) return src.slice(start, j + 1); }
+  }
+  return "";
+}
+const normFn = (s: string) =>
+  s.split("\n").map((l) => l.replace(/\s+$/, "")).join("\n").trim();
+// Inlined copies carry 2 extra spaces of indent from the IIFE wrap.
+const normInlined = (s: string) =>
+  s.split("\n").map((l) => l.replace(/^  /, "").replace(/\s+$/, "")).join("\n").trim();
 // All api TS sources, excluding the shared module itself.
 function allApiSrc(): { path: string; src: string }[] {
   const out: { path: string; src: string }[] = [];
@@ -43,28 +64,44 @@ const notify = byPath("api/notify.ts");
 const rpcSql = readFileSync("rate-limit-rpc.sql", "utf8");
 const vercelignore = readFileSync(".vercelignore", "utf8");
 
-// --- 1: exactly ONE definition of each helper remains, in the shared module ---
+// --- 1: the canonical definitions live in the shared module; deployed
+// handlers carry inlined copies, because importing api/_lib from a
+// deployed function crashes it live on this project's Vercel setup
+// (FUNCTION_INVOCATION_FAILED — see the module header for the history).
 const defs = apiFiles.filter((f) => /function checkRateLimit\(/.test(f.src));
-check("H2: exactly one checkRateLimit definition remains in api/",
-  defs.length === 1 && defs[0].path === "api/_lib/rate-limit.ts");
+check("H2: checkRateLimit definitions = canonical module + 8 inlined handler copies",
+  defs.length === 9 && defs.some((f) => f.path === "api/_lib/rate-limit.ts"));
 const ipDefs = apiFiles.filter((f) => /function getClientIp\(/.test(f.src));
-check("H2: exactly one getClientIp definition remains in api/",
-  ipDefs.length === 1 && ipDefs[0].path === "api/_lib/rate-limit.ts");
+check("H2: getClientIp definitions = canonical module + 8 inlined handler copies (phone-otp's copy defines it but never calls it)",
+  ipDefs.length === 9 && ipDefs.some((f) => f.path === "api/_lib/rate-limit.ts"));
 
-// --- 2: every caller imports the shared module; no file redefines it ---
+// --- 2: every deployed caller carries an inlined copy and calls it;
+// no deployed file imports api/_lib (those imports crash live) ---
 const callers = ["api/auth.ts", "api/events.ts", "api/messages.ts", "api/registrations.ts",
-  "api/notify.ts", "api/organizer-access.ts", "api/payments.ts", "api/phone-otp.ts",
-  "api/auth/login.ts", "api/auth/signup.ts", "api/auth/reset.ts"];
+  "api/notify.ts", "api/organizer-access.ts", "api/payments.ts", "api/phone-otp.ts"];
 for (const p of callers) {
   const src = byPath(p);
-  check(`H2: ${p} imports the shared module and calls it`,
-    src.includes('from "./_lib/rate-limit"') || src.includes('from "../../_lib/rate-limit"'));
-  check(`H2: ${p} has no local copy left`,
-    !/function (checkRateLimit|getClientIp)\(/.test(src));
+  check(`H2: ${p} carries the inlined limiter and calls it`,
+    !src.includes('from "./_lib/rate-limit"') &&
+    src.includes("INLINED from api/_lib/rate-limit.ts") &&
+    /function checkRateLimit\(/.test(src) && src.includes("checkRateLimit("));
+}
+for (const p of ["api/auth/login.ts", "api/auth/signup.ts", "api/auth/reset.ts"]) {
+  check(`H2: ${p} (vercelignored reference copy) imports the shared module via the corrected path`,
+    byPath(p).includes('from "../_lib/rate-limit"'));
 }
 for (const p of ["api/auth/logout.ts", "api/me.ts", "api/auth/callback/google.ts"]) {
   check(`H2: ${p} (no call sites) has no leftover copy`,
     !/function (checkRateLimit|getClientIp)\(/.test(byPath(p)));
+}
+// --- 2b: the inlined copies must not drift from the canonical module ---
+for (const p of callers) {
+  check(`H2: ${p} inlined checkRateLimit is identical to the canonical module`,
+    normInlined(extractFn(byPath(p), "checkRateLimit")) === normFn(extractFn(rateLimit, "checkRateLimit")));
+}
+for (const p of callers) {
+  check(`H2: ${p} inlined getClientIp is identical to the canonical module`,
+    normInlined(extractFn(byPath(p), "getClientIp")) === normFn(extractFn(rateLimit, "getClientIp")));
 }
 check("H2: api/_lib/session.ts re-exports the shared helpers (surface preserved)",
   byPath("api/_lib/session.ts").includes('export { checkRateLimit, getClientIp } from "./rate-limit";'));
@@ -247,8 +284,9 @@ check("H2: OTP verify is rate-limited (new phoneotp:verify key) and fails closed
 
 // --- 6: fail OPEN for reads (and non-auth mutations): no 503 on tableMissing ---
 for (const [name, src] of [["events", events], ["messages", messages], ["registrations", registrations], ["organizer-access", organizerAccess], ["notify", notify], ["payments", payments]] as const) {
-  const mentions = countOcc(src, /tableMissing/g);
-  const failOpenGuards = countOcc(src, /!\w+\.allowed && !\w+\.tableMissing/g);
+  const body = stripInlined(src);
+  const mentions = countOcc(body, /tableMissing/g);
+  const failOpenGuards = countOcc(body, /!\w+\.allowed && !\w+\.tableMissing/g);
   check(`H2: ${name} stays fail-open (every tableMissing mention is a !allowed && !tableMissing guard)`,
     mentions > 0 && mentions === failOpenGuards);
 }

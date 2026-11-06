@@ -83,14 +83,15 @@ for (const f of ["api/auth.ts", "api/events.ts", "api/messages.ts", "api/registr
 // --- 2: C1 route gone, single shared rate limiter ---
 check("C1: api/events/[id].ts file deleted", !existsSync("api/events/[id].ts"));
 const allApiSrc = listApiFiles("api").map((f) => readFileSync(f, "utf8")).join("\n");
-check("H2: exactly one checkRateLimit definition in api/",
-  (allApiSrc.match(/function checkRateLimit\(/g) || []).length === 1);
-check("H2: exactly one getClientIp definition in api/",
-  (allApiSrc.match(/function getClientIp\(/g) || []).length === 1);
+check("H2: checkRateLimit defined in the canonical module + inlined into the 8 deployed handlers",
+  (allApiSrc.match(/function checkRateLimit\(/g) || []).length === 9);
+check("H2: getClientIp defined in the canonical module + inlined into all 8 deployed handlers (phone-otp defines it in its copy but never calls it)",
+  (allApiSrc.match(/function getClientIp\(/g) || []).length === 9);
 check("H2: shared limiter lives in api/_lib/rate-limit.ts",
   rateLimitLib.includes("export function getClientIp") && rateLimitLib.includes("export async function checkRateLimit"));
 for (const [name, src] of [["auth", auth], ["events", events], ["messages", messages], ["registrations", registrations], ["payments", payments], ["phone-otp", phoneOtp], ["notify", notify], ["organizer-access", orgAcc]] as const) {
-  check(`H2: ${name} imports the shared limiter`, src.includes("_lib/rate-limit"));
+  check(`H2: ${name} carries the inlined limiter (deployed functions must not import api/_lib — those imports crash live)`,
+    !src.includes('from "./_lib/') && src.includes("INLINED from api/_lib/rate-limit.ts"));
 }
 
 // --- 3: owner SQL files present with their key statements ---

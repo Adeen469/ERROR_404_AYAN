@@ -288,8 +288,9 @@ const servicePlain = service.replace(
   /export function reconcileFailedPending<[\s\S]*?>\(/,
   "export function reconcileFailedPending(",
 );
+const dedupeConst = (service.match(/export const PENDING_DEDUPE_WINDOW_MS = [^;]+;/) || [""])[0].replace("export ", "");
 const { reconcileFailedPending }: any = new Function(
-  `${jsFn(servicePlain, "reconcileFailedPending")}\nreturn { reconcileFailedPending };`,
+  `${dedupeConst}\n${jsFn(servicePlain, "reconcileFailedPending")}\nreturn { reconcileFailedPending };`,
 )();
 const T0 = "2026-11-06T12:26:00.000Z";
 const failedHi: any = { failed: true, eventId: "evt-1", senderEmail: ME, recipientEmail: OTHER, text: "Hi", attachment: null, createdAt: T0 };
