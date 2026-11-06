@@ -1,7 +1,13 @@
 // Loco — the Locora assistant (chatbot).
 //
-// POST /api/chatbot { message: string, history?: { role, text }[] }
-//   -> { reply: string, provider: "gemini" | "groq" | "none" }
+// POST /api/chatbot { message: string, history?: { role, text }[], debug?: boolean }
+//   -> { reply: string, provider: "gemini" | "groq" | "none", debug?: {...} }
+//
+// debug: when true, the response also carries a `debug` object with one
+// entry per provider — { keyPresent, status, error } — so a failing
+// setup can be diagnosed without guessing. It NEVER contains key
+// material: only the HTTP status and the provider's own short error
+// message, truncated and scrubbed of anything key-shaped.
 //
 // Providers: Gemini FIRST (gemini-2.5-flash via generateContent), Groq
 // as fallback (llama-3.3-70b-versatile via the OpenAI-compatible chat
@@ -439,9 +445,9 @@ async function fetchWithTimeout(fetchImpl: any, url: string, init: any, ms: numb
   }
 }
 
-export async function callGemini(message: string, history: ChatTurn[], eventsContext: string, fetchImpl: any = fetch): Promise<string | null> {
+export async function callGemini(message: string, history: ChatTurn[], eventsContext: string, fetchImpl: any = fetch, diag?: any): Promise<string | null> {
   const key = getEnv("GEMINI_API_KEY");
-  if (!key) return null;
+  if (!key) { if (diag) diag.gemini = { keyPresent: false }; return null; }
   const prompt = buildAssistantPrompt(message, history, eventsContext);
   try {
     const res = await fetchWithTimeout(
@@ -457,17 +463,21 @@ export async function callGemini(message: string, history: ChatTurn[], eventsCon
       },
       GEMINI_TIMEOUT_MS,
     );
-    if (!res || !res.ok) return null;
+    if (!res) { if (diag) diag.gemini = { keyPresent: true, status: 0, error: "no response" }; return null; }
     const body = await res.json().catch(() => null);
-    return parseGeminiText(body);
+    if (!res.ok) { if (diag) diag.gemini = { keyPresent: true, status: res.status, error: sanitizeProviderError(body) }; return null; }
+    const text = parseGeminiText(body);
+    if (!text && diag) diag.gemini = { keyPresent: true, status: res.status, error: "empty reply" };
+    return text;
   } catch {
+    if (diag) diag.gemini = { keyPresent: true, status: 0, error: "network/timeout" };
     return null;
   }
 }
 
-export async function callGroq(message: string, history: ChatTurn[], eventsContext: string, fetchImpl: any = fetch): Promise<string | null> {
+export async function callGroq(message: string, history: ChatTurn[], eventsContext: string, fetchImpl: any = fetch, diag?: any): Promise<string | null> {
   const key = getEnv("GROQ_API_KEY");
-  if (!key) return null;
+  if (!key) { if (diag) diag.groq = { keyPresent: false }; return null; }
   try {
     const res = await fetchWithTimeout(
       fetchImpl,
@@ -484,24 +494,50 @@ export async function callGroq(message: string, history: ChatTurn[], eventsConte
       },
       GROQ_TIMEOUT_MS,
     );
-    if (!res || !res.ok) return null;
+    if (!res) { if (diag) diag.groq = { keyPresent: true, status: 0, error: "no response" }; return null; }
     const body = await res.json().catch(() => null);
-    return parseGroqText(body);
+    if (!res.ok) { if (diag) diag.groq = { keyPresent: true, status: res.status, error: sanitizeProviderError(body) }; return null; }
+    const text = parseGroqText(body);
+    if (!text && diag) diag.groq = { keyPresent: true, status: res.status, error: "empty reply" };
+    return text;
   } catch {
+    if (diag) diag.groq = { keyPresent: true, status: 0, error: "network/timeout" };
     return null;
   }
+}
+
+// Short, safe provider error text for the debug object: the HTTP
+// status plus the provider's own message, truncated and scrubbed of
+// anything key-shaped. Provider errors never contain keys, but the
+// scrub is a second layer so a debug response can never leak one.
+export function sanitizeProviderError(body: any): string {
+  let msg = "";
+  try {
+    const e = body?.error;
+    if (typeof e === "string") msg = e;
+    else if (e && typeof e.message === "string") msg = e.message;
+    else if (typeof body?.message === "string") msg = body.message;
+  } catch { msg = ""; }
+  msg = (msg || "provider error").slice(0, 200);
+  msg = msg.replace(/AIza[0-9A-Za-z\-_]{10,}/g, "[key]").replace(/gsk_[0-9A-Za-z]{10,}/g, "[key]");
+  return msg || "provider error";
 }
 
 export async function askAssistant(
   message: string,
   history: any,
   fetchImpl: any = fetch,
+  diag?: any,
 ): Promise<{ reply: string; provider: string }> {
   const refused = refusalFor(message);
   if (refused) return { reply: refused, provider: "none" };
   const geminiKey = getEnv("GEMINI_API_KEY");
   const groqKey = getEnv("GROQ_API_KEY");
   if (!geminiKey && !groqKey) return { reply: NOT_SETUP_REPLY, provider: "none" };
+  if (diag) {
+    if (!geminiKey) diag.gemini = { keyPresent: false };
+    if (!groqKey) diag.groq = { keyPresent: false };
+  }
   let eventsContext = "";
   if (needsEventsContext(message)) {
     try {
@@ -512,12 +548,12 @@ export async function askAssistant(
   }
   const cleanHistory = sanitizeHistory(history);
   if (geminiKey) {
-    const reply = await callGemini(message, cleanHistory, eventsContext, fetchImpl);
+    const reply = await callGemini(message, cleanHistory, eventsContext, fetchImpl, diag);
     if (reply) return { reply, provider: "gemini" };
     try { console.warn("Chatbot: Gemini failed, falling back to Groq"); } catch {}
   }
   if (groqKey) {
-    const reply = await callGroq(message, cleanHistory, eventsContext, fetchImpl);
+    const reply = await callGroq(message, cleanHistory, eventsContext, fetchImpl, diag);
     if (reply) return { reply, provider: "groq" };
   }
   return { reply: FALLBACK_REPLY, provider: "none" };
@@ -556,8 +592,10 @@ export default async function handler(req: any, res: any): Promise<void> {
       sendJson(res, 429, { message: "You're sending messages a bit fast — please wait a moment and try again." }, { "Retry-After": String(rl.retryAfter) });
       return;
     }
-    const result = await askAssistant(message, body?.history);
-    sendJson(res, 200, { reply: result.reply, provider: result.provider });
+    const debug = body?.debug === true;
+    const diag: any = debug ? {} : undefined;
+    const result = await askAssistant(message, body?.history, fetch, diag);
+    sendJson(res, 200, { reply: result.reply, provider: result.provider, ...(debug ? { debug: diag } : {}) });
   } catch (err) {
     try { console.error("Chatbot failed:", err instanceof Error ? err.message : err); } catch {}
     sendJson(res, 200, { reply: FALLBACK_REPLY, provider: "none" });
