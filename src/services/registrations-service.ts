@@ -3,7 +3,7 @@
 // locora_session JWT cookie only; those body/query fields are ignored
 // server-side. getMyRegistrations() calls /registrations with no params.
 import { AttendeeRegistration, EventItem } from '../types';
-import { eventsService } from './events-service';
+import { eventsService, withMigratedCover } from './events-service';
 import { authService } from './auth-service';
 import { apiClient, ApiError, isDemoMode } from './api-client';
 import { computeOptionsTotal } from '../utils/event-options';
@@ -158,21 +158,36 @@ export interface TeamMembersResult {
   members: TeamMember[];
 }
 
+// Registration rows embed an event snapshot taken at registration
+// time, and its coverImage is whatever the client held then —
+// including stale bundled-asset paths from older builds, which no
+// longer resolve (the server answers with the SPA fallback HTML and
+// the <img> cannot decode it). Pages prefer the live event when it
+// is listed (already cover-migrated by eventsService), but the
+// snapshot is the fallback for events the list does not return, so
+// it must be migrated too — otherwise My Hub / Dashboard cards show
+// a broken thumbnail for exactly those events.
+function withMigratedSnapshot(reg: AttendeeRegistration): AttendeeRegistration {
+  if (!reg || !reg.event) return reg;
+  const fixed = withMigratedCover(reg.event);
+  return fixed === reg.event ? reg : { ...reg, event: fixed };
+}
+
 export const registrationsService = {
   async getMyRegistrations(): Promise<AttendeeRegistration[]> {
     const user = authService.getCurrentUser();
     if (!user) return [];
     const local = getStoredRegistrations().filter((r) => r.userId === user.id);
-    if (isDemoMode()) return local;
+    if (isDemoMode()) return local.map(withMigratedSnapshot);
     try {
       const shared = await apiClient.get<AttendeeRegistration[]>('/registrations');
-      return mergeRegistrations(Array.isArray(shared) ? shared : [], local);
+      return mergeRegistrations(Array.isArray(shared) ? shared : [], local).map(withMigratedSnapshot);
     } catch (err) {
       // Shared registrations table not set up (or unreachable): fall back
       // to this browser's local registrations, like the event list does.
       console.warn('Shared registrations unavailable, falling back to local registrations:', err);
       await new Promise((resolve) => setTimeout(resolve, 150));
-      return local;
+      return local.map(withMigratedSnapshot);
     }
   },
 

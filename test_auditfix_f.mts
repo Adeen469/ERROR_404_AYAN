@@ -298,6 +298,10 @@ check("covers: stale hashed /assets paths resolve to the bundled cover by stripp
   eventsServiceTs.includes("replace(/-[A-Za-z0-9_-]{8,}") &&
   eventsServiceTs.includes("withMigratedCover(e)") &&
   eventsServiceTs.includes("withMigratedCover(fetched)"));
+check("covers: registration event snapshots are cover-migrated at read time",
+  eventsServiceTs.includes("export function withMigratedCover") &&
+  read("src/services/registrations-service.ts").includes("withMigratedCover(reg.event)") &&
+  read("src/services/registrations-service.ts").includes("withMigratedSnapshot"));
 
 // --- Discover location: no automatic IP location (owner, 2026-11-06) ---
 // Discover must never auto-fill its location filter from the

@@ -237,8 +237,10 @@ function migrateCoverImage(coverImage: string | undefined): string | undefined {
 // API-fed events too (getEvents / getEventById): a cover stored in
 // Supabase by an older build keeps its stale asset path forever
 // unless the client resolves it at read time, like the localStorage
-// migration below does for locally saved events.
-function withMigratedCover<T extends { coverImage?: string }>(event: T): T {
+// migration below does for locally saved events. Exported for
+// registrations-service, whose registration rows embed event
+// snapshots carrying the same stale paths.
+export function withMigratedCover<T extends { coverImage?: string }>(event: T): T {
   if (!event || typeof event.coverImage !== 'string') return event;
   const fixed = migrateCoverImage(event.coverImage);
   return fixed && fixed !== event.coverImage ? { ...event, coverImage: fixed } : event;
