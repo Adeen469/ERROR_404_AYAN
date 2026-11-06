@@ -5,9 +5,9 @@
 //   1. The Locora profile page calls POST { action: "send", email, phone }.
 //      A 6-digit OTP is generated here, only its SHA-256 hash is stored
 //      (Supabase phone_verifications table, status "pending_otp", 10-min
-//      expiry), and the code itself is delivered by Fast2SMS
-//      (route "otp" — Fast2SMS's pre-approved OTP template, so no DLT
-//      template of our own is needed to start; see FAST2SMS_OTP_SETUP.md).
+//      expiry), and the code itself is delivered by Fast2SMS's bulkV2
+//      Quick API (route "q" — the dedicated "otp" route is closed for
+//      this account; see sendFast2SmsOtp and FAST2SMS_OTP_SETUP.md).
 //   2. The user types the code; the page calls
 //      POST { action: "verify", token, otp }. On a hash match (constant-
 //      time compare, max 5 attempts) the row becomes "verified".
@@ -498,9 +498,14 @@ function generateToken(): string {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 14)}`;
 }
 
-// Delivers the OTP through Fast2SMS's bulkV2 API on the "otp" route,
-// which uses Fast2SMS's own pre-approved OTP template — the variable
-// value is our code. Throws with the gateway's message on failure.
+// Delivers the OTP through Fast2SMS's bulkV2 API on the Quick API
+// route ("q"), with the code inside the message text. The dedicated
+// "otp" route is closed for this account: Fast2SMS support
+// (2026-11-06) said the OTP API "has now been closed" for accounts
+// without completed KYC/DLT, their Aadhaar KYC API is disabled, and
+// they directed us to Quick API instead — ₹7/SMS from the wallet,
+// no DLT template of our own, no website-verification gate. Throws
+// with the gateway's message on failure.
 async function sendFast2SmsOtp(tenDigits: string, otp: string): Promise<void> {
   const apiKey = getEnv("FAST2SMS_API_KEY");
   const { ok, body } = await fetchJson("https://www.fast2sms.com/dev/bulkV2", {
@@ -510,10 +515,11 @@ async function sendFast2SmsOtp(tenDigits: string, otp: string): Promise<void> {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      route: "otp",
-      variables_values: otp,
-      numbers: tenDigits,
+      route: "q",
+      message: `Your Locora verification code is ${otp}. It is valid for 10 minutes. Do not share it with anyone.`,
+      language: "english",
       flash: 0,
+      numbers: tenDigits,
     }),
   });
   if (!ok || !body || body.return !== true) {
