@@ -285,8 +285,12 @@ const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GE
 const GROQ_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"];
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 // Generous but bounded: the two legs together stay inside a normal
-// serverless invocation even if both are slow.
-const GEMINI_TIMEOUT_MS = 10000;
+// serverless invocation even if both are slow. Gemini's leg is kept
+// short on purpose: gemini-3.8-flash on the free tier consistently
+// takes over 10s from this function (three straight timeouts at 10s),
+// so a shorter budget fails over to Groq sooner and the user still
+// gets a reply in ~9s instead of ~12s.
+const GEMINI_TIMEOUT_MS = 7000;
 const GROQ_TIMEOUT_MS = 8000;
 const MAX_MESSAGE_CHARS = 2000;
 const MAX_HISTORY = 8;
