@@ -552,13 +552,18 @@ function stripMessageForViewer(m: any, viewerEmail: string): any {
   delete out.hiddenFor;
   delete out.idempotencyKey;
   // M1 (audit #4): community rooms are names-only — a community row
-  // must never carry either side's email to the viewer. The private
+  // must never carry ANOTHER member's email to the viewer. The private
   // inbox keeps senderEmail/recipientEmail (the client files threads
-  // by them); community rows never need them (senderName is shown).
+  // by them); in community rows only the viewer's OWN senderEmail is
+  // kept, because the chat UI identifies "my messages" (alignment,
+  // edit/delete, reply labels) by comparing senderEmail to the
+  // signed-in email — stripping it from the author's own view crashed
+  // the room on rows where it was absent and silently broke the rest.
+  // Your own email is not a leak: the session already proves it.
   if (m.type === "community") {
-    delete out.senderEmail;
     delete out.recipientEmail;
-    // (replySnapshot senderEmail is dropped in the rebuild below.)
+    if (norm(m.senderEmail) !== norm(viewerEmail)) delete out.senderEmail;
+    // (replySnapshot senderEmail is handled in the rebuild below.)
   }
   if (m.senderEmail !== viewerEmail) delete out.editHistory;
   // readBy is a list of member EMAILS — it must never reach a
@@ -576,8 +581,11 @@ function stripMessageForViewer(m: any, viewerEmail: string): any {
     const s = m.replySnapshot;
     out.replySnapshot = {
       id: String(s.id || ""),
-      // M1: community quotes are names-only too — no senderEmail.
-      ...(m.type === "community" ? {} : { senderEmail: String(s.senderEmail || "") }),
+      // M1: community quotes are names-only too — a quoted senderEmail
+      // is included only when the quote is the viewer's own message.
+      ...(m.type === "community"
+        ? (s.senderEmail && norm(s.senderEmail) === norm(viewerEmail) ? { senderEmail: String(s.senderEmail) } : {})
+        : { senderEmail: String(s.senderEmail || "") }),
       ...(s.senderName ? { senderName: String(s.senderName).slice(0, 80) } : {}),
       text: String(s.text || "").slice(0, 200),
       ...(s.attachmentName ? { attachmentName: String(s.attachmentName).slice(0, 200) } : {}),

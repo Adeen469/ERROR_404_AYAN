@@ -157,8 +157,13 @@ const commRow: any = {
 const commOut = stripMessageForViewer(commRow, "bob@example.com");
 check("M1: community GET row drops senderEmail + recipientEmail",
   !("senderEmail" in commOut) && !("recipientEmail" in commOut));
-check("M1: community reply snapshot drops senderEmail but keeps the name",
-  !("senderEmail" in (commOut.replySnapshot || {})) && commOut.replySnapshot?.senderName === "Bob");
+check("M1: community reply snapshot keeps the name, and keeps senderEmail only when the quote is the viewer's own",
+  commOut.replySnapshot?.senderName === "Bob" && commOut.replySnapshot?.senderEmail === "bob@example.com");
+const commOutAlice = stripMessageForViewer(commRow, "alice@example.com");
+check("M1: community row keeps senderEmail for its own author (the chat UI identifies own messages by it)",
+  commOutAlice.senderEmail === "alice@example.com" && !("recipientEmail" in commOutAlice));
+check("M1: community reply snapshot drops senderEmail when the quote is someone else's",
+  !("senderEmail" in (commOutAlice.replySnapshot || {})) && commOutAlice.replySnapshot?.senderName === "Bob");
 check("M1: community row keeps senderName + text + seenCount",
   commOut.senderName === "Alice" && commOut.text === "hello" && commOut.seenCount === 1);
 const privRow: any = { ...commRow, type: "private", recipientEmail: "bob@example.com" };

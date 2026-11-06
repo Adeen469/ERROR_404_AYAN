@@ -87,7 +87,7 @@ const QuoteView = React.memo(function QuoteView({
   const deleted = snap.deleted === true;
   const senderLabel = deleted
     ? ''
-    : snap.senderEmail.toLowerCase() === meEmail
+    : (snap.senderEmail || '').toLowerCase() === meEmail
       ? 'You'
       : snap.senderName || snap.senderEmail;
   const body = deleted
@@ -700,7 +700,7 @@ export function CommunityChat({
   useEffect(() => {
     if (status !== 'member' || !currentUser?.email) return;
     const unread = messages.filter(
-      (m) => !m.seenByMe && m.senderEmail.toLowerCase() !== meEmail && !m.deletedForEveryone,
+      (m) => !m.seenByMe && (m.senderEmail || '').toLowerCase() !== meEmail && !m.deletedForEveryone,
     );
     if (unread.length === 0) return;
     const ids = unread.map((m) => m.id);
@@ -764,7 +764,7 @@ export function CommunityChat({
   }
 
   function canEdit(m: EventMessage): boolean {
-    if (m.senderEmail.toLowerCase() !== meEmail) return false;
+    if ((m.senderEmail || '').toLowerCase() !== meEmail) return false;
     if (m.deletedForEveryone) return false;
     const ageMs = Date.now() - Date.parse(m.createdAt || '');
     return Number.isFinite(ageMs) && ageMs <= 60 * 60 * 1000;
@@ -772,7 +772,7 @@ export function CommunityChat({
 
   function canDelete(m: EventMessage): boolean {
     if (m.deletedForEveryone) return false;
-    return m.senderEmail.toLowerCase() === meEmail || isOrganizer;
+    return (m.senderEmail || '').toLowerCase() === meEmail || isOrganizer;
   }
 
   async function handleSend() {
@@ -1112,7 +1112,7 @@ export function CommunityChat({
               </p>
             )}
             {visible.map((m, idx) => {
-              const mine = m.senderEmail.toLowerCase() === meEmail;
+              const mine = (m.senderEmail || '').toLowerCase() === meEmail;
               const deleted = m.deletedForEveryone === true;
               const prev = idx > 0 ? visible[idx - 1] : null;
               const showDay = !prev || dayLabel(prev.createdAt) !== dayLabel(m.createdAt);
@@ -1256,7 +1256,7 @@ export function CommunityChat({
                 <div className="min-w-0">
                   <p className="text-[11px] font-bold text-[#C25E00]">
                     Replying to{' '}
-                    {replyTo.senderEmail.toLowerCase() === meEmail
+                    {(replyTo.senderEmail || '').toLowerCase() === meEmail
                       ? 'You'
                       : replyTo.senderName || 'Attendee'}
                   </p>
@@ -1360,7 +1360,7 @@ export function CommunityChat({
         isDestructive
         title="Delete message?"
         message={
-          confirmDelete && confirmDelete.senderEmail.toLowerCase() !== meEmail
+          confirmDelete && (confirmDelete.senderEmail || '').toLowerCase() !== meEmail
             ? isGlobal
               ? 'Delete this member’s message from the community chat? Everyone will see "This message was deleted".'
               : 'Delete this attendee’s message from the community chat? Everyone will see "This message was deleted".'

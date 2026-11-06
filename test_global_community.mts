@@ -214,5 +214,15 @@ check("realtime: subscribeToCommunity exists for per-room pings",
 check("realtime: broadcast payload is id-only",
   realtime.includes("const payload = { id };"));
 
+// --- Regression (2026-11-06): names-only community rows crashed the
+// room render ("Cannot read properties of undefined (reading
+// 'toLowerCase')") because the component compared senderEmail
+// unguarded while the server strips other members' senderEmail.
+// Every comparison must stay null-safe.
+check("chat: no unguarded senderEmail.toLowerCase() in CommunityChat (community rows are names-only)",
+  !/[A-Za-z]\.senderEmail\.toLowerCase\(\)/.test(chat));
+check("chat: own-message comparisons tolerate a stripped senderEmail",
+  chat.includes("(m.senderEmail || '').toLowerCase()"));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
