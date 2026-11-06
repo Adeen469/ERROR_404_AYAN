@@ -1,4 +1,4 @@
-// Loci — the Locora assistant (chatbot).
+// Loco — the Locora assistant (chatbot).
 //
 // POST /api/chatbot { message: string, history?: { role, text }[] }
 //   -> { reply: string, provider: "gemini" | "groq" | "none" }
@@ -262,7 +262,7 @@ async function fetchJson(url: string, init?: any): Promise<{ ok: boolean; status
   return fetchJsonImpl(fetch, url, init);
 }
 
-// ---- Loci: provider + prompt logic (exported for tests) ----
+// ---- Loco: provider + prompt logic (exported for tests) ----
 
 export interface ChatTurn { role: "user" | "assistant"; text: string; }
 
@@ -280,7 +280,7 @@ const RATE_LIMIT_PER_HOUR = 30;
 const FALLBACK_REPLY = "I'm having trouble right now — please try again in a moment.";
 const NOT_SETUP_REPLY = "The Locora assistant isn't set up yet — please check back soon.";
 
-const SYSTEM_PROMPT = `You are Loci, the friendly assistant for Locora — a hyperlocal platform where neighbours discover and join local events: workshops, hackathons, live music, food gatherings, fitness, art and volunteering.
+const SYSTEM_PROMPT = `You are Loco, the friendly assistant for Locora — a hyperlocal platform where neighbours discover and join local events: workshops, hackathons, live music, food gatherings, fitness, art and volunteering.
 
 What you know about Locora:
 - Discover: browse Discover and filter by category, location and date. Sign in with Google (or email) to join events.
@@ -391,10 +391,10 @@ export function buildAssistantPrompt(message: string, history: ChatTurn[], event
   const parts: string[] = [SYSTEM_PROMPT];
   if (eventsContext) parts.push(eventsContext);
   if (history.length) {
-    const convo = history.map((h) => `${h.role === "user" ? "User" : "Loci"}: ${h.text}`).join("\n");
+    const convo = history.map((h) => `${h.role === "user" ? "User" : "Loco"}: ${h.text}`).join("\n");
     parts.push(`Conversation so far:\n${convo}`);
   }
-  parts.push(`User: ${message}\nLoci:`);
+  parts.push(`User: ${message}\nLoco:`);
   return parts.join("\n\n");
 }
 

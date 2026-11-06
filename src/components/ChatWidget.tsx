@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { MessageCircle, Send, X } from 'lucide-react';
 import { useLocation } from 'react-router-dom';
 
-// Loci — the Locora assistant, floating on every page except the auth
+// Loco — the Locora assistant, floating on every page except the auth
 // pages. Lazy-loaded from App.tsx so it never bloats first paint.
 // Chats stay on this device only (localStorage); nothing about the
 // signed-in user is ever sent — just the typed message + recent chat
@@ -96,7 +96,7 @@ export function ChatWidget() {
       {/* Floating bubble */}
       <button
         type="button"
-        aria-label={open ? 'Close chat with Loci' : 'Chat with Loci, the Locora assistant'}
+        aria-label={open ? 'Close chat with Loco' : 'Chat with Loco, the Locora assistant'}
         onClick={() => setOpen((v) => !v)}
         className="fixed bottom-5 right-5 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-[#1E3F35] text-white shadow-lg shadow-black/20 transition hover:bg-[#163028] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1E3F35]"
       >
@@ -107,7 +107,7 @@ export function ChatWidget() {
       {open && (
         <div
           role="dialog"
-          aria-label="Chat with Loci"
+          aria-label="Chat with Loco"
           className="fixed bottom-24 right-5 z-50 flex h-[560px] w-[380px] max-w-[calc(100vw-2.5rem)] flex-col overflow-hidden rounded-2xl border border-[#E7E3DB] bg-white shadow-2xl max-sm:inset-x-3 max-sm:bottom-3 max-sm:right-3 max-sm:h-[72vh] max-sm:w-auto"
         >
           {/* Header */}
@@ -116,7 +116,7 @@ export function ChatWidget() {
               L
             </div>
             <div className="min-w-0 flex-1">
-              <p className="font-editorial text-base leading-tight text-[#1E2320]">Loci</p>
+              <p className="font-editorial text-base leading-tight text-[#1E2320]">Loco</p>
               <p className="flex items-center gap-1.5 text-xs text-[#5F635D]">
                 <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />
                 Locora assistant · Online
@@ -136,7 +136,7 @@ export function ChatWidget() {
           <div ref={listRef} className="flex-1 space-y-2 overflow-y-auto bg-[#FAF8F5] p-3">
             {messages.length === 0 && (
               <div className="rounded-2xl border border-[#E7E3DB] bg-white p-4">
-                <p className="font-editorial text-base text-[#1E2320]">Hi, I&apos;m Loci 👋</p>
+                <p className="font-editorial text-base text-[#1E2320]">Hi, I&apos;m Loco 👋</p>
                 <p className="mt-1 text-sm leading-relaxed text-[#5F635D]">
                   Ask me anything about Locora — finding events, creating one, teams, refunds, or your bookings.
                 </p>
@@ -169,7 +169,7 @@ export function ChatWidget() {
             ))}
             {sending && (
               <div className="flex justify-start">
-                <div className="flex items-center gap-1 rounded-2xl rounded-bl-sm border border-[#E7E3DB] bg-white px-3 py-2.5" aria-label="Loci is typing">
+                <div className="flex items-center gap-1 rounded-2xl rounded-bl-sm border border-[#E7E3DB] bg-white px-3 py-2.5" aria-label="Loco is typing">
                   <span className="h-2 w-2 animate-bounce rounded-full bg-[#5F635D]" />
                   <span className="h-2 w-2 animate-bounce rounded-full bg-[#5F635D] [animation-delay:150ms]" />
                   <span className="h-2 w-2 animate-bounce rounded-full bg-[#5F635D] [animation-delay:300ms]" />
@@ -192,7 +192,7 @@ export function ChatWidget() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="Ask about Locora…"
-              aria-label="Message Loci"
+              aria-label="Message Loco"
               maxLength={2000}
               disabled={sending}
               className="min-w-0 flex-1 rounded-full border border-[#E7E3DB] bg-[#FAF8F5] px-4 py-2.5 text-sm text-[#1E2320] placeholder:text-[#5F635D] focus:border-[#1E3F35] focus:outline-none disabled:opacity-60"
