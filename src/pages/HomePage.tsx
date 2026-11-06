@@ -97,15 +97,15 @@ export function HomePage() {
   };
 
   return (
-    <div className="space-y-16 sm:space-y-24">
+    <div className="space-y-14 sm:space-y-20 pb-2">
       {/* Hero Section */}
-      <section className="relative pt-6 sm:pt-10">
+      <section className="relative pt-8 sm:pt-12">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-center">
             {/* Left Column: Proposition & Search */}
             <div className="lg:col-span-7 space-y-6">
               <div className="space-y-4">
-                <span className="text-xs font-semibold text-[#1E3F35] tracking-wider uppercase">
+                <span className="inline-flex items-center gap-2 rounded-full bg-white border border-[#E5E1D8] px-3 py-1 text-xs font-semibold text-[#1E3F35] tracking-wider uppercase shadow-xs">
                   Hyperlocal Community Platform
                 </span>
                 <h1 className="font-editorial text-4xl sm:text-6xl lg:text-7xl font-bold tracking-tight text-[#1E2320] leading-[1.08] text-balance">
@@ -121,7 +121,7 @@ export function HomePage() {
               {/* Instant Search Form styled like user screenshot */}
               <form
                 onSubmit={handleHeroSearch}
-                className="bg-white p-2 rounded-xl border border-[#E2DFD8] shadow-sm space-y-2 sm:space-y-0 sm:flex sm:items-center sm:gap-2 max-w-xl"
+                className="bg-white p-2 rounded-2xl border border-[#E2DFD8] shadow-[0_2px_20px_rgba(30,35,32,0.07)] space-y-2 sm:space-y-0 sm:flex sm:items-center sm:gap-2 max-w-xl"
               >
                 {/* Search Text */}
                 <div className="relative flex-1">
@@ -136,7 +136,7 @@ export function HomePage() {
                 </div>
 
                 {/* City Input & Detect Location Button */}
-                <div className="flex items-center gap-1.5 px-3 py-2 bg-[#FAF8F5] rounded-lg border border-[#E2DFD8] shrink-0">
+                <div className="flex items-center gap-1.5 px-3 py-2 bg-[#FAF8F5] rounded-xl border border-[#E2DFD8] shrink-0">
                   <MapPin className="w-3.5 h-3.5 text-[#5F635D] shrink-0" />
                   <input
                     type="text"
@@ -160,7 +160,7 @@ export function HomePage() {
                 {/* Search CTA */}
                 <button
                   type="submit"
-                  className="w-full sm:w-auto px-6 py-2.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shadow-xs cursor-pointer"
+                  className="w-full sm:w-auto px-6 py-2.5 bg-[#1E3F35] hover:bg-[#163028] text-white text-xs font-semibold rounded-xl transition-colors whitespace-nowrap shadow-xs cursor-pointer"
                 >
                   Find Events
                 </button>
@@ -183,7 +183,7 @@ export function HomePage() {
 
             {/* Right Column: High-Impact Visual Asset */}
             <div className="lg:col-span-5 relative">
-              <div className="relative rounded-2xl overflow-hidden shadow-xl aspect-[16/10] bg-slate-100 border border-slate-200/80">
+              <div className="relative rounded-[1.5rem] overflow-hidden shadow-[0_16px_40px_rgba(30,35,32,0.18)] ring-1 ring-black/5 aspect-[16/10] bg-slate-100">
                 <img
                   src={heroGatheringImg}
                   alt="Vibrant neighborhood gathering under warm evening string lights"
@@ -218,8 +218,9 @@ export function HomePage() {
 
       {/* Featured Marquee Section */}
       <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-end justify-between mb-8">
-          <div>
+        <div className="flex items-end justify-between mb-6 sm:mb-8">
+          <div className="space-y-1.5">
+            <p className="text-xs font-semibold tracking-wider uppercase text-[#C25E00]">Handpicked</p>
             <h2 className="font-editorial text-2xl sm:text-3xl font-bold tracking-tight text-[#1E2320]">
               Featured Gatherings
             </h2>
@@ -249,7 +250,9 @@ export function HomePage() {
 
       {/* SmartMatch Feature Showcase Callout */}
       <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="bg-[#1E3F35] rounded-3xl p-8 sm:p-12 text-white shadow-md relative overflow-hidden">
+        <div className="bg-[#1E3F35] rounded-3xl p-8 sm:p-12 text-white shadow-md relative overflow-hidden ring-1 ring-white/10">
+          <div aria-hidden="true" className="absolute -top-20 -right-20 w-72 h-72 rounded-full bg-white/10 blur-2xl" />
+          <div aria-hidden="true" className="absolute -bottom-24 -left-10 w-64 h-64 rounded-full bg-[#C25E00]/20 blur-2xl" />
           <div className="relative z-10 max-w-2xl space-y-4">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/15 backdrop-blur-md text-xs font-medium text-[#D0E2D9]">
               <Sparkles className="w-3.5 h-3.5" />
@@ -276,7 +279,8 @@ export function HomePage() {
 
       {/* Browse by Category Section */}
       <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="mb-8">
+        <div className="mb-6 sm:mb-8 space-y-1.5">
+          <p className="text-xs font-semibold tracking-wider uppercase text-[#C25E00]">Categories</p>
           <h2 className="font-editorial text-2xl sm:text-3xl font-bold tracking-tight text-[#1E2320]">
             Browse by Interest
           </h2>
@@ -290,12 +294,12 @@ export function HomePage() {
             <Link
               key={category}
               to={`/discover?category=${encodeURIComponent(category)}`}
-              className="p-5 bg-white rounded-xl border border-[#E5E1D8] hover:border-[#1E3F35] hover:shadow-sm transition-all group flex flex-col justify-between"
+              className="p-5 min-h-[104px] bg-white rounded-2xl border border-[#E5E1D8] hover:border-[#1E3F35] hover:shadow-md hover:-translate-y-0.5 transition-all group flex flex-col justify-between"
             >
               <span className="text-sm font-semibold text-[#1E2320] group-hover:text-[#1E3F35] transition-colors">
                 {category}
               </span>
-              <span className="text-xs text-[#8C887E] mt-4 flex items-center gap-1">
+              <span className="text-xs font-medium text-[#8C887E] group-hover:text-[#1E3F35] mt-6 flex items-center gap-1 transition-colors">
                 <span>View listings</span>
                 <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" />
               </span>
@@ -306,8 +310,9 @@ export function HomePage() {
 
       {/* Upcoming Events Grid */}
       <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-end justify-between mb-8">
-          <div>
+        <div className="flex items-end justify-between mb-6 sm:mb-8">
+          <div className="space-y-1.5">
+            <p className="text-xs font-semibold tracking-wider uppercase text-[#C25E00]">Coming up</p>
             <h2 className="font-editorial text-2xl sm:text-3xl font-bold tracking-tight text-[#1E2320]">
               Upcoming in Your City
             </h2>
@@ -336,8 +341,10 @@ export function HomePage() {
 
       {/* Organizer Call to Action */}
       <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="bg-[#1E3F35] rounded-3xl p-8 sm:p-12 text-white flex flex-col md:flex-row items-center justify-between gap-8">
-          <div className="space-y-3 max-w-xl">
+        <div className="bg-[#1E3F35] rounded-3xl p-8 sm:p-12 text-white flex flex-col md:flex-row items-center justify-between gap-8 relative overflow-hidden ring-1 ring-white/10">
+          <div aria-hidden="true" className="absolute -top-16 -left-16 w-56 h-56 rounded-full bg-white/10 blur-2xl" />
+          <div aria-hidden="true" className="absolute -bottom-20 -right-10 w-56 h-56 rounded-full bg-[#C25E00]/20 blur-2xl" />
+          <div className="space-y-3 max-w-xl relative z-10">
             <h3 className="font-editorial text-2xl sm:text-3xl font-bold tracking-tight">
               Organizing an event or workshop?
             </h3>
@@ -345,7 +352,7 @@ export function HomePage() {
               Locora gives local community leaders, non-profits, and indie organizers tools to publish listings, manage attendee RSVPs, and cultivate real neighborhood engagement.
             </p>
           </div>
-          <div className="flex flex-col sm:flex-row gap-3 shrink-0 w-full md:w-auto">
+          <div className="flex flex-col sm:flex-row gap-3 shrink-0 w-full md:w-auto relative z-10">
             <Link
               to="/organizer/events/new"
               className="text-center px-5 py-2.5 rounded-lg bg-white text-[#1E3F35] hover:bg-[#F2EFE9] text-xs font-semibold transition-colors shadow-xs"
