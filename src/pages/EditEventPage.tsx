@@ -46,6 +46,9 @@ export function EditEventPage() {
   const [address, setAddress] = useState('');
   // Optional exact map link (see CreateEventPage). Empty clears it.
   const [mapUrl, setMapUrl] = useState('');
+  // Optional community links (see CreateEventPage). Empty clears each.
+  const [whatsappGroupUrl, setWhatsappGroupUrl] = useState('');
+  const [communityUrl, setCommunityUrl] = useState('');
 
   const [price, setPrice] = useState('0');
   // Attendee details gate (see CreateEventPage): on unless the
@@ -98,6 +101,8 @@ export function EditEventPage() {
           setVenueName(data.venueName);
           setAddress(data.address);
           setMapUrl(data.mapUrl || '');
+          setWhatsappGroupUrl(data.whatsappGroupUrl || '');
+          setCommunityUrl(data.communityUrl || '');
           setPrice(String(data.price));
           setRequireAttendeeDetails(data.requireAttendeeDetails ?? true);
           // Team participation: older events and non-hackathons carry
@@ -145,6 +150,20 @@ export function EditEventPage() {
         }
       } catch {
         errs.mapUrl = 'Map link must be a valid link.';
+      }
+    }
+    for (const [key, val] of [['whatsappGroupUrl', whatsappGroupUrl], ['communityUrl', communityUrl]] as const) {
+      if (val.trim()) {
+        try {
+          const u = new URL(val.trim());
+          if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+            errs[key] = 'Link must start with http:// or https://.';
+          } else if (val.trim().length > 500) {
+            errs[key] = 'Link is too long.';
+          }
+        } catch {
+          errs[key] = 'Link must be a valid link.';
+        }
       }
     }
 
@@ -256,6 +275,10 @@ export function EditEventPage() {
         // stores it as-is; the details page falls back to a Maps
         // search whenever it is empty).
         mapUrl: mapUrl.trim(),
+        // Same clearing rule as the map link: empty string removes a
+        // previously saved community link.
+        whatsappGroupUrl: whatsappGroupUrl.trim(),
+        communityUrl: communityUrl.trim(),
         // Location rule: the neighborhood is the city when a state is
         // selected, otherwise none (state/city are carried from the
         // stored event, since the edit form has no location picker).
@@ -462,6 +485,43 @@ export function EditEventPage() {
             </p>
             {errors.mapUrl && (
               <p className="text-[11px] text-rose-600 mt-1">{errors.mapUrl}</p>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-[#1E2320] mb-1.5">
+              Community Links
+            </label>
+            <div className="space-y-2">
+              <input
+                type="url"
+                value={whatsappGroupUrl}
+                onChange={(e) => setWhatsappGroupUrl(e.target.value)}
+                placeholder="WhatsApp group link, e.g. https://chat.whatsapp.com/…"
+                className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] ${
+                  errors.whatsappGroupUrl ? 'border-rose-500' : 'border-[#E2DFD8]'
+                }`}
+              />
+              <input
+                type="url"
+                value={communityUrl}
+                onChange={(e) => setCommunityUrl(e.target.value)}
+                placeholder="Community link, e.g. https://…"
+                className={`w-full text-xs bg-white border rounded-lg p-3 text-[#1E2320] focus:border-[#1E3F35] ${
+                  errors.communityUrl ? 'border-rose-500' : 'border-[#E2DFD8]'
+                }`}
+              />
+            </div>
+            <p className="text-[11px] text-[#5F635D] mt-1">
+              Optional — these links stay hidden until an attendee registers
+              for your event; only registered attendees can see and open them.
+              Clear a field to remove its link.
+            </p>
+            {errors.whatsappGroupUrl && (
+              <p className="text-[11px] text-rose-600 mt-1">{errors.whatsappGroupUrl}</p>
+            )}
+            {errors.communityUrl && (
+              <p className="text-[11px] text-rose-600 mt-1">{errors.communityUrl}</p>
             )}
           </div>
 

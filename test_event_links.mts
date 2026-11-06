@@ -93,6 +93,21 @@ check("safeLinkUrl: http rejected", safeLinkUrl("http://chat.whatsapp.com/AbC123
 check("safeLinkUrl: javascript: rejected", safeLinkUrl("javascript:alert(1)") === null);
 check("safeLinkUrl: empty -> null", safeLinkUrl("") === null && safeLinkUrl(undefined) === null);
 
+// --- edit page: same section, prefilled, clearable ---
+const editPage = readFileSync("src/pages/EditEventPage.tsx", "utf8");
+check("edit page: Community Links section with both inputs",
+  editPage.includes("Community Links") &&
+  editPage.includes("WhatsApp group link, e.g. https://chat.whatsapp.com/") &&
+  editPage.includes("Community link, e.g. https://"));
+check("edit page: fields prefilled from the stored event",
+  editPage.includes("setWhatsappGroupUrl(data.whatsappGroupUrl || '')") &&
+  editPage.includes("setCommunityUrl(data.communityUrl || '')"));
+check("edit page: links sent in the update payload (empty clears)",
+  editPage.includes("whatsappGroupUrl: whatsappGroupUrl.trim(),") &&
+  editPage.includes("communityUrl: communityUrl.trim(),"));
+check("edit page: links validated before submit",
+  editPage.includes("errs[key] = 'Link must start with http:// or https://.'"));
+
 // --- public surfaces never reference the links ---
 for (const f of ["src/components/events/EventCard.tsx", "src/pages/DiscoverPage.tsx", "src/pages/HomePage.tsx"]) {
   const src = readFileSync(f, "utf8");
