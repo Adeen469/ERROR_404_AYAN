@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { PlusCircle, Edit, Users, Trash2, Eye, EyeOff, ArrowLeft, Clock } from 'lucide-react';
+import { PlusCircle, Edit, Users, Trash2, Eye, EyeOff, ArrowLeft, Clock, Wallet } from 'lucide-react';
 import { EventItem } from '../types';
 import { eventsService, isEventOwner, canManageEvent } from '../services/events-service';
 import { registrationsService } from '../services/registrations-service';
@@ -21,6 +21,12 @@ export function OrganizerEventsPage() {
   const [deleting, setDeleting] = useState(false);
   // Pending Razorpay payments per event (shared table only).
   const [pendingCounts, setPendingCounts] = useState<Record<string, number>>({});
+  // Payouts (assisted manual settlement): totals across this
+  // organizer's events + the payout-details form state.
+  const [payoutTotals, setPayoutTotals] = useState<{ collected: number; refunds: number } | null>(null);
+  const [payoutForm, setPayoutForm] = useState({ holderName: '', upiId: '', accountNumber: '', ifsc: '' });
+  const [editingPayout, setEditingPayout] = useState(false);
+  const [savingPayout, setSavingPayout] = useState(false);
 
   // Ownership for this list: an organizer sees only their own events;
   // admins see everything (they may delete and operate events, but not
@@ -104,6 +110,65 @@ export function OrganizerEventsPage() {
     }
   };
 
+  // Payout totals: collected = confirmed Razorpay registrations,
+  // refunds = amounts already returned on cancelled ones, payable =
+  // collected - refunds. One event's list failing must not blank
+  // the whole card, so each fetch is guarded individually.
+  useEffect(() => {
+    if (!events.length) { setPayoutTotals({ collected: 0, refunds: 0 }); return; }
+    let cancelled = false;
+    (async () => {
+      let collected = 0;
+      let refunds = 0;
+      await Promise.all(events.map(async (e) => {
+        try {
+          const regs = await registrationsService.getEventAttendees(e.id);
+          for (const r of regs || []) {
+            if (r.status === 'confirmed' && r.paymentMethod === 'razorpay') collected += r.amountPaise || 0;
+            if (r.status === 'cancelled') refunds += r.refundAmountPaise || 0;
+          }
+        } catch { /* guarded per event */ }
+      }));
+      if (!cancelled) setPayoutTotals({ collected, refunds });
+    })();
+    return () => { cancelled = true; };
+  }, [events]);
+
+  const savedPayout = currentUser?.payoutDetails;
+  const fmtPaise = (p: number) => `₹${(p / 100).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+
+  const savePayoutDetails = async () => {
+    const holderName = payoutForm.holderName.trim();
+    const upiId = payoutForm.upiId.trim();
+    const accountNumber = payoutForm.accountNumber.replace(/\s/g, '');
+    const ifsc = payoutForm.ifsc.trim().toUpperCase();
+    if (!holderName) {
+      toast({ title: 'Account holder name required', description: 'Enter the name on the bank account or UPI ID that should receive your payout.' });
+      return;
+    }
+    if (!upiId && !(accountNumber && ifsc)) {
+      toast({ title: 'Payout destination missing', description: 'Add a UPI ID, or a bank account number together with its IFSC.' });
+      return;
+    }
+    setSavingPayout(true);
+    try {
+      await authService.updateProfile({
+        payoutDetails: {
+          holderName,
+          ...(upiId ? { upiId } : {}),
+          ...(accountNumber ? { accountNumber } : {}),
+          ...(ifsc ? { ifsc } : {}),
+        },
+      });
+      toast({ title: 'Payout details saved', description: 'Your ticket earnings will be settled to these details after your events end.' });
+      setEditingPayout(false);
+    } catch {
+      toast({ title: 'Could not save payout details', description: 'Please check your connection and try again.' });
+    } finally {
+      setSavingPayout(false);
+    }
+  };
+
   const filtered = statusFilter === 'all' ? events : events.filter((e) => e.status === statusFilter);
 
   return (
@@ -131,6 +196,124 @@ export function OrganizerEventsPage() {
           <PlusCircle className="w-4 h-4" />
           <span>New Event</span>
         </Link>
+      </div>
+
+      {/* Payouts — assisted manual settlement. Ticket money is
+          collected into Locora's Razorpay account; the platform
+          owner settles each organizer's balance to the details
+          saved here after the event, with refunds deducted. */}
+      <div className="bg-white border border-[#E7E3DB] rounded-2xl p-5 space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="max-w-xl">
+            <h2 className="font-editorial text-lg font-bold text-[#1E2320] flex items-center gap-2">
+              <Wallet className="w-5 h-5 text-[#1E3F35]" />
+              Payouts
+            </h2>
+            <p className="text-xs text-[#5F635D] mt-1">
+              Ticket money is collected into Locora&apos;s Razorpay account. After your event ends, your
+              earnings are settled to the account below — refunds already given are deducted first.
+            </p>
+          </div>
+          {payoutTotals && (
+            <div className="flex gap-5 text-right">
+              <div>
+                <div className="text-[11px] uppercase tracking-wide text-[#5F635D]">Collected</div>
+                <div className="text-sm font-bold text-[#1E2320]">{fmtPaise(payoutTotals.collected)}</div>
+              </div>
+              <div>
+                <div className="text-[11px] uppercase tracking-wide text-[#5F635D]">Refunds</div>
+                <div className="text-sm font-bold text-[#1E2320]">{fmtPaise(payoutTotals.refunds)}</div>
+              </div>
+              <div>
+                <div className="text-[11px] uppercase tracking-wide text-[#5F635D]">Payable to you</div>
+                <div className="text-sm font-bold text-[#1E3F35]">{fmtPaise(payoutTotals.collected - payoutTotals.refunds)}</div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {savedPayout && !editingPayout ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 bg-[#EAF1ED] rounded-xl px-4 py-3">
+            <div className="text-sm text-[#1E2320]">
+              <span className="font-semibold">{savedPayout.holderName}</span>
+              {savedPayout.upiId && <span className="text-[#5F635D]"> · UPI: {savedPayout.upiId}</span>}
+              {savedPayout.accountNumber && (
+                <span className="text-[#5F635D]">
+                  {' '}· Account ••••{savedPayout.accountNumber.slice(-4)}
+                  {savedPayout.ifsc ? ` · IFSC ${savedPayout.ifsc}` : ''}
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setPayoutForm({
+                  holderName: savedPayout.holderName || '',
+                  upiId: savedPayout.upiId || '',
+                  accountNumber: savedPayout.accountNumber || '',
+                  ifsc: savedPayout.ifsc || '',
+                });
+                setEditingPayout(true);
+              }}
+              className="px-3 py-1.5 text-xs font-semibold text-[#1E3F35] bg-white border border-[#C9D6CF] rounded-lg hover:bg-[#F4F8F5] transition-colors"
+            >
+              Edit
+            </button>
+          </div>
+        ) : (
+          <div className="grid sm:grid-cols-2 gap-3">
+            <input
+              type="text"
+              value={payoutForm.holderName}
+              onChange={(e) => setPayoutForm((f) => ({ ...f, holderName: e.target.value }))}
+              placeholder="Account holder name"
+              className="w-full px-3 py-2 text-sm border border-[#E2DFD8] rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-[#1E3F35]/30"
+            />
+            <input
+              type="text"
+              value={payoutForm.upiId}
+              onChange={(e) => setPayoutForm((f) => ({ ...f, upiId: e.target.value }))}
+              placeholder="UPI ID (e.g. yourname@okhdfcbank)"
+              className="w-full px-3 py-2 text-sm border border-[#E2DFD8] rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-[#1E3F35]/30"
+            />
+            <input
+              type="text"
+              value={payoutForm.accountNumber}
+              onChange={(e) => setPayoutForm((f) => ({ ...f, accountNumber: e.target.value }))}
+              placeholder="Bank account number (optional if UPI given)"
+              className="w-full px-3 py-2 text-sm border border-[#E2DFD8] rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-[#1E3F35]/30"
+            />
+            <input
+              type="text"
+              value={payoutForm.ifsc}
+              onChange={(e) => setPayoutForm((f) => ({ ...f, ifsc: e.target.value }))}
+              placeholder="IFSC (with bank account)"
+              className="w-full px-3 py-2 text-sm border border-[#E2DFD8] rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-[#1E3F35]/30"
+            />
+            <div className="sm:col-span-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={savePayoutDetails}
+                disabled={savingPayout}
+                className="px-4 py-2 text-xs font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors disabled:opacity-60"
+              >
+                {savingPayout ? 'Saving…' : 'Save payout details'}
+              </button>
+              {savedPayout && (
+                <button
+                  type="button"
+                  onClick={() => setEditingPayout(false)}
+                  className="px-4 py-2 text-xs font-medium text-[#5F635D] bg-white border border-[#E2DFD8] rounded-lg hover:text-[#1E2320] transition-colors"
+                >
+                  Cancel
+                </button>
+              )}
+              <span className="text-[11px] text-[#5F635D]">
+                Visible only to you and the Locora team for settlement — never shown publicly.
+              </span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Status Filter Tabs */}

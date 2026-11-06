@@ -579,7 +579,35 @@ async function sendResetMail(to: string, rawToken: string): Promise<boolean> {
   } catch { return false; }
 }
 
-const PROFILE_FIELDS = ["name", "bio", "phone", "country", "state", "city", "interests", "avatar"];
+const PROFILE_FIELDS = ["name", "bio", "phone", "country", "state", "city", "interests", "avatar", "payoutDetails"];
+
+// Payout details (assisted manual settlement — ticket money lands in
+// the platform Razorpay account and the owner settles with each
+// organizer by bank/UPI transfer): normalized before storage and
+// before the owner echo. Returns undefined when nothing usable was
+// provided, so garbage input never plants a half-empty object.
+function sanitizePayoutDetails(raw: any): any {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const clean = (v: any, cap: number) => (typeof v === "string" ? v.trim().slice(0, cap) : "");
+  const out: any = { holderName: clean(raw.holderName, 100) };
+  const upiId = clean(raw.upiId, 100);
+  if (upiId) out.upiId = upiId;
+  const accountNumber = clean(raw.accountNumber, 34).replace(/\s/g, "");
+  if (accountNumber) out.accountNumber = accountNumber;
+  const ifsc = clean(raw.ifsc, 11).toUpperCase();
+  if (ifsc) out.ifsc = ifsc;
+  if (!out.holderName) return undefined;
+  return out;
+}
+
+// Owner-only echo: /me responses attach the stored payout details so
+// the organizer can see and edit what they saved. publicProfile
+// never carries them, so no public/other-user surface can leak them.
+function withOwnerPayout(pub: any, profile: any): any {
+  const pd = sanitizePayoutDetails(profile?.payoutDetails);
+  if (pd) pub.payoutDetails = pd;
+  return pub;
+}
 
 function publicProfile(row: any, sessionEmail: string, sessionRole: string): any {
   const d = row?.data || {};
@@ -991,7 +1019,7 @@ async function handleMe(req: any, res: any): Promise<void> {
 
     if (req.method === "GET") {
       const row = await loadUserByEmail(me);
-      sendJson(res, 200, publicProfile(row, me, session.role));
+      sendJson(res, 200, withOwnerPayout(publicProfile(row, me, session.role), row?.data?.profile));
       return;
     }
 
@@ -1034,6 +1062,12 @@ async function handleMe(req: any, res: any): Promise<void> {
           .slice(0, 20);
       }
     }
+    // Payout details: store only the normalized object; an update
+    // with nothing usable is dropped rather than stored half-empty.
+    if (updates.payoutDetails !== undefined) {
+      const pd = sanitizePayoutDetails(updates.payoutDetails);
+      if (pd) updates.payoutDetails = pd; else delete updates.payoutDetails;
+    }
     const row = await loadUserByEmail(me);
     if (!row) {
       // Google user (or a user created before locora_users existed):
@@ -1043,7 +1077,7 @@ async function handleMe(req: any, res: any): Promise<void> {
         method: "POST", headers: supabaseHeaders(), body: JSON.stringify({ id: `usr-${Date.now()}`, data }),
       });
       if (!created.ok) { sendJson(res, 500, { message: "Could not save profile" }); return; }
-      sendJson(res, 200, publicProfile({ id: created.body?.[0]?.id, data }, me, session.role));
+      sendJson(res, 200, withOwnerPayout(publicProfile({ id: created.body?.[0]?.id, data }, me, session.role), data.profile));
       return;
     }
     const d = row.data || {};
@@ -1056,7 +1090,7 @@ async function handleMe(req: any, res: any): Promise<void> {
       method: "PATCH", headers: supabaseHeaders(), body: JSON.stringify({ data: merged }),
     });
     if (!up.ok) { sendJson(res, 500, { message: "Could not save profile" }); return; }
-    sendJson(res, 200, publicProfile({ id: row.id, data: merged }, me, session.role));
+    sendJson(res, 200, withOwnerPayout(publicProfile({ id: row.id, data: merged }, me, session.role), merged.profile));
   } catch {
     sendJson(res, 500, { message: "Profile update failed" });
   }

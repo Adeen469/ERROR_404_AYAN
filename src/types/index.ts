@@ -201,10 +201,27 @@ export interface AttendeeRegistration {
   selections?: RegistrationSelections;
 }
 
+// Organizer payout details for assisted manual settlement: ticket
+// money is collected into the platform Razorpay account, and the
+// platform owner settles with the organizer by bank/UPI transfer to
+// these details after the event. Owner-only data: the server returns
+// it solely on the account owner's own /me responses, never in a
+// public profile.
+export interface PayoutDetails {
+  holderName: string;
+  upiId?: string;
+  accountNumber?: string;
+  ifsc?: string;
+}
+
 export interface UserProfile {
   id: string;
   name: string;
   email: string;
+  // Where the platform owner sends this organizer's ticket earnings
+  // (assisted manual settlement). Set from the organizer console;
+  // never displayed publicly.
+  payoutDetails?: PayoutDetails;
   // Mobile number, collected once via the attendee details gate before
   // the first registration for an event that requires details, then
   // reused (with a per-registration sharing confirmation). Never
