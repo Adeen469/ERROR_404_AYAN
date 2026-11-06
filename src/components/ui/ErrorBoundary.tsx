@@ -10,6 +10,40 @@ import { useLocation } from 'react-router-dom';
 // The boundary resets on every route change (keyed by pathname), so a
 // crash on one page does not poison navigation to every other page.
 
+// Stale-chunk recovery, shared with App's lazyPage loader: after a
+// redeploy, a still-open tab can request page chunks that no longer
+// exist (the server answers with the SPA fallback HTML and the
+// dynamic import fails). One guarded reload fetches the fresh shell
+// and chunk map; the sessionStorage flag guarantees at most one
+// automatic reload per tab session, so a genuinely broken build
+// still lands on the error card instead of looping forever.
+const CHUNK_RELOAD_KEY = 'locora-chunk-reload';
+
+export function isChunkLoadError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return /failed to fetch dynamically imported module|error loading dynamically imported module|importing a module script failed|chunkloaderror/i.test(msg);
+}
+
+export function reloadOnceForChunkError(err: unknown): boolean {
+  if (!isChunkLoadError(err)) return false;
+  try {
+    if (sessionStorage.getItem(CHUNK_RELOAD_KEY) === '1') return false;
+    sessionStorage.setItem(CHUNK_RELOAD_KEY, '1');
+  } catch {
+    return false;
+  }
+  window.location.reload();
+  return true;
+}
+
+export function clearChunkReloadGuard(): void {
+  try {
+    sessionStorage.removeItem(CHUNK_RELOAD_KEY);
+  } catch {
+    /* best-effort */
+  }
+}
+
 type Props = {
   children: React.ReactNode;
 };
@@ -27,6 +61,13 @@ class ErrorBoundary extends React.Component<Props, State> {
       hasError: true,
       message: err instanceof Error ? err.message : 'Unknown error',
     };
+  }
+
+  componentDidCatch(err: unknown) {
+    // A page chunk that vanished in a redeploy surfaces here during
+    // render — recover with the one-shot reload instead of stranding
+    // the user on this card (see reloadOnceForChunkError above).
+    reloadOnceForChunkError(err);
   }
 
   render() {

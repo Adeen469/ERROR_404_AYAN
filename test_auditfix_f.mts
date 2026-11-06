@@ -270,15 +270,34 @@ check("L10: server.ts left alone (still the GoogleGenAI dev server, no audit mar
   !read("server.ts").includes("L10 (audit"));
 
 // ================= Scope =================
-check("scope: deployed Vercel function count still 10 (new file is under api/_lib)",
+check("scope: deployed Vercel function count still 11 (10 + api/chatbot.ts)",
   (() => {
     // Same count rule as test_auditfix_b: api/**/*.ts minus _lib
     // minus .vercelignore entries.
     const ignored = new Set(read(".vercelignore").split("\n").map((s) => s.trim()).filter((s) => s && !s.startsWith("#")));
     const all = grepTree("api", /./);
     const deployed = all.filter((p) => !p.startsWith("api/_lib/") && !ignored.has(p));
-    return deployed.length === 10;
+    return deployed.length === 11;
   })());
+
+// --- Stale-chunk recovery + stale cover resolution (2026-11-06) ---
+const appTsx = read("src/App.tsx");
+const errorBoundaryTsx = read("src/components/ui/ErrorBoundary.tsx");
+const eventsServiceTs = read("src/services/events-service.ts");
+check("chunk recovery: page chunks load through the retrying lazyPage wrapper",
+  appTsx.includes("function lazyPage") &&
+  (appTsx.match(/lazyPage\(\(\) => import/g) || []).length >= 20 &&
+  !appTsx.includes("= lazy(() => import"));
+check("chunk recovery: boundary reloads at most once on a chunk-load error",
+  errorBoundaryTsx.includes("export function reloadOnceForChunkError") &&
+  errorBoundaryTsx.includes("locora-chunk-reload") &&
+  errorBoundaryTsx.includes("componentDidCatch") &&
+  appTsx.includes("reloadOnceForChunkError(err)"));
+check("covers: stale hashed /assets paths resolve to the bundled cover by stripped filename",
+  eventsServiceTs.includes("withMigratedCover") &&
+  eventsServiceTs.includes("replace(/-[A-Za-z0-9_-]{8,}") &&
+  eventsServiceTs.includes("withMigratedCover(e)") &&
+  eventsServiceTs.includes("withMigratedCover(fetched)"));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

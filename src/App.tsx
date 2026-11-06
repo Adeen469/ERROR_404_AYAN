@@ -1,7 +1,7 @@
 import React, { useEffect, lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, useLocation, Navigate } from 'react-router-dom';
 import { ToastProvider } from './components/ui/Toast';
-import { PageErrorBoundary } from './components/ui/ErrorBoundary';
+import { PageErrorBoundary, reloadOnceForChunkError, clearChunkReloadGuard } from './components/ui/ErrorBoundary';
 import { Navbar } from './components/layout/Navbar';
 import { Footer } from './components/layout/Footer';
 
@@ -9,29 +9,59 @@ import { Footer } from './components/layout/Footer';
 import { HomePage } from './pages/HomePage';
 import { DiscoverPage } from './pages/DiscoverPage';
 import { EventDetailsPage } from './pages/EventDetailsPage';
-const SmartMatchPage = lazy(() => import('./pages/SmartMatchPage').then((m) => ({ default: m.SmartMatchPage })));
-const DashboardPage = lazy(() => import('./pages/DashboardPage').then((m) => ({ default: m.DashboardPage })));
-const RegistrationsPage = lazy(() => import('./pages/RegistrationsPage').then((m) => ({ default: m.RegistrationsPage })));
-const SavedEventsPage = lazy(() => import('./pages/SavedEventsPage').then((m) => ({ default: m.SavedEventsPage })));
-const ProfilePage = lazy(() => import('./pages/ProfilePage').then((m) => ({ default: m.ProfilePage })));
-const MessagesPage = lazy(() => import('./pages/MessagesPage').then((m) => ({ default: m.MessagesPage })));
-const CommunityPage = lazy(() => import('./pages/CommunityPage').then((m) => ({ default: m.CommunityPage })));
-const OrganizerDashboardPage = lazy(() => import('./pages/OrganizerDashboardPage').then((m) => ({ default: m.OrganizerDashboardPage })));
-const OrganizerEventsPage = lazy(() => import('./pages/OrganizerEventsPage').then((m) => ({ default: m.OrganizerEventsPage })));
-const CreateEventPage = lazy(() => import('./pages/CreateEventPage').then((m) => ({ default: m.CreateEventPage })));
-const EditEventPage = lazy(() => import('./pages/EditEventPage').then((m) => ({ default: m.EditEventPage })));
-const AttendeesPage = lazy(() => import('./pages/AttendeesPage').then((m) => ({ default: m.AttendeesPage })));
-const OrganizerProfilePage = lazy(() => import('./pages/OrganizerProfilePage').then((m) => ({ default: m.OrganizerProfilePage })));
-const LoginPage = lazy(() => import('./pages/LoginPage').then((m) => ({ default: m.LoginPage })));
-const SignupPage = lazy(() => import('./pages/SignupPage').then((m) => ({ default: m.SignupPage })));
-const ForgotPasswordPage = lazy(() => import('./pages/ForgotPasswordPage').then((m) => ({ default: m.ForgotPasswordPage })));
-const ResetPasswordPage = lazy(() => import('./pages/ResetPasswordPage').then((m) => ({ default: m.ResetPasswordPage })));
-const VerifyEmailPage = lazy(() => import('./pages/VerifyEmailPage').then((m) => ({ default: m.VerifyEmailPage })));
-const LogoutPage = lazy(() => import('./pages/LogoutPage').then((m) => ({ default: m.LogoutPage })));
-const NotFoundPage = lazy(() => import('./pages/NotFoundPage').then((m) => ({ default: m.NotFoundPage })));
-const PrivacyPage = lazy(() => import('./pages/PrivacyPage').then((m) => ({ default: m.PrivacyPage })));
-const AdminPage = lazy(() => import('./pages/AdminPage').then((m) => ({ default: m.AdminPage })));
-const ChatWidget = lazy(() => import('./components/ChatWidget').then((m) => ({ default: m.ChatWidget })));
+
+// Lazy pages with stale-chunk recovery. Every page below is a
+// separate build chunk whose URL carries a content hash. When a new
+// deployment lands while a visitor's tab is open (several deploys a
+// day during active development), that tab's chunk map points at
+// files the new deployment no longer serves — the server answers
+// with the SPA fallback HTML, the dynamic import fails, and the
+// error boundary's "Reload page" card was the only way in. Recover
+// automatically instead: on a chunk-load failure, reload ONCE
+// (sessionStorage-guarded, so a genuinely broken build still ends
+// at the error card instead of looping) to pick up the fresh shell
+// and chunk map. A successful import clears the guard, so the next
+// deployment can recover the same way. The helpers live in
+// components/ui/ErrorBoundary.tsx, whose boundary applies the same
+// one-shot recovery to chunk errors thrown while rendering.
+function lazyPage<T extends React.ComponentType<any>>(
+  factory: () => Promise<{ default: T }>,
+) {
+  return lazy(async () => {
+    try {
+      const mod = await factory();
+      clearChunkReloadGuard();
+      return mod;
+    } catch (err) {
+      reloadOnceForChunkError(err);
+      throw err;
+    }
+  });
+}
+
+const SmartMatchPage = lazyPage(() => import('./pages/SmartMatchPage').then((m) => ({ default: m.SmartMatchPage })));
+const DashboardPage = lazyPage(() => import('./pages/DashboardPage').then((m) => ({ default: m.DashboardPage })));
+const RegistrationsPage = lazyPage(() => import('./pages/RegistrationsPage').then((m) => ({ default: m.RegistrationsPage })));
+const SavedEventsPage = lazyPage(() => import('./pages/SavedEventsPage').then((m) => ({ default: m.SavedEventsPage })));
+const ProfilePage = lazyPage(() => import('./pages/ProfilePage').then((m) => ({ default: m.ProfilePage })));
+const MessagesPage = lazyPage(() => import('./pages/MessagesPage').then((m) => ({ default: m.MessagesPage })));
+const CommunityPage = lazyPage(() => import('./pages/CommunityPage').then((m) => ({ default: m.CommunityPage })));
+const OrganizerDashboardPage = lazyPage(() => import('./pages/OrganizerDashboardPage').then((m) => ({ default: m.OrganizerDashboardPage })));
+const OrganizerEventsPage = lazyPage(() => import('./pages/OrganizerEventsPage').then((m) => ({ default: m.OrganizerEventsPage })));
+const CreateEventPage = lazyPage(() => import('./pages/CreateEventPage').then((m) => ({ default: m.CreateEventPage })));
+const EditEventPage = lazyPage(() => import('./pages/EditEventPage').then((m) => ({ default: m.EditEventPage })));
+const AttendeesPage = lazyPage(() => import('./pages/AttendeesPage').then((m) => ({ default: m.AttendeesPage })));
+const OrganizerProfilePage = lazyPage(() => import('./pages/OrganizerProfilePage').then((m) => ({ default: m.OrganizerProfilePage })));
+const LoginPage = lazyPage(() => import('./pages/LoginPage').then((m) => ({ default: m.LoginPage })));
+const SignupPage = lazyPage(() => import('./pages/SignupPage').then((m) => ({ default: m.SignupPage })));
+const ForgotPasswordPage = lazyPage(() => import('./pages/ForgotPasswordPage').then((m) => ({ default: m.ForgotPasswordPage })));
+const ResetPasswordPage = lazyPage(() => import('./pages/ResetPasswordPage').then((m) => ({ default: m.ResetPasswordPage })));
+const VerifyEmailPage = lazyPage(() => import('./pages/VerifyEmailPage').then((m) => ({ default: m.VerifyEmailPage })));
+const LogoutPage = lazyPage(() => import('./pages/LogoutPage').then((m) => ({ default: m.LogoutPage })));
+const NotFoundPage = lazyPage(() => import('./pages/NotFoundPage').then((m) => ({ default: m.NotFoundPage })));
+const PrivacyPage = lazyPage(() => import('./pages/PrivacyPage').then((m) => ({ default: m.PrivacyPage })));
+const AdminPage = lazyPage(() => import('./pages/AdminPage').then((m) => ({ default: m.AdminPage })));
+const ChatWidget = lazyPage(() => import('./components/ChatWidget').then((m) => ({ default: m.ChatWidget })));
 import { OrganizerGuard } from './components/OrganizerGuard';
 
 import { LandingPage } from './pages/LandingPage';

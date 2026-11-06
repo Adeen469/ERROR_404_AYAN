@@ -214,9 +214,34 @@ const BUNDLED_COVER_BY_FILENAME: Record<string, string> = {
 };
 
 function migrateCoverImage(coverImage: string | undefined): string | undefined {
-  if (!coverImage || !coverImage.startsWith('/src/assets/')) return coverImage;
+  if (!coverImage) return coverImage;
   const filename = coverImage.split('/').pop() || '';
-  return BUNDLED_COVER_BY_FILENAME[filename] || coverImage;
+  // Exact known filename (legacy '/src/assets/...' dev paths and any
+  // already-current reference): map straight to the bundled URL.
+  if (BUNDLED_COVER_BY_FILENAME[filename]) return BUNDLED_COVER_BY_FILENAME[filename];
+  // Stale PRODUCTION asset path: '/assets/<name>-<buildhash>.<ext>'.
+  // The hash is content-derived, so any rebuild that changes the
+  // image (e.g. the 2026-11-06 recompression) renames the file and
+  // the stored URL stops resolving — the server answers with the SPA
+  // fallback HTML, the <img> cannot decode it, and the card falls
+  // back to the category placeholder. Strip the hash and retry the
+  // lookup by the stable filename.
+  const stripped = filename.replace(/-[A-Za-z0-9_-]{8,}(\.[A-Za-z0-9]+)$/, '$1');
+  if (stripped !== filename && BUNDLED_COVER_BY_FILENAME[stripped]) {
+    return BUNDLED_COVER_BY_FILENAME[stripped];
+  }
+  return coverImage;
+}
+
+// One event with its cover run through migrateCoverImage. Applied to
+// API-fed events too (getEvents / getEventById): a cover stored in
+// Supabase by an older build keeps its stale asset path forever
+// unless the client resolves it at read time, like the localStorage
+// migration below does for locally saved events.
+function withMigratedCover<T extends { coverImage?: string }>(event: T): T {
+  if (!event || typeof event.coverImage !== 'string') return event;
+  const fixed = migrateCoverImage(event.coverImage);
+  return fixed && fixed !== event.coverImage ? { ...event, coverImage: fixed } : event;
 }
 
 function getStoredEvents(): EventItem[] {
@@ -296,9 +321,15 @@ export const eventsService = {
         // while it was down gets a chance to upload now (background).
         lastListFromLocal = false;
         void flushPending();
+        // Covers stored by older builds can carry stale bundled-asset
+        // paths (see migrateCoverImage) — resolve them at read time.
+        const migratedPage: PaginatedResponse<EventItem> = {
+          ...shared,
+          data: (shared.data || []).map((e) => withMigratedCover(e)),
+        };
         // Pending ops overlay the default first page only, flagged, so a
         // not-yet-synced event never vanishes from its creator's view.
-        return applyPendingToPage(shared, page, filters, getPendingOps(localStorage));
+        return applyPendingToPage(migratedPage, page, filters, getPendingOps(localStorage));
       } catch (err) {
         lastListFromLocal = true;
         console.warn('Backend API /events unavailable, falling back to local events store:', err);
@@ -436,10 +467,12 @@ export const eventsService = {
         // login, or the edit page's owner check would fail on the
         // cached copy.
         const viewer = authService.getCurrentUser()?.email?.trim().toLowerCase() || 'guest';
-        return await cachedFetch(
+        const fetched = await cachedFetch(
           `one:${viewer}:${id}`,
           () => apiClient.get<EventItem>('/events', { id }),
         );
+        // Same stale-cover resolution as the list (see getEvents).
+        return fetched ? withMigratedCover(fetched) : fetched;
       } catch (err) {
         console.warn('Backend API /events?id unavailable, falling back to local events store:', err);
         if (opts?.strict && (err as any)?.status !== 404) {
