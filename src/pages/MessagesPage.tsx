@@ -7,6 +7,7 @@ import {
   MessageCircle,
   Paperclip,
   Reply,
+  Search,
   Send,
   X,
 } from 'lucide-react';
@@ -36,6 +37,7 @@ import {
   type RealtimeFullEvent,
   type RealtimeMessage,
 } from '../services/realtime-service';
+import Avatar from '../components/ui/Avatar';
 
 function fmtTime(iso: string): string {
   if (!iso) return '';
@@ -210,6 +212,9 @@ export function MessagesPage() {
   const [loadError, setLoadError] = useState('');
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [mobileView, setMobileView] = useState<'list' | 'chat'>('list');
+  // Local list filter only (no refetch): matches the person, the
+  // event, or the last message snippet.
+  const [threadQuery, setThreadQuery] = useState('');
   const [draft, setDraft] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [sendError, setSendError] = useState('');
@@ -631,6 +636,18 @@ export function MessagesPage() {
       : [pendingThread, ...threads]
     : threads;
   const selected = allThreads.find((t) => t.key === selectedKey) || null;
+  const threadQueryNorm = threadQuery.trim().toLowerCase();
+  const visibleThreads = threadQueryNorm
+    ? allThreads.filter((t) => {
+        const last = t.messages.length > 0 ? snippetOf(t.messages[t.messages.length - 1]) : '';
+        return (
+          t.otherName.toLowerCase().includes(threadQueryNorm) ||
+          t.eventTitle.toLowerCase().includes(threadQueryNorm) ||
+          last.toLowerCase().includes(threadQueryNorm)
+        );
+      })
+    : allThreads;
+  const totalUnread = allThreads.reduce((n, t) => n + (t.unread || 0), 0);
 
   // Server messages plus in-flight ones for this thread, oldest
   // first. A pending bubble is dropped once its server copy shows up
@@ -1247,8 +1264,10 @@ export function MessagesPage() {
   if (!currentUser) {
     return (
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="max-w-md mx-auto bg-white rounded-2xl border border-[#E5E1D8] p-8 text-center space-y-3">
-          <MessageCircle className="w-10 h-10 mx-auto text-[#1E3F35]" />
+        <div className="max-w-md mx-auto bg-white rounded-2xl border border-[#E5E1D8] shadow-sm p-8 text-center space-y-3">
+          <div className="w-16 h-16 mx-auto rounded-full bg-[#F4F1EA] flex items-center justify-center">
+            <MessageCircle className="w-8 h-8 text-[#1E3F35]" />
+          </div>
           <h1 className="font-editorial text-xl font-bold text-[#1E2320]">Sign in to see your messages</h1>
           <p className="text-xs text-[#5F635D] leading-relaxed">
             Messages with event organizers live here once you are signed in.
@@ -1265,10 +1284,20 @@ export function MessagesPage() {
   }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      <div className="flex items-center gap-2 mb-4">
-        <MessageCircle className="w-5 h-5 text-[#1E3F35]" />
-        <h1 className="font-editorial text-2xl font-bold text-[#1E2320]">Messages</h1>
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
+      <div className="flex items-center gap-3 mb-5">
+        <div className="w-10 h-10 rounded-full bg-[#1E3F35] text-white flex items-center justify-center shrink-0">
+          <MessageCircle className="w-5 h-5" />
+        </div>
+        <div className="min-w-0">
+          <h1 className="font-editorial text-2xl font-bold text-[#1E2320] leading-tight">Messages</h1>
+          <p className="text-xs text-[#5F635D]">Chats with event organizers, all in one place.</p>
+        </div>
+        {totalUnread > 0 && (
+          <span className="ml-auto shrink-0 px-2.5 py-1 rounded-full bg-[#1E3F35] text-white text-[11px] font-bold">
+            {totalUnread > 99 ? '99+' : totalUnread} unread
+          </span>
+        )}
       </div>
 
       {loadError && (
@@ -1284,15 +1313,34 @@ export function MessagesPage() {
         </div>
       )}
 
-      <div className="flex gap-4 items-start">
+      <div className="flex items-stretch bg-white rounded-2xl border border-[#E5E1D8] shadow-sm overflow-hidden h-[calc(100dvh-11.5rem)] min-h-[540px]">
         {/* Thread list */}
         <div
-          className={`w-full md:w-1/3 bg-white rounded-2xl border border-[#E5E1D8] overflow-hidden shrink-0 ${
-            mobileView === 'chat' ? 'hidden md:block' : 'block'
+          className={`w-full md:w-[340px] lg:w-[360px] shrink-0 flex flex-col min-h-0 border-r border-[#E5E1D8] ${
+            mobileView === 'chat' ? 'hidden md:flex' : 'flex'
           }`}
         >
+          <div className="px-4 pt-4 pb-3 border-b border-[#EBE7DF] space-y-3 shrink-0">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-bold tracking-wider uppercase text-[#5F635D]">Conversations</p>
+              <span className="text-[11px] text-[#8C887E]">
+                {allThreads.length} {allThreads.length === 1 ? 'chat' : 'chats'}
+              </span>
+            </div>
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#8C887E]" />
+              <input
+                type="text"
+                value={threadQuery}
+                onChange={(e) => setThreadQuery(e.target.value)}
+                placeholder="Search people or events…"
+                aria-label="Search conversations"
+                className="w-full pl-9 pr-3 py-2 text-xs bg-[#FAF8F5] border border-[#E2DFD8] rounded-lg text-[#1E2320] placeholder:text-[#8C887E] focus:outline-hidden focus:border-[#1E3F35]"
+              />
+            </div>
+          </div>
           {loading ? (
-            <div className="p-4 space-y-3" aria-label="Loading conversations">
+            <div className="flex-1 overflow-y-auto p-4 space-y-3" aria-label="Loading conversations">
               {[0, 1, 2].map((i) => (
                 <div key={i} className="animate-pulse space-y-2">
                   <div className="h-3 w-2/3 bg-[#EBE7DF] rounded" />
@@ -1301,7 +1349,10 @@ export function MessagesPage() {
               ))}
             </div>
           ) : allThreads.length === 0 ? (
-            <div className="p-6 text-center space-y-2">
+            <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-3">
+              <div className="w-14 h-14 rounded-full bg-[#F4F1EA] flex items-center justify-center">
+                <MessageCircle className="w-6 h-6 text-[#1E3F35]" />
+              </div>
               <p className="text-xs font-semibold text-[#1E2320]">No messages yet</p>
               <p className="text-[11px] text-[#5F635D] leading-relaxed">
                 Open an event and tap “Message organizer” to start a conversation.
@@ -1313,32 +1364,65 @@ export function MessagesPage() {
                 Discover events
               </Link>
             </div>
+          ) : visibleThreads.length === 0 ? (
+            <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-2">
+              <p className="text-xs font-semibold text-[#1E2320]">
+                No conversations match “{threadQuery.trim()}”
+              </p>
+              <button
+                type="button"
+                onClick={() => setThreadQuery('')}
+                className="text-[11px] font-semibold text-[#1E3F35] hover:underline"
+              >
+                Clear search
+              </button>
+            </div>
           ) : (
-            <ul className="divide-y divide-[#EBE7DF]">
-              {allThreads.map((t) => (
+            <ul className="flex-1 overflow-y-auto divide-y divide-[#EBE7DF]">
+              {visibleThreads.map((t) => (
                 <li key={t.key}>
                   <button
                     type="button"
                     onClick={() => selectThread(t.key)}
-                    className={`w-full text-left px-4 py-3 hover:bg-[#FAF8F5] transition-colors ${
-                      t.key === selectedKey ? 'bg-[#F4F1EA]' : ''
+                    className={`w-full text-left px-4 py-3 flex gap-3 hover:bg-[#FAF8F5] transition-colors ${
+                      t.key === selectedKey ? 'bg-[#F4F1EA] shadow-[inset_3px_0_0_#1E3F35]' : ''
                     }`}
                   >
-                    <span className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-semibold text-[#1E2320] truncate">{t.eventTitle}</span>
-                      {t.unread > 0 && (
-                        <span className="shrink-0 min-w-5 h-5 px-1 rounded-full bg-[#1E3F35] text-white text-[10px] font-bold flex items-center justify-center">
-                          {t.unread > 99 ? '99+' : t.unread}
+                    <Avatar
+                      src=""
+                      name={t.otherName}
+                      className="w-10 h-10 rounded-full shrink-0"
+                      initialClassName="text-sm"
+                    />
+                    <span className="flex-1 min-w-0">
+                      <span className="flex items-center justify-between gap-2">
+                        <span className="text-[13px] font-semibold text-[#1E2320] truncate">{t.otherName}</span>
+                        {t.lastAt && (
+                          <span className="text-[10px] text-[#8C887E] whitespace-nowrap shrink-0">
+                            {fmtTime(t.lastAt)}
+                          </span>
+                        )}
+                      </span>
+                      <span className="block text-[11px] font-medium text-[#1E3F35]/80 truncate mt-0.5">
+                        {t.eventTitle}
+                      </span>
+                      <span className="flex items-center justify-between gap-2 mt-0.5">
+                        <span
+                          className={`block text-[11px] truncate ${
+                            t.unread > 0 ? 'font-semibold text-[#1E2320]' : 'text-[#5F635D]'
+                          }`}
+                        >
+                          {t.messages.length > 0
+                            ? snippetOf(t.messages[t.messages.length - 1])
+                            : 'No messages yet'}
                         </span>
-                      )}
+                        {t.unread > 0 && (
+                          <span className="shrink-0 min-w-5 h-5 px-1.5 rounded-full bg-[#1E3F35] text-white text-[10px] font-bold flex items-center justify-center">
+                            {t.unread > 99 ? '99+' : t.unread}
+                          </span>
+                        )}
+                      </span>
                     </span>
-                    <span className="block text-[11px] text-[#5F635D] truncate mt-0.5">
-                      {t.otherName}
-                      {t.messages.length > 0 && ` · ${snippetOf(t.messages[t.messages.length - 1])}`}
-                    </span>
-                    {t.lastAt && (
-                      <span className="block text-[10px] text-[#8C887E] mt-0.5">{fmtTime(t.lastAt)}</span>
-                    )}
                   </button>
                 </li>
               ))}
@@ -1348,19 +1432,23 @@ export function MessagesPage() {
 
         {/* Chat pane */}
         <div
-          className={`w-full md:flex-1 bg-white rounded-2xl border border-[#E5E1D8] overflow-hidden flex flex-col ${
-            mobileView === 'chat' ? 'block' : 'hidden md:flex'
+          className={`w-full md:flex-1 min-w-0 flex flex-col min-h-0 ${
+            mobileView === 'chat' ? 'flex' : 'hidden md:flex'
           }`}
         >
           {!selected ? (
-            <div className="p-12 text-center space-y-2">
-              <MessageCircle className="w-10 h-10 mx-auto text-[#1E3F35]" />
-              <p className="text-xs font-semibold text-[#1E2320]">Select a conversation</p>
-              <p className="text-[11px] text-[#5F635D]">Or start one from an event page.</p>
+            <div className="flex-1 flex flex-col items-center justify-center p-12 text-center space-y-3">
+              <div className="w-16 h-16 rounded-full bg-[#F4F1EA] flex items-center justify-center">
+                <MessageCircle className="w-7 h-7 text-[#1E3F35]" />
+              </div>
+              <p className="text-sm font-semibold text-[#1E2320]">Select a conversation</p>
+              <p className="text-xs text-[#5F635D] max-w-xs leading-relaxed">
+                Choose a chat on the left to read and reply — or start one from an event page.
+              </p>
             </div>
           ) : (
             <>
-              <div className="px-4 py-3 border-b border-[#EBE7DF] flex items-center gap-3">
+              <div className="px-4 py-3 border-b border-[#EBE7DF] bg-white flex items-center gap-3 shrink-0">
                 <button
                   type="button"
                   onClick={() => setMobileView('list')}
@@ -1369,9 +1457,15 @@ export function MessagesPage() {
                 >
                   <ArrowLeft className="w-4 h-4" />
                 </button>
+                <Avatar
+                  src=""
+                  name={selected.otherName}
+                  className="w-9 h-9 rounded-full shrink-0"
+                  initialClassName="text-xs"
+                />
                 <div className="min-w-0">
-                  <p className="text-xs font-semibold text-[#1E2320] truncate">{selected.eventTitle}</p>
-                  <p className="text-[11px] text-[#5F635D] truncate">With {selected.otherName}</p>
+                  <p className="text-[13px] font-semibold text-[#1E2320] truncate">{selected.otherName}</p>
+                  <p className="text-[11px] text-[#5F635D] truncate">{selected.eventTitle}</p>
                 </div>
                 {selected.otherEmail && (
                   <button
@@ -1388,7 +1482,7 @@ export function MessagesPage() {
               <div
                 ref={listRef}
                 onScroll={onListScroll}
-                className="flex-1 overflow-y-auto p-4 space-y-3 min-h-[300px] max-h-[60vh]"
+                className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-3 min-h-0 bg-[#FAF8F5]"
               >
                 {hasMore && (
                   <div className="flex justify-center pb-1">
@@ -1443,7 +1537,7 @@ export function MessagesPage() {
                           className={`max-w-[85%] rounded-2xl px-3 py-2 space-y-1 select-none ${
                             mine
                               ? 'bg-[#1E3F35] text-white rounded-br-md'
-                              : 'bg-[#F4F1EA] text-[#1E2320] rounded-bl-md'
+                              : 'bg-white text-[#1E2320] rounded-bl-md border border-[#E5E1D8] shadow-xs'
                           }${highlightId === m.id ? ' ring-2 ring-[#C25E00]' : ''}`}
                           style={{ WebkitTouchCallout: 'none' } as React.CSSProperties}
                           // L9 (audit #4): reply was pointer-only
@@ -1578,7 +1672,7 @@ export function MessagesPage() {
                 <div ref={bottomRef} />
               </div>
 
-              <div className="p-3 border-t border-[#EBE7DF] space-y-2">
+              <div className="p-3 sm:p-4 border-t border-[#EBE7DF] bg-white space-y-2 shrink-0">
                 {typing &&
                   (typing.threadKey === selected.key ||
                     typing.threadKey === threadKeyHash(selected.eventId, meEmail, selected.otherEmail)) && (
@@ -1626,7 +1720,7 @@ export function MessagesPage() {
                 {sendError && <p className="text-[11px] text-red-700">{sendError}</p>}
                 <div className="flex items-end gap-2">
                   <label
-                    className="p-2.5 rounded-lg border border-[#E2DFD8] bg-white hover:bg-[#F4F1EA] text-[#5F635D] cursor-pointer shrink-0"
+                    className="p-2.5 rounded-full border border-[#E2DFD8] bg-white hover:bg-[#F4F1EA] text-[#5F635D] cursor-pointer shrink-0 transition-colors"
                     title="Attach a file (video, image, PDF, Word, spreadsheet — max 20MB)"
                   >
                     <Paperclip className="w-4 h-4" />
@@ -1667,13 +1761,13 @@ export function MessagesPage() {
                     placeholder="Write a message…"
                     aria-label="Write a message"
                     rows={1}
-                    className="flex-1 min-w-0 text-xs bg-white border border-[#E2DFD8] rounded-lg p-2.5 text-[#1E2320] focus:border-[#1E3F35] resize-none"
+                    className="flex-1 min-w-0 text-xs bg-white border border-[#E2DFD8] rounded-2xl p-2.5 text-[#1E2320] focus:border-[#1E3F35] resize-none"
                   />
                   <button
                     type="button"
                     onClick={handleSend}
                     disabled={!draft.trim() && !file}
-                    className="p-2.5 rounded-lg border border-[#1E3F35] bg-[#1E3F35] hover:bg-[#163028] text-white disabled:opacity-60 transition-colors shrink-0"
+                    className="p-2.5 rounded-full border border-[#1E3F35] bg-[#1E3F35] hover:bg-[#163028] text-white disabled:opacity-60 transition-colors shrink-0"
                     aria-label="Send message"
                   >
                     <Send className="w-4 h-4" />

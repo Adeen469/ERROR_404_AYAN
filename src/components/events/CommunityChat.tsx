@@ -1022,16 +1022,21 @@ export function CommunityChat({
   }
 
   return (
-    <div className="p-6 bg-white rounded-xl border border-[#E5E1D8] space-y-4">
-      <div className="flex items-center gap-2">
-        <Users className="w-5 h-5 text-[#1E3F35]" />
-        <h2 className="font-editorial text-xl font-bold text-[#1E2320]">Community Chat</h2>
+    <div className="bg-white rounded-2xl border border-[#E5E1D8] shadow-sm overflow-hidden">
+      <div className="px-5 sm:px-6 pt-5 sm:pt-6 pb-4 flex items-start gap-3">
+        <div className="w-10 h-10 rounded-full bg-[#1E3F35] text-white flex items-center justify-center shrink-0">
+          <Users className="w-5 h-5" />
+        </div>
+        <div className="min-w-0">
+          <h2 className="font-editorial text-xl font-bold text-[#1E2320] leading-tight">Community Chat</h2>
+          <p className="text-xs text-[#5F635D] mt-1 leading-relaxed">
+            {isGlobal
+              ? 'Chat with everyone on Locora. Any signed-in member can see and post here — no email alerts are sent for community messages.'
+              : `Chat with everyone attending ${eventTitle}. Only confirmed attendees, the organizer and admins can see or post here — no email alerts are sent for community messages.`}
+          </p>
+        </div>
       </div>
-      <p className="text-xs text-[#5F635D] -mt-2">
-        {isGlobal
-          ? 'Chat with everyone on Locora. Any signed-in member can see and post here — no email alerts are sent for community messages.'
-          : `Chat with everyone attending ${eventTitle}. Only confirmed attendees, the organizer and admins can see or post here — no email alerts are sent for community messages.`}
-      </p>
+      <div className="px-5 sm:px-6 pb-5 sm:pb-6 space-y-4">
 
       {status === 'loading' && (
         <div className="space-y-3" aria-label="Loading the community chat">
@@ -1048,9 +1053,11 @@ export function CommunityChat({
       )}
 
       {status === 'locked' && (
-        <div className="p-4 bg-[#F4F1EA] border border-[#E2DFD8] rounded-lg space-y-2">
-          <p className="text-sm font-semibold text-[#1E2320] flex items-center gap-2">
-            <MessageCircle className="w-4 h-4" />
+        <div className="p-5 bg-[#F4F1EA] border border-[#E2DFD8] rounded-xl space-y-2 text-center sm:text-left">
+          <p className="text-sm font-semibold text-[#1E2320] flex items-center justify-center sm:justify-start gap-2">
+            <span className="w-8 h-8 rounded-full bg-white border border-[#E2DFD8] flex items-center justify-center shrink-0">
+              <MessageCircle className="w-4 h-4 text-[#1E3F35]" />
+            </span>
             Join this event to chat with attendees
           </p>
           <p className="text-xs text-[#5F635D] leading-relaxed">
@@ -1082,7 +1089,7 @@ export function CommunityChat({
           <div
             ref={listRef}
             onScroll={onListScroll}
-            className="space-y-3 max-h-[60vh] overflow-y-auto pr-1"
+            className="space-y-3 max-h-[65vh] overflow-y-auto pr-1 bg-[#FAF8F5] rounded-xl p-3 sm:p-4"
           >
             {hasMore && (
               <div className="flex justify-center pb-1">
@@ -1250,7 +1257,7 @@ export function CommunityChat({
             <div ref={bottomRef} />
           </div>
 
-          <div className="border-t border-[#E5E1D8] pt-3 space-y-2">
+          <div className="border-t border-[#E5E1D8] pt-4 space-y-2">
             {replyTo && (
               <div className="flex items-start justify-between gap-2 bg-[#F4F1EA] border border-[#E2DFD8] rounded-lg px-3 py-2">
                 <div className="min-w-0">
@@ -1293,7 +1300,7 @@ export function CommunityChat({
               </p>
             )}
             <div className="flex items-end gap-2">
-              <label className="shrink-0 p-2 text-[#1E3F35] hover:bg-[#F4F1EA] rounded-lg cursor-pointer transition-colors">
+              <label className="shrink-0 p-2 text-[#1E3F35] hover:bg-[#F4F1EA] rounded-full cursor-pointer transition-colors">
                 <Paperclip className="w-4 h-4" />
                 <span className="sr-only">Attach a file</span>
                 <input
@@ -1331,13 +1338,13 @@ export function CommunityChat({
                 maxLength={2000}
                 placeholder="Message the community…"
                 aria-label="Message the community"
-                className="flex-1 text-sm border border-[#D0E2D9] rounded-lg p-2.5 focus:outline-hidden focus:ring-1 focus:ring-[#1E3F35] resize-none"
+                className="flex-1 text-sm border border-[#D0E2D9] rounded-2xl p-2.5 focus:outline-hidden focus:ring-1 focus:ring-[#1E3F35] resize-none"
               />
               <button
                 type="button"
                 onClick={handleSend}
                 disabled={!draft.trim() && !file}
-                className="shrink-0 p-2.5 text-white bg-[#1E3F35] hover:bg-[#163028] rounded-lg transition-colors disabled:opacity-40"
+                className="shrink-0 p-2.5 text-white bg-[#1E3F35] hover:bg-[#163028] rounded-full transition-colors disabled:opacity-40"
                 aria-label="Send community message"
               >
                 <Send className="w-4 h-4" />
@@ -1352,6 +1359,7 @@ export function CommunityChat({
           </div>
         </>
       )}
+      </div>
 
       <ConfirmDialog
         isOpen={confirmDelete !== null}
