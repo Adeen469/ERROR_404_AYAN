@@ -337,6 +337,10 @@ export function MessagesPage() {
   const threadLongPressFired = useRef(false);
   const pollInFlight = useRef(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  // Inner-scroll lists (WhatsApp-style): the message lists scroll
+  // inside the chat card, not the page. One ref per list.
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const aiListRef = useRef<HTMLDivElement | null>(null);
   // Reply state: the message being quoted in the composer. The quote
   // bar above the composer shows it; handleSend clears it instantly
   // on send tap (see below).
@@ -901,23 +905,23 @@ export function MessagesPage() {
   }, [visibleMessages.length, tailKey]);
 
   // Switching threads always lands at the bottom, pill cleared.
-  // The AI pane has no bottomRef (its list is page-scrolled), so it
-  // scrolls the window to the document bottom instead.
+  // Each list scrolls inside the chat card: the AI list scrolls
+  // itself, the regular list lands on its bottom anchor.
   useEffect(() => {
     nearBottomRef.current = true;
     lastSeenKeyRef.current = '';
     setNewCount(0);
     if (selectedKey === AI_THREAD_KEY) {
-      window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'auto' });
+      aiListRef.current?.scrollTo({ top: aiListRef.current.scrollHeight, behavior: 'auto' });
     } else {
       bottomRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
     }
   }, [selectedKey]);
 
-  // The AI pane always lands at the bottom on a new message. The
-  // page itself scrolls now (no inner list container), so this
-  // scrolls the window — but never on mount or before the AI thread
-  // is open, or opening the page would yank the reader to the bottom.
+  // The AI pane always lands at the bottom on a new message,
+  // inside its own list — but never on mount or before the AI
+  // thread is open, or opening the page would yank the reader to
+  // the bottom.
   const aiScrollInit = useRef(false);
   useEffect(() => {
     if (!isAiSelected) return;
@@ -925,21 +929,19 @@ export function MessagesPage() {
       aiScrollInit.current = true;
       return;
     }
-    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
+    aiListRef.current?.scrollTo({ top: aiListRef.current.scrollHeight, behavior: 'smooth' });
   }, [aiMessages, aiSending, isAiSelected]);
 
-  // Page-scroll equivalent of the old inner-list scroll handler: the
-  // window is the scroller now, so near-bottom is measured against
-  // the document. Attached once; it only reads refs + setNewCount.
-  useEffect(() => {
-    const onScroll = () => {
-      const near = isNearBottom(document.documentElement);
-      nearBottomRef.current = near;
-      if (near) setNewCount(0);
-    };
-    window.addEventListener('scroll', onScroll, { passive: true });
-    return () => window.removeEventListener('scroll', onScroll);
-  }, []);
+  // Inner-list scroll handler: near-bottom is measured against the
+  // message list itself, so arriving messages only auto-scroll when
+  // the reader is already at the bottom.
+  function onListScroll() {
+    const el = listRef.current;
+    if (!el) return;
+    const near = isNearBottom(el);
+    nearBottomRef.current = near;
+    if (near) setNewCount(0);
+  }
 
   function jumpToBottom() {
     nearBottomRef.current = true;
@@ -956,10 +958,11 @@ export function MessagesPage() {
     if (loadingOlder || !hasMore || messages.length === 0) return;
     setLoadingOlder(true);
     setLoadOlderError('');
-    // Page scroll: the prepended rows push the reader's position
-    // down by their height — remember the height now so the scroll
-    // can be put back by exactly that much below.
-    const prevHeight = document.documentElement.scrollHeight;
+    // The prepended rows push the reader's position down by their
+    // height — remember the list height now so the scroll can be put
+    // back by exactly that much below.
+    const listEl = listRef.current;
+    const prevHeight = listEl ? listEl.scrollHeight : 0;
     try {
       const oldest = messages.reduce(
         (min, m) => ((m.createdAt || '') < min ? (m.createdAt as string) : min),
@@ -979,8 +982,9 @@ export function MessagesPage() {
       // Keep the message being read in place: scroll down by the
       // height the prepended rows added, after React has rendered them.
       window.setTimeout(() => {
-        const delta = document.documentElement.scrollHeight - prevHeight;
-        if (delta > 0) window.scrollBy(0, delta);
+        if (!listEl) return;
+        const delta = listEl.scrollHeight - prevHeight;
+        if (delta > 0) listEl.scrollTop += delta;
       }, 0);
     } catch {
       setLoadOlderError('Could not load older messages.');
@@ -1574,44 +1578,18 @@ export function MessagesPage() {
   }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
-      <div className="flex items-center gap-3 mb-5">
-        <div className="w-10 h-10 rounded-full bg-[#1E3F35] text-white flex items-center justify-center shrink-0">
-          <MessageCircle className="w-5 h-5" />
-        </div>
-        <div className="min-w-0">
-          <h1 className="font-editorial text-2xl font-bold text-[#1E2320] leading-tight">Messages</h1>
-          <p className="text-xs text-[#5F635D]">Chats with event organizers, all in one place.</p>
-        </div>
-        {totalUnread > 0 && (
-          <span className="ml-auto shrink-0 px-2.5 py-1 rounded-full bg-[#1E3F35] text-white text-[11px] font-bold">
-            {totalUnread > 99 ? '99+' : totalUnread} unread
-          </span>
-        )}
-      </div>
-
-      {loadError && (
-        <div className="mb-4 bg-white rounded-xl border border-red-200 p-4 flex items-center justify-between gap-3">
-          <p className="text-xs text-red-700">{loadError}</p>
-          <button
-            type="button"
-            onClick={() => loadMessages()}
-            className="px-3 py-1.5 text-xs font-semibold text-[#1E2320] bg-[#F4F1EA] hover:bg-[#EBE7DF] border border-[#E2DFD8] rounded-lg shrink-0"
-          >
-            Retry
-          </button>
-        </div>
-      )}
-
-      {/* Page-scroll layout: the card grows with its content and the
-          whole page scrolls with the browser's main scrollbar — no
-          fixed height and no inner scroll container on either pane,
-          so the chat fits every resolution and the composer scrolls
-          with the page. */}
-      <div className="flex items-stretch bg-white rounded-2xl border border-[#E5E1D8] shadow-sm overflow-hidden">
+    <div>
+      {/* WhatsApp-style full-height chat: the card fills the viewport
+          below the navbar and scrolls inside itself — the first
+          viewport shows only navbar + chat. The navbar is h-16
+          (Navbar.tsx: inner div h-16) plus its 1px bottom border, so
+          the chat box is 100dvh minus exactly that. The page header
+          and footer live below it in normal flow, reached via the
+          main scrollbar. */}
+      <div className="flex items-stretch bg-white border-b border-[#E5E1D8] overflow-hidden h-[calc(100dvh-4rem-1px)]">
         {/* Thread list */}
         <div
-          className={`w-full md:w-[340px] lg:w-[360px] shrink-0 flex flex-col border-r border-[#E5E1D8] ${
+          className={`w-full md:w-[340px] lg:w-[360px] shrink-0 flex flex-col min-h-0 border-r border-[#E5E1D8] ${
             mobileView === 'chat' ? 'hidden md:flex' : 'flex'
           }`}
         >
@@ -1635,7 +1613,7 @@ export function MessagesPage() {
             </div>
           </div>
           {loading ? (
-            <div className="p-4 space-y-3" aria-label="Loading conversations">
+            <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3" aria-label="Loading conversations">
               {[0, 1, 2].map((i) => (
                 <div key={i} className="animate-pulse space-y-2">
                   <div className="h-3 w-2/3 bg-[#EBE7DF] rounded" />
@@ -1644,7 +1622,7 @@ export function MessagesPage() {
               ))}
             </div>
           ) : (
-            <ul className="divide-y divide-[#EBE7DF]">
+            <ul className="flex-1 min-h-0 overflow-y-auto divide-y divide-[#EBE7DF]">
               {visibleThreads.map((t) => {
                 const isAi = t.key === AI_THREAD_KEY;
                 const isPinned = prefs.pinned.includes(t.key);
@@ -1764,7 +1742,7 @@ export function MessagesPage() {
 
         {/* Chat pane */}
         <div
-          className={`w-full md:flex-1 min-w-0 flex flex-col ${
+          className={`w-full md:flex-1 min-w-0 flex flex-col min-h-0 ${
             mobileView === 'chat' ? 'flex' : 'hidden md:flex'
           }`}
         >
@@ -1838,7 +1816,7 @@ export function MessagesPage() {
               )}
 
               {isAiSelected ? (
-                <div className="p-4 sm:p-5 space-y-3 bg-[#FAF8F5]">
+                <div ref={aiListRef} className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-3 bg-[#FAF8F5]">
                   {visibleAiMessages.length === 0 && !aiSending ? (
                     <div className="rounded-2xl border border-[#E7E3DB] bg-white p-5 max-w-md mx-auto mt-6">
                       <p className="font-editorial text-base text-[#1E2320]">Hi, I&apos;m Loco</p>
@@ -1890,7 +1868,7 @@ export function MessagesPage() {
                   )}
                 </div>
               ) : (
-              <div className="p-4 sm:p-5 space-y-3 bg-[#FAF8F5]">
+              <div ref={listRef} onScroll={onListScroll} className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-3 bg-[#FAF8F5]">
                 {hasMore && (
                   <div className="flex justify-center pb-1">
                     <button
@@ -2066,11 +2044,11 @@ export function MessagesPage() {
                   })
                 )}
                 {newCount > 0 && (
-                  <div className="pointer-events-none fixed bottom-6 left-1/2 z-30 flex -translate-x-1/2 justify-center">
+                  <div className="sticky bottom-2 z-10 flex justify-center">
                     <button
                       type="button"
                       onClick={jumpToBottom}
-                      className="pointer-events-auto px-3 py-1.5 text-[11px] font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-full shadow-lg"
+                      className="px-3 py-1.5 text-[11px] font-semibold text-white bg-[#1E3F35] hover:bg-[#163028] rounded-full shadow-lg"
                     >
                       {newCount} new message{newCount === 1 ? '' : 's'} ↓
                     </button>
@@ -2222,6 +2200,39 @@ export function MessagesPage() {
             </>
           )}
         </div>
+      </div>
+
+      {/* Page header, below the chat in normal flow — reached by
+          scrolling the main scrollbar, like the footer under it.
+          The first viewport shows only navbar + chat. */}
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
+        <div className="flex items-center gap-3 mb-5">
+          <div className="w-10 h-10 rounded-full bg-[#1E3F35] text-white flex items-center justify-center shrink-0">
+            <MessageCircle className="w-5 h-5" />
+          </div>
+          <div className="min-w-0">
+            <h1 className="font-editorial text-2xl font-bold text-[#1E2320] leading-tight">Messages</h1>
+            <p className="text-xs text-[#5F635D]">Chats with event organizers, all in one place.</p>
+          </div>
+          {totalUnread > 0 && (
+            <span className="ml-auto shrink-0 px-2.5 py-1 rounded-full bg-[#1E3F35] text-white text-[11px] font-bold">
+              {totalUnread > 99 ? '99+' : totalUnread} unread
+            </span>
+          )}
+        </div>
+
+        {loadError && (
+          <div className="mb-4 bg-white rounded-xl border border-red-200 p-4 flex items-center justify-between gap-3">
+            <p className="text-xs text-red-700">{loadError}</p>
+            <button
+              type="button"
+              onClick={() => loadMessages()}
+              className="px-3 py-1.5 text-xs font-semibold text-[#1E2320] bg-[#F4F1EA] hover:bg-[#EBE7DF] border border-[#E2DFD8] rounded-lg shrink-0"
+            >
+              Retry
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Right-click / long-press menu. The backdrop closes it on any
